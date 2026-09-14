@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-13
+
 ### Added
 - One-liner install (`scripts/install.sh`, Linux/systemd): arch
   detection, newest-release download with SHA256 (+ minisign when
@@ -387,7 +389,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Stuck presence after game close.
 
-[Unreleased]: https://github.com/yiesko/rsRPC/compare/v0.33.1...HEAD
+[Unreleased]: https://github.com/yiesko/rsRPC/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/yiesko/rsRPC/releases/tag/v0.34.0
 [0.33.1]: https://github.com/yiesko/rsRPC/releases/tag/v0.33.1
 [0.32.2]: https://github.com/yiesko/rsRPC/releases/tag/v0.32.2
 [0.32.1]: https://github.com/yiesko/rsRPC/releases/tag/v0.32.1
