@@ -1,7 +1,9 @@
 use std::{
   collections::HashMap,
-  sync::{Arc, Mutex, mpsc},
+  sync::{Arc, Mutex},
 };
+
+use super::utils::GaugeSender;
 
 use serde_json::Value;
 use simple_websockets::{Event, EventHub, Message, Responder};
@@ -15,7 +17,7 @@ use crate::{
 };
 
 // (last activity, client_id from the connect query, responder)
-type ActivityResponder = (Option<ActivityCmd>, Option<String>, Responder);
+pub(crate) type ActivityResponder = (Option<ActivityCmd>, Option<String>, Responder);
 
 #[derive(Clone)]
 pub(crate) struct WebsocketConnector {
@@ -26,7 +28,7 @@ pub(crate) struct WebsocketConnector {
   pub bound_port: Option<u16>,
   user: Arc<Mutex<RpcUser>>,
 
-  event_sender: mpsc::Sender<ActivityCmd>,
+  event_sender: GaugeSender<ActivityCmd>,
 }
 
 impl WebsocketConnector {
@@ -39,7 +41,7 @@ impl WebsocketConnector {
   /// (keeping the last `io::Error` as source) when no port in the range
   /// could be bound.
   pub(crate) fn new(
-    event_sender: mpsc::Sender<ActivityCmd>,
+    event_sender: GaugeSender<ActivityCmd>,
     ws_port_start: u16,
     ws_port_end: u16,
     user: Arc<Mutex<RpcUser>>,
@@ -213,7 +215,12 @@ impl WebsocketConnector {
               }
             }
 
-            match event.cmd.as_str() {
+            // Every arm reports whether the reply send succeeded: a `false`
+            // means the game client died without a clean `Disconnect`
+            // (kill -9, crashed game) and its slot — last activity plus any
+            // queued frames — must be released now, not pinned until a
+            // `Disconnect` that may lag behind under flood.
+            let alive = match event.cmd.as_str() {
               "INVITE_BROWSER" | "GUILD_TEMPLATE_BROWSER" | "GIFT_CODE_BROWSER" => {
                 if !secondary_events {
                   continue;
@@ -228,7 +235,7 @@ impl WebsocketConnector {
                 // clients wait for the lock-step reply.
                 responder
                   .2
-                  .send(Message::Text(commands::subscribe_ack(&event)));
+                  .send(Message::Text(commands::subscribe_ack(&event)))
               }
               "GET_USER" => {
                 let wanted = event.args.as_ref().and_then(|args| args.user_id.as_ref());
@@ -237,7 +244,7 @@ impl WebsocketConnector {
                 responder.2.send(Message::Text(commands::user_response(
                   &event,
                   matched.then_some(&user),
-                )));
+                )))
               }
               "SET_ACTIVITY" => {
                 if !set_activity {
@@ -257,7 +264,16 @@ impl WebsocketConnector {
                   &event.nonce,
                   code,
                   message,
-                )));
+                )))
+              }
+            };
+            if !alive {
+              // Same prompt release as the `Disconnect` arm below: the
+              // borrow of `responder` ended with the match, so removal is
+              // safe here.
+              log!("[Websocket] Client {} send failed, pruning", client_id);
+              if let Some(dead) = clients.remove(&client_id) {
+                handle_disconnect(client_id, &event_sender, &dead);
               }
             }
           }
@@ -281,11 +297,11 @@ fn event_args_as_hashmap(args: Option<ActivityCmdArgs>) -> HashMap<String, Value
   }
 }
 
-fn handle_browser_command(
+pub(crate) fn handle_browser_command(
   event: &ActivityCmd,
-  event_sender: &mpsc::Sender<ActivityCmd>,
+  event_sender: &GaugeSender<ActivityCmd>,
   responder: &Responder,
-) {
+) -> bool {
   // Discord error codes for unusable invite/template/gift ids.
   let (code, message) = if event.cmd == "GUILD_TEMPLATE_BROWSER" {
     (4017_u16, "Invalid guild template id")
@@ -301,13 +317,12 @@ fn handle_browser_command(
     .is_some_and(|code| !code.trim().is_empty());
   if !has_code {
     warn!("[Websocket] {} without code from client", event.cmd);
-    responder.send(Message::Text(commands::rpc_error(
+    return responder.send(Message::Text(commands::rpc_error(
       &event.cmd,
       &event.nonce,
       code,
       message,
     )));
-    return;
   }
 
   // Let's just assume this went well I don't care
@@ -323,22 +338,23 @@ fn handle_browser_command(
   // Send the event away!
   if event_sender.send(event.clone()).is_err() {
     warn!("[Websocket] Event receiver gone, dropping message");
-    return;
+    return true;
   }
 
   // Respond (client-supplied `data` may hold non-finite floats, which
   // JSON cannot encode: drop loudly instead of panicking the poll loop).
+  // Nothing was sent, so the client is still considered alive.
   let Ok(response) = serde_json::to_string(&response) else {
     warn!(
       "[Websocket] Dropping unserializable response for {}",
       event.cmd
     );
-    return;
+    return true;
   };
-  responder.send(Message::Text(response));
+  responder.send(Message::Text(response))
 }
 
-fn handle_deep_link(event: &ActivityCmd, responder: &Responder) {
+pub(crate) fn handle_deep_link(event: &ActivityCmd, responder: &Responder) -> bool {
   let response = ActivityCmd {
     application_id: event.application_id.clone(),
     cmd: event.cmd.clone(),
@@ -350,12 +366,12 @@ fn handle_deep_link(event: &ActivityCmd, responder: &Responder) {
 
   let Ok(response) = serde_json::to_string(&response) else {
     warn!("[Websocket] Dropping unserializable deep-link response");
-    return;
+    return true;
   };
-  responder.send(Message::Text(response));
+  responder.send(Message::Text(response))
 }
 
-fn handle_connections_callback(event: &ActivityCmd, responder: &Responder) {
+pub(crate) fn handle_connections_callback(event: &ActivityCmd, responder: &Responder) -> bool {
   let mut data = HashMap::new();
   data.insert("code".to_string(), Value::Number(1000.into()));
 
@@ -372,16 +388,16 @@ fn handle_connections_callback(event: &ActivityCmd, responder: &Responder) {
   // would be a coding bug, but the poll loop must not die on it.
   let Ok(response) = serde_json::to_string(&response) else {
     warn!("[Websocket] Dropping unserializable connections response");
-    return;
+    return true;
   };
-  responder.send(Message::Text(response));
+  responder.send(Message::Text(response))
 }
 
-fn handle_set_activity(
+pub(crate) fn handle_set_activity(
   event: &ActivityCmd,
-  event_sender: &mpsc::Sender<ActivityCmd>,
+  event_sender: &GaugeSender<ActivityCmd>,
   responder: &mut ActivityResponder,
-) {
+) -> bool {
   // Fall back to the client_id provided on connect (query param) when the
   // command itself does not carry an application_id.
   let mut event = event.clone();
@@ -398,19 +414,22 @@ fn handle_set_activity(
 
   if event_sender.send(event.clone()).is_err() {
     warn!("[Websocket] Event receiver gone, dropping message");
-    return;
+    return true;
   }
 
   // Confirm to the game client (arRPC-shaped reply); some RPC libraries
-  // wait for this before considering the presence set.
+  // wait for this before considering the presence set. No confirm to send
+  // means the client is still considered alive.
   if let Some(response) = commands::set_activity_response(&event) {
-    responder.2.send(Message::Text(response));
+    responder.2.send(Message::Text(response))
+  } else {
+    true
   }
 }
 
 fn handle_disconnect(
   _client_id: u64,
-  event_sender: &mpsc::Sender<ActivityCmd>,
+  event_sender: &GaugeSender<ActivityCmd>,
   responder: &ActivityResponder,
 ) {
   if let Some(ref activity_cmd) = responder.0 {

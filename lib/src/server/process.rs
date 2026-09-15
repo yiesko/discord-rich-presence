@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
 use std::time::Duration;
 
 #[cfg(not(target_os = "linux"))]
@@ -402,7 +401,7 @@ pub(crate) struct ProcessServer {
   /// EXEC publication closes that hole; repeats dedup downstream.
   scan_dirty: Arc<AtomicBool>,
 
-  pub event_sender: mpsc::Sender<ProcessDetectedEvent>,
+  pub event_sender: super::utils::GaugeSender<ProcessDetectedEvent>,
 
   event_listeners: Arc<Mutex<ProcessEventListeners>>,
 
@@ -536,7 +535,7 @@ impl ProcessServer {
   pub(crate) fn new_with_custom(
     detectable: Vec<Arc<DetectableActivity>>,
     custom: Vec<DetectableActivity>,
-    event_sender: mpsc::Sender<ProcessDetectedEvent>,
+    event_sender: super::utils::GaugeSender<ProcessDetectedEvent>,
     event_listeners: ProcessEventListeners,
     refresh: RefreshConfig,
     ignored_ids: Vec<String>,
@@ -848,7 +847,14 @@ impl ProcessServer {
     }
   }
 
-  pub(crate) fn start(&self, scan_interval: Duration) {
+  /// Start scan/refresh/watch threads. `watch_slot` receives the watch
+  /// backlog gauge once the watcher spawns (stays detached when the
+  /// watcher is disabled/unsupported, or on duplicate start).
+  pub(crate) fn start(
+    &self,
+    scan_interval: Duration,
+    watch_slot: &Arc<Mutex<super::utils::QueueGauge>>,
+  ) {
     // Double-start is a caller bug: ignore fail-safe instead of leaking
     // a second scan/dispatch/watch generation.
     if self.started.swap(true, std::sync::atomic::Ordering::AcqRel) {
@@ -1100,7 +1106,10 @@ impl ProcessServer {
     // failure keeps pure polling, silently.
     #[cfg(target_os = "linux")]
     if self.enable_proc_events {
-      spawn_proc_watcher(self);
+      let gauge = spawn_proc_watcher(self);
+      *watch_slot
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = gauge;
     } else {
       log!("[Process Scanner] proc-events watcher disabled by configuration, polling only");
     }
@@ -1582,16 +1591,21 @@ pub(crate) fn idle_wait(base: Duration, idle_ticks: u32) -> Duration {
 /// emits hits at once; EXIT of a tracked game unparks the scan loop for
 /// an immediate natural clear. Setup failure (or a dead receiver on
 /// shutdown) ends the thread quietly — polling carries on.
+/// Spawn the netlink watcher + dispatch threads. Returns the shared watch
+/// backlog gauge so the resource census can read it (the pair itself stays
+/// inside: `start` hands the gauge up to the daemon).
 #[cfg(target_os = "linux")]
-fn spawn_proc_watcher(server: &ProcessServer) {
+fn spawn_proc_watcher(server: &ProcessServer) -> super::utils::QueueGauge {
   use super::proc_events::{ProcEvent, watch};
+  use super::utils::QueueGauge;
 
-  let (tx, rx) = mpsc::channel();
+  let (tx, rx) = QueueGauge::pair();
+  let gauge = tx.gauge();
   let dispatch = server.clone();
   std::thread::spawn(move || {
     let mut variant_bufs: [String; 5] = Default::default();
     let mut reversed_path = String::with_capacity(256);
-    for event in rx {
+    while let Ok(event) = rx.recv() {
       match event {
         ProcEvent::Exec(pid) => {
           let Some(exec) = read_exec(pid) else {
@@ -1682,6 +1696,7 @@ fn spawn_proc_watcher(server: &ProcessServer) {
       }
     }
   });
+  gauge
 }
 
 /// Read one process's cmdline into an `Exec` (Linux). `None` for kernel

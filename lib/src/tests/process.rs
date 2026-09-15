@@ -6,6 +6,7 @@ use crate::server::process::{
   RefreshConfig, ScannedEntry, ScannedHit, build_aux_maps, exe_stem, first_sightings,
   match_name_or_folder, match_steam_id, name_matchable, normalize_name, undotted_names,
 };
+use crate::server::utils::QueueGauge;
 
 fn activity(id: &str, name: &str, steam_id: Option<&str>) -> Arc<DetectableActivity> {
   Arc::new(DetectableActivity {
@@ -461,7 +462,7 @@ fn ac_probe_needs_directories_that_cwd_reconstructs() {
     timestamp: None,
   };
   let arcs = vec![Arc::new(entry)];
-  let (_tx, _rx) = std::sync::mpsc::channel();
+  let (_tx, _rx) = QueueGauge::pair();
   let server = ProcessServer::new_with_custom(
     arcs.clone(),
     Vec::new(),
@@ -492,7 +493,7 @@ fn ac_probe_needs_directories_that_cwd_reconstructs() {
 fn appid_memo_caches_negative_lookups() {
   use crate::server::process::{ProcessEventListeners, ProcessServer};
 
-  let (_tx, _rx) = std::sync::mpsc::channel();
+  let (_tx, _rx) = QueueGauge::pair();
   let server = ProcessServer::new_with_custom(
     Vec::new(),
     Vec::new(),
@@ -870,7 +871,7 @@ fn proton_entry(
 fn proton_server(db: Vec<Arc<DetectableActivity>>) -> crate::server::process::ProcessServer {
   use crate::server::process::{ProcessEventListeners, ProcessServer};
 
-  let (_tx, _rx) = std::sync::mpsc::channel();
+  let (_tx, _rx) = QueueGauge::pair();
   ProcessServer::new_with_custom(
     db,
     Vec::new(),

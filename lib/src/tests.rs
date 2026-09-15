@@ -13,7 +13,9 @@ mod overrides;
 mod process;
 mod rpc_server;
 mod state;
+mod stats;
 mod user;
+mod websocket;
 
 /// Serializes every test that mutates process-global env: the variables
 /// are process-wide, so exactly one env borrower runs at a time (a
@@ -97,5 +99,102 @@ impl Drop for EnvRestore {
         None => std::env::remove_var(self.key),
       }
     }
+  }
+}
+
+/// A live raw-TCP websocket client against a throwaway hub, for tests that
+/// need a real server-side `Responder` (kill -9 / dead-tab simulation).
+/// Minimal RFC6455 handshake over `TcpStream`: no extra client dependency,
+/// only real code — `Responder::send` is exactly what the prune logic
+/// relies on.
+pub(crate) struct WsTestClient {
+  stream: std::net::TcpStream,
+  hub: simple_websockets::EventHub,
+  pub(crate) responder: simple_websockets::Responder,
+}
+
+impl WsTestClient {
+  /// Connect and wait (condition-poll, no sleep-guess) for the server-side
+  /// `Connect` event carrying the `Responder`.
+  pub(crate) fn connect() -> Self {
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind test listener");
+    let port = listener.local_addr().expect("test local addr").port();
+    let hub = simple_websockets::launch_from_listener(listener).expect("launch test hub");
+
+    let mut stream =
+      std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect test client");
+    stream
+      .set_read_timeout(Some(Duration::from_secs(5)))
+      .expect("set read timeout");
+    let req = format!(
+      "GET /?client_id=test HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).expect("handshake write");
+    let mut buf = vec![0u8; 4096];
+    let n = stream.read(&mut buf).expect("handshake read");
+    let resp = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+      resp.starts_with("HTTP/1.1 101"),
+      "expected 101 Switching Protocols, got: {resp}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let responder = loop {
+      if let Some(simple_websockets::Event::Connect(_, responder)) = hub.next_event() {
+        break responder;
+      }
+      assert!(
+        Instant::now() < deadline,
+        "timed out waiting for test Connect event"
+      );
+      std::thread::sleep(Duration::from_millis(10));
+    };
+    Self {
+      stream,
+      hub,
+      responder,
+    }
+  }
+
+  /// kill -9 simulation: drop TCP without a close frame, then wait until the
+  /// server task actually ends (`Responder::send` fails). Also drains the
+  /// explicit `Disconnect` event, proving both death signals fire.
+  /// Deterministic gate: assertions after this never depend on timing.
+  pub(crate) fn kill(self) -> simple_websockets::Responder {
+    use std::time::{Duration, Instant};
+
+    drop(self.stream);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+      if !self
+        .responder
+        .send(simple_websockets::Message::Text("probe".to_string()))
+      {
+        break;
+      }
+      assert!(
+        Instant::now() < deadline,
+        "dead test client's send never failed"
+      );
+      std::thread::sleep(Duration::from_millis(10));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+      if matches!(
+        self.hub.next_event(),
+        Some(simple_websockets::Event::Disconnect(_))
+      ) {
+        break;
+      }
+      assert!(
+        Instant::now() < deadline,
+        "dead test client never produced Disconnect"
+      );
+      std::thread::sleep(Duration::from_millis(10));
+    }
+    self.responder
   }
 }

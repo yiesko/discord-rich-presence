@@ -4,6 +4,7 @@ use server::{
   ipc::IpcConnector,
   ipc_utils::IpcFacilitator,
   process::{ProcessEventListeners, ProcessScanState, ProcessServer, RefreshConfig},
+  utils::{QueueGauge, STATS_INTERVAL_SECS, StatsCtx},
   websocket::WebsocketConnector,
 };
 use std::{
@@ -335,7 +336,7 @@ impl RPCServer {
   /// Propagates scan failures (`/proc` unreadable) and poisoned internal
   /// locks as [`RsrpcError`](crate::error::RsrpcError) variants.
   pub fn detect_once(&self) -> crate::error::Result<Vec<DetectedGame>> {
-    let (tx, _rx) = mpsc::channel();
+    let (tx, _rx) = QueueGauge::pair();
     // Staged overrides fold into the one-shot build, exactly like the
     // daemon's initial build — what you see here is what running publishes.
     let staged = self.staged_overrides.clone();
@@ -514,7 +515,8 @@ impl RPCServer {
   /// No process is killed: the caller (e.g. `cli/src/main.rs`) decides
   /// whether to exit. Never panics.
   pub fn start(&mut self) -> crate::error::Result<()> {
-    let (proc_event_sender, proc_event_receiver) = mpsc::channel();
+    let (proc_event_sender, proc_event_receiver) = QueueGauge::pair();
+    let proc_gauge = proc_event_sender.gauge();
     // Bounded IPC queue (backpressure, not drops): a spinning local
     // client throttles to bridge speed on a full queue instead of growing
     // it without bound. 64 absorbs any legitimate burst; ordering and
@@ -527,7 +529,11 @@ impl RPCServer {
     // (pre-change behavior, which never exhibited growth: the bridge
     // drains continuously and `Responder::send` never blocks).
     let (ipc_event_sender, ipc_event_receiver) = mpsc::sync_channel(EVENT_QUEUE_BOUND);
-    let (ws_event_sender, ws_event_reciever) = mpsc::channel();
+    let (ws_event_sender, ws_event_reciever) = QueueGauge::pair();
+    let ws_gauge = ws_event_sender.gauge();
+    // Filled by `ProcessServer::start` once the watcher spawns (stays
+    // zero when the watcher is disabled or unsupported).
+    let watch_slot = Arc::new(Mutex::new(QueueGauge::new()));
 
     // Shared READY identity (startup RSRPC_USER_* + runtime SET_USER).
     let user = Arc::new(Mutex::new(RpcUser::from_env()));
@@ -551,6 +557,19 @@ impl RPCServer {
       ws_event_reciever,
     )?;
     client_connector.set_extra_servers(ws_connector.bound_port, Some(ipc_connector.socket_path()));
+
+    // Resource census handles: every handle is a shared Arc, so snapshots
+    // read the live state no matter when they run. The watch slot fills
+    // once `ProcessServer::start` spawns the watcher below.
+    let stats = StatsCtx {
+      watch: watch_slot,
+      proc_events: proc_gauge,
+      ws_events: ws_gauge,
+      bridge_json: client_connector.json_clients.clone(),
+      bridge_msgpack: client_connector.msgpack_clients.clone(),
+      ws_clients: ws_connector.clients.clone(),
+    };
+    client_connector.set_stats_ctx(stats.clone());
 
     // Staged overrides fold into the initial scanner build below: one
     // automaton construction per boot instead of build-then-rebuild.
@@ -633,7 +652,10 @@ impl RPCServer {
         .process_server
         .lock()
         .map_err(|e| crate::error::RsrpcError::Poisoned("process_server", e.to_string()))?
-        .start(std::time::Duration::from_secs(config.scan_interval_secs));
+        .start(
+          std::time::Duration::from_secs(config.scan_interval_secs),
+          &stats.watch,
+        );
     }
     // Staged overrides were already folded into the initial scanner
     // build above (`new_with_custom`): post-start `append_detectables`
@@ -652,6 +674,23 @@ impl RPCServer {
     }
 
     log!("[RPC Server] Done! Watching for activity...");
+    log!("{}", stats.snapshot("boot"));
+    // Best-effort: a census thread must never fail boot.
+    if let Err(err) = std::thread::Builder::new()
+      .name("rsrpc-stats".to_string())
+      .spawn(move || {
+        loop {
+          std::thread::sleep(std::time::Duration::from_secs(STATS_INTERVAL_SECS));
+          log!("{}", stats.snapshot("hourly"));
+        }
+      })
+    {
+      warn!(
+        "[RPC Server] Stats thread failed to spawn ({}), continuing without census",
+        err
+      );
+    }
+
     self.connectors = Some(connectors);
     Ok(())
   }

@@ -286,8 +286,12 @@ pub(crate) struct ClientConnector {
   recent: Arc<Mutex<commands::RecentActivities>>,
 
   pub ipc_event_rec: Arc<Mutex<Option<std::sync::mpsc::Receiver<ActivityCmd>>>>,
-  pub proc_event_rec: Arc<Mutex<Option<std::sync::mpsc::Receiver<ProcessDetectedEvent>>>>,
-  pub ws_event_rec: Arc<Mutex<Option<std::sync::mpsc::Receiver<ActivityCmd>>>>,
+  pub proc_event_rec: Arc<Mutex<Option<super::utils::GaugeReceiver<ProcessDetectedEvent>>>>,
+  pub ws_event_rec: Arc<Mutex<Option<super::utils::GaugeReceiver<ActivityCmd>>>>,
+  /// Resource census handles, installed by the daemon once all channels
+  /// exist (see [`ClientConnector::set_stats_ctx`]). `None` until then:
+  /// transition lines are skipped, never fabricated.
+  stats_ctx: Option<super::utils::StatsCtx>,
 }
 
 impl ClientConnector {
@@ -304,8 +308,8 @@ impl ClientConnector {
     msgpack_port: u16,
     user: Arc<Mutex<RpcUser>>,
     ipc_event_rec: std::sync::mpsc::Receiver<ActivityCmd>,
-    proc_event_rec: std::sync::mpsc::Receiver<ProcessDetectedEvent>,
-    ws_event_rec: std::sync::mpsc::Receiver<ActivityCmd>,
+    proc_event_rec: super::utils::GaugeReceiver<ProcessDetectedEvent>,
+    ws_event_rec: super::utils::GaugeReceiver<ActivityCmd>,
   ) -> crate::error::Result<ClientConnector> {
     let (json_server, port) = launch_in_range(port_start, port_end, None, "JSON bridge")?;
     // The MessagePack port keeps its configured value unless it collides
@@ -354,7 +358,14 @@ impl ClientConnector {
       ipc_event_rec: Arc::new(Mutex::new(Some(ipc_event_rec))),
       proc_event_rec: Arc::new(Mutex::new(Some(proc_event_rec))),
       ws_event_rec: Arc::new(Mutex::new(Some(ws_event_rec))),
+      stats_ctx: None,
     })
+  }
+
+  /// Install the resource census handles (called once, before
+  /// [`start`](Self::start), when every channel and client map exists).
+  pub(crate) fn set_stats_ctx(&mut self, stats: super::utils::StatsCtx) {
+    self.stats_ctx = Some(stats);
   }
 
   /// Fill in the servers this struct does not bind itself (called once,
@@ -445,7 +456,8 @@ impl ClientConnector {
 
     std::thread::spawn(move || Self::event_loop(ipc_event_rec, ipc_clone));
     std::thread::spawn(move || Self::event_loop(ws_event_rec, ws_clone));
-    std::thread::spawn(move || Self::process_loop(proc_event_rec, proc_clone));
+    let stats_ctx = self.stats_ctx.clone();
+    std::thread::spawn(move || Self::process_loop(proc_event_rec, proc_clone, stats_ctx));
     // Periodic rebroadcast: bridge clients that missed a frame (or
     // connected between frames) converge on the cached presence.
     std::thread::spawn(move || {
@@ -573,8 +585,8 @@ impl ClientConnector {
   /// Handle activity commands coming from the IPC and WebSocket connectors.
   /// `SET_ACTIVITY` commands are translated into bridge payloads, everything
   /// else (INVITE_BROWSER, DEEP_LINK, ...) is forwarded as-is.
-  fn event_loop(rec: std::sync::mpsc::Receiver<ActivityCmd>, connector: ClientConnector) {
-    while let Ok(cmd) = rec.recv() {
+  fn event_loop(rec: impl super::utils::RecvQueue<ActivityCmd>, connector: ClientConnector) {
+    while let Ok(cmd) = rec.recv_q() {
       if cmd.cmd != "SET_ACTIVITY" {
         // Just send the event as-is, there isn't really anything to go off of here
         connector.broadcast_raw(&cmd);
@@ -728,8 +740,9 @@ impl ClientConnector {
   }
 
   fn process_loop(
-    rec: std::sync::mpsc::Receiver<ProcessDetectedEvent>,
+    rec: super::utils::GaugeReceiver<ProcessDetectedEvent>,
     connector: ClientConnector,
+    stats: Option<super::utils::StatsCtx>,
   ) {
     while let Ok(proc_event) = rec.recv() {
       let Some(hit) = proc_event.hit else {
@@ -747,6 +760,7 @@ impl ClientConnector {
           continue;
         }
 
+        let cleared = outstanding.len();
         for (pid, app_id) in outstanding {
           // Send an empty payload
           log!("[Client Connector] Sending empty payload");
@@ -755,6 +769,14 @@ impl ClientConnector {
           let payload = commands::empty_cached(pid, socket_id.clone());
 
           connector.broadcast_activity(payload, socket_id);
+        }
+        // Session boundary for the resource census: a game ended here, so
+        // RSS/queue movement around this timestamp correlates with churn.
+        if let Some(stats) = &stats {
+          log!(
+            "{}",
+            stats.snapshot(&format!("game-end {cleared} slot(s) cleared"))
+          );
         }
 
         continue;
@@ -837,6 +859,15 @@ impl ClientConnector {
         "[Client Connector] Publishing generic presence for activity: {}",
         game.name
       );
+
+      // Session boundary for the resource census: a game started here, so
+      // RSS/queue movement around this timestamp correlates with churn.
+      if let Some(stats) = &stats {
+        log!(
+          "{}",
+          stats.snapshot(&format!("game-start {} ({})", game.name, game.id.as_ref()))
+        );
+      }
 
       // Same bytes as the handoff resume path (one construction site).
       connector.broadcast_activity(generic_payload(&game), crate::SocketId::from(&game.id));
@@ -987,9 +1018,9 @@ impl ClientConnector {
   }
 
   /// Broadcast a non-activity event (e.g. INVITE_BROWSER) as-is to all clients.
-  fn broadcast_raw(&self, cmd: &ActivityCmd) {
-    let json_clients = self.json_clients.lock().unwrap_or_else(|e| e.into_inner());
-    let msgpack_clients = self
+  pub(crate) fn broadcast_raw(&self, cmd: &ActivityCmd) {
+    let mut json_clients = self.json_clients.lock().unwrap_or_else(|e| e.into_inner());
+    let mut msgpack_clients = self
       .msgpack_clients
       .lock()
       .unwrap_or_else(|e| e.into_inner());
@@ -1029,14 +1060,31 @@ impl ClientConnector {
         }
       }
     };
+    // Backpressure: same dead-client prune as `send_to_all` — a bridge
+    // client that died without a clean `Disconnect` (kill -9, dead tab)
+    // reports `false` here and must not pin its queued frames forever.
     if let Some(payload) = json_payload {
-      for responder in json_clients.values() {
-        responder.send(Message::Text(payload.clone()));
+      let dead: Vec<u64> = json_clients
+        .iter()
+        .filter_map(|(id, responder)| {
+          (!responder.send(Message::Text(payload.clone()))).then_some(*id)
+        })
+        .collect();
+      for id in dead {
+        warn!("[Client Connector] Pruning dead bridge client {id}");
+        json_clients.remove(&id);
       }
     }
     if let Some(payload) = msgpack_payload {
-      for responder in msgpack_clients.values() {
-        responder.send(Message::Binary(payload.clone()));
+      let dead: Vec<u64> = msgpack_clients
+        .iter()
+        .filter_map(|(id, responder)| {
+          (!responder.send(Message::Binary(payload.clone()))).then_some(*id)
+        })
+        .collect();
+      for id in dead {
+        warn!("[Client Connector] Pruning dead bridge client {id}");
+        msgpack_clients.remove(&id);
       }
     }
   }

@@ -3,6 +3,7 @@ use crate::server::client_connector::{
   ClientConnector, MAX_CACHED_ACTIVITIES, MAX_HANDOFF_ENTRIES, handle_bridge_control,
   is_genuine_clear, prune_cache, state_activities, take_process_clear,
 };
+use crate::server::utils::QueueGauge;
 use crate::user::RpcUser;
 
 fn test_user() -> std::sync::Arc<std::sync::Mutex<RpcUser>> {
@@ -43,8 +44,8 @@ fn genuine_clear_needs_nonzero_pid_and_null_activity() {
 fn clones_share_detection_state() {
   // ClientConnector::new binds bridge ports; use uncommon ones for the test.
   let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
-  let (_proc_tx, proc_rx) = std::sync::mpsc::channel();
-  let (_ws_tx, ws_rx) = std::sync::mpsc::channel();
+  let (_proc_tx, proc_rx) = QueueGauge::pair();
+  let (_ws_tx, ws_rx) = QueueGauge::pair();
   let a = ClientConnector::new(45971, 45981, 45972, test_user(), ipc_rx, proc_rx, ws_rx)
     .expect("test setup");
   let b = a.clone();
@@ -73,8 +74,8 @@ fn clones_share_detection_state() {
 fn process_clear_consumes_outstanding_publication_once() {
   // ClientConnector::new binds bridge ports; use uncommon ones for the test.
   let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
-  let (_proc_tx, proc_rx) = std::sync::mpsc::channel();
-  let (_ws_tx, ws_rx) = std::sync::mpsc::channel();
+  let (_proc_tx, proc_rx) = QueueGauge::pair();
+  let (_ws_tx, ws_rx) = QueueGauge::pair();
   let connector = ClientConnector::new(45973, 45983, 45974, test_user(), ipc_rx, proc_rx, ws_rx)
     .expect("test setup");
 
@@ -298,8 +299,8 @@ fn process_clear_drains_every_armed_slot_sorted() {
   use crate::server::client_connector::take_process_clear;
 
   let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
-  let (_proc_tx, proc_rx) = std::sync::mpsc::channel();
-  let (_ws_tx, ws_rx) = std::sync::mpsc::channel();
+  let (_proc_tx, proc_rx) = QueueGauge::pair();
+  let (_ws_tx, ws_rx) = QueueGauge::pair();
   let connector = ClientConnector::new(45977, 45987, 45978, test_user(), ipc_rx, proc_rx, ws_rx)
     .expect("test setup");
 
@@ -414,4 +415,28 @@ fn handoff_tables_are_bounded() {
     handoff.note_publish(&format!("live-app-{i}"), live);
   }
   assert_eq!(handoff.live_ipc_len(), MAX_HANDOFF_ENTRIES);
+}
+
+#[test]
+fn broadcast_raw_prunes_dead_bridge_client() {
+  // Real server-side Responder, kill -9 simulated: deterministic after the
+  // helper's gate (send already fails, Disconnect already drained).
+  let responder = super::WsTestClient::connect().kill();
+
+  // `new` binds but spawns no threads: deterministic, no background drain.
+  let (_ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+  let (_proc_tx, proc_rx) = QueueGauge::pair();
+  let (_ws_tx, ws_rx) = QueueGauge::pair();
+  let connector = ClientConnector::new(46171, 46181, 46172, test_user(), ipc_rx, proc_rx, ws_rx)
+    .expect("test setup");
+  connector.json_clients.lock().unwrap().insert(7, responder);
+  let cmd = ActivityCmd {
+    cmd: "INVITE_BROWSER".to_string(),
+    ..ActivityCmd::empty()
+  };
+  connector.broadcast_raw(&cmd);
+  assert!(
+    !connector.json_clients.lock().unwrap().contains_key(&7),
+    "dead bridge client must be pruned by broadcast_raw, like send_to_all does"
+  );
 }

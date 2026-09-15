@@ -37,7 +37,6 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::mpsc;
 
 use crate::{debug, log};
 
@@ -481,7 +480,7 @@ fn self_test(fd: i32) -> SelfTestReport {
 /// Block on `cn_proc` broadcasts forever, forwarding lifecycle events.
 /// Returns only on receive errors (the caller logs once and keeps
 /// polling); the fd is closed on the way out.
-pub(crate) fn watch(events: mpsc::Sender<ProcEvent>) -> Result<(), String> {
+pub(crate) fn watch(events: super::utils::GaugeSender<ProcEvent>) -> Result<(), String> {
   let (fd, ack_seen) = subscribe()?;
   let report = self_test(fd);
   if !report.live() {

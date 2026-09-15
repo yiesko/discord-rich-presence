@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `ClientConnector::broadcast_raw` now prunes dead bridge clients the same
+  way `send_to_all` already did: when `Responder::send` returns `false` the
+  client is removed and a `Pruning dead bridge client` warning is emitted.
+  Previously a bridge client that died without a clean disconnect (killed
+  process, closed browser tab) and only received `INVITE_BROWSER` /
+  `DEEP_LINK` events would keep its `Responder` and queued frames pinned in
+  memory forever (`lib/src/server/client_connector.rs:990`).
+- WebSocket game-client handlers (`handle_browser_command`, `handle_deep_link`,
+  `handle_connections_callback`, `handle_set_activity`) now report whether
+  their reply was delivered and the poll loop removes the client and runs
+  `handle_disconnect` when delivery fails, freeing the per-client last
+  activity slot the same way a clean `Disconnect` does
+  (`lib/src/server/websocket.rs:213`). Verified with real `Responder` tests
+  (RFC6455 handshake + killed-connection simulation with condition-wait for
+  `send==false` and `Disconnect`).
+
+### Added
+- Read-only resource census for long-session memory diagnosis (no behavior
+  change): `QueueGauge` / `GaugeSender` / `GaugeReceiver` wrappers around the
+  three previously unbounded channels (`watch` `lib/src/server/process.rs:1590`,
+  `proc` `lib/src/lib.rs:518`, `ws` `lib/src/lib.rs:532`) sharing an
+  `AtomicUsize` depth, plus a `StatsCtx` snapshot (`rss` via
+  `/proc/self/statm` on Linux, `n/a` elsewhere) with bridge `json`/`msgpack`
+  and `ws` client counts and all three queue depths
+  (`lib/src/server/utils.rs:46`). Logged hourly (`STATS_INTERVAL_SECS=3600`)
+  and at game session boundaries (`game-start` / `game-end` in
+  `lib/src/server/client_connector.rs:745`) as
+  `[rsrpc] stats (reason): rss=… bridge=json:N+msgpack:M ws=K queues=watch:X+proc:Y+ws:Z`
+  to distinguish a growing queue backlog (producer outrunning consumer) from
+  allocator retention / fragmentation (flat queues but climbing `rss`).
+- Tests `lib/src/tests/stats.rs` (gauge sharing, `rss_bytes`, snapshot shape)
+  and `lib/src/tests/websocket.rs` (dead vs live `Responder` liveness).
+
 ## [0.35.0] - 2026-09-15
 
 ### Breaking
