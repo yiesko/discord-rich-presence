@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-15
+
 ### Breaking
 - Removed `rsrpc::cmd::Button` (unreferenced; buttons travel as plain
   values) and the deprecated `get_user_response` shim (its one-release
@@ -446,7 +448,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Stuck presence after game close.
 
-[Unreleased]: https://github.com/yiesko/rsRPC/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/yiesko/rsRPC/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/yiesko/rsRPC/releases/tag/v0.35.0
 [0.34.0]: https://github.com/yiesko/rsRPC/releases/tag/v0.34.0
 [0.33.1]: https://github.com/yiesko/rsRPC/releases/tag/v0.33.1
 [0.32.2]: https://github.com/yiesko/rsRPC/releases/tag/v0.32.2
