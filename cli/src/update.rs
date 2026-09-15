@@ -442,6 +442,51 @@ fn download(url: &str, limit: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>
     .map_err(|err| -> Box<dyn std::error::Error> { format!("download failed: {err}").into() })
 }
 
+/// Stream a download straight to `path` while hashing it incrementally:
+/// the ~10MB release binary never sits whole in RAM (the old
+/// `read_to_vec` peak). Returns the hex SHA256. The configured `limit`
+/// is enforced by the reader itself, so a hostile server cannot fill
+/// the disk either. A partial file is left for the caller to remove.
+fn download_to_file(
+  url: &str,
+  path: &Path,
+  limit: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+  use std::io::Read;
+
+  // Bound in two steps: the config (and its reader) borrows the body,
+  // so the response must live in a local — not a temporary.
+  let response = rsrpc::http_agent(HTTP_TIMEOUT)
+    .get(url)
+    .header("Accept", "application/octet-stream")
+    .call()
+    .map_err(|err| -> Box<dyn std::error::Error> { format!("download failed: {err}").into() })?;
+  let mut body = response.into_body();
+  let mut body = body.with_config().limit(limit).reader();
+  let file = std::fs::File::create(path).map_err(|err| -> Box<dyn std::error::Error> {
+    format!("cannot stage update: {err}").into()
+  })?;
+  let mut file = std::io::BufWriter::new(file);
+  let mut hasher = Sha256::new();
+  let mut buf = [0u8; 64 * 1024];
+  loop {
+    let n = body
+      .read(&mut buf)
+      .map_err(|err| -> Box<dyn std::error::Error> { format!("download failed: {err}").into() })?;
+    if n == 0 {
+      break;
+    }
+    hasher.update(&buf[..n]);
+    std::io::Write::write_all(&mut file, &buf[..n]).map_err(
+      |err| -> Box<dyn std::error::Error> { format!("cannot stage update: {err}").into() },
+    )?;
+  }
+  std::io::Write::flush(&mut file).map_err(|err| -> Box<dyn std::error::Error> {
+    format!("cannot stage update: {err}").into()
+  })?;
+  Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Download, verify (SHA256 vs the release manifest) and stage an
 /// available update. Records it in the OTA state for
 /// [`apply_pending_on_boot`].
@@ -472,7 +517,8 @@ pub fn stage(
     .map_err(|err| format!("cannot stage update: {err}"))?;
 
   let staged = paths.staged_file();
-  let bytes = download(asset_url, BINARY_DOWNLOAD_LIMIT)?;
+  // Manifest first (tiny, in RAM): signature before anything else, so a
+  // bad release fails before the binary even starts downloading.
   let checksums_url = checksums_url
     .as_deref()
     .ok_or_else(|| -> Box<dyn std::error::Error> {
@@ -490,28 +536,33 @@ pub fn stage(
   // embedded release key vouches for it.
   let manifest_sig =
     String::from_utf8(manifest_sig).map_err(|err| format!("bad SHA256SUMS.txt.minisig: {err}"))?;
-  if let Err(err) = verify_signature(UPDATE_PUBKEY, &manifest, &manifest_sig) {
-    let _ = std::fs::remove_file(&staged);
-    return Err(err);
-  }
+  verify_signature(UPDATE_PUBKEY, &manifest, &manifest_sig)?;
   let manifest = String::from_utf8(manifest).map_err(|err| format!("bad SHA256SUMS.txt: {err}"))?;
   let expected = parse_checksums(&manifest)
     .remove(asset_name.as_str())
     .ok_or_else(|| -> Box<dyn std::error::Error> {
       format!("SHA256SUMS.txt has no entry for {asset_name}: refusing unverified binary").into()
     })?;
-  let actual = sha256_hex(&bytes);
+  // Stream the binary to a sibling temp file while hashing it: the
+  // ~10MB image never sits whole in RAM, and a failed download,
+  // checksum mismatch or crash never touches a previously verified
+  // staged image (nor its ota.json entry) — the partial file is simply
+  // removed. Same directory, so the final rename is atomic.
+  let tmp = staged.with_extension("part");
+  let actual = download_to_file(asset_url, &tmp, BINARY_DOWNLOAD_LIMIT).inspect_err(|_| {
+    let _ = std::fs::remove_file(&tmp);
+  })?;
   if actual != expected {
-    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_file(&tmp);
     return Err(format!("checksum mismatch for {asset_name}: refusing unverified binary").into());
   }
-  if let Err(err) = std::fs::write(&staged, &bytes) {
-    let _ = std::fs::remove_file(&staged);
+  #[cfg(unix)]
+  if let Err(err) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)) {
+    let _ = std::fs::remove_file(&tmp);
     return Err(format!("cannot stage update: {err}").into());
   }
-  #[cfg(unix)]
-  if let Err(err) = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)) {
-    let _ = std::fs::remove_file(&staged);
+  if let Err(err) = std::fs::rename(&tmp, &staged) {
+    let _ = std::fs::remove_file(&tmp);
     return Err(format!("cannot stage update: {err}").into());
   }
   save_state(

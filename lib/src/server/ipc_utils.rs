@@ -35,7 +35,7 @@ pub(crate) trait IpcFacilitator {
 
   fn start(&mut self);
 
-  fn event_sender(&mut self) -> &mut mpsc::Sender<ActivityCmd>;
+  fn event_sender(&mut self) -> &mut mpsc::SyncSender<ActivityCmd>;
 }
 
 #[derive(Debug)]
@@ -103,7 +103,7 @@ fn send_close(stream: &mut Stream, code: u16, message: &str) {
 
 #[allow(clippy::result_large_err)]
 pub(crate) fn send_empty(
-  event_sender: &mut mpsc::Sender<ActivityCmd>,
+  event_sender: &mut mpsc::SyncSender<ActivityCmd>,
   pid: u64,
 ) -> Result<(), mpsc::SendError<ActivityCmd>> {
   log!("[IPC] Sending empty activity");

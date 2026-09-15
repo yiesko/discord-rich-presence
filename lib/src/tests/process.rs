@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::detection::{DetectableActivity, ThirdPartySku};
 use crate::server::process::{
-  build_aux_maps, exe_stem, first_sightings, match_name_or_folder, match_steam_id, name_matchable,
-  normalize_name, undotted_names,
+  RefreshConfig, ScannedEntry, ScannedHit, build_aux_maps, exe_stem, first_sightings,
+  match_name_or_folder, match_steam_id, name_matchable, normalize_name, undotted_names,
 };
 
 fn activity(id: &str, name: &str, steam_id: Option<&str>) -> Arc<DetectableActivity> {
@@ -48,6 +48,41 @@ fn activity(id: &str, name: &str, steam_id: Option<&str>) -> Arc<DetectableActiv
   })
 }
 
+/// Slim scanner form of full public entries, like the bundle holds them
+/// (converted once at the build boundary).
+fn slim_db(entries: Vec<Arc<DetectableActivity>>) -> Vec<Arc<ScannedEntry>> {
+  entries
+    .iter()
+    .map(|entry| Arc::new(ScannedEntry::from_activity(entry)))
+    .collect()
+}
+
+#[test]
+fn scanned_entry_keeps_only_matcher_inputs() {
+  use crate::detection::ThirdPartySku;
+  use crate::server::process::ScannedEntry;
+
+  let mut mixed = (*activity("1", "Mixed Game", Some("123"))).clone();
+  mixed
+    .third_party_skus
+    .as_mut()
+    .unwrap()
+    .push(ThirdPartySku {
+      distributor: "epic".to_string(),
+      id: Some("epic-id".to_string()),
+      sku: None,
+    });
+  // Only the steam distributor id survives the conversion; epic is dead
+  // weight no matcher reads.
+  let slim = ScannedEntry::from_activity(&mixed);
+  let (id, name): (&str, &str) = (&slim.id, &slim.name);
+  assert_eq!(id, "1");
+  assert_eq!(name, "Mixed Game");
+  assert_eq!(slim.steam_ids.len(), 1);
+  let steam: &str = &slim.steam_ids[0];
+  assert_eq!(steam, "123");
+}
+
 #[test]
 fn exe_stem_strips_dirs_and_extension() {
   assert_eq!(
@@ -87,10 +122,18 @@ fn normalize_name_drops_windows_forbidden_punctuation() {
 fn first_sightings_reports_each_id_once() {
   use std::collections::HashSet;
 
-  let db = vec![
+  use crate::server::process::ScannedEntry;
+
+  // Slim scanner form, like the bundle holds it: full public entries
+  // convert once at the boundary (see `ScannedEntry::from_activity`).
+  let full = vec![
     activity("1", "How to Fish", Some("4001890")),
     activity("2", "Meccha Chameleon", Some("4704690")),
   ];
+  fn hit(entry: Arc<ScannedEntry>) -> ScannedHit {
+    ScannedHit::stamp(entry, 4242)
+  }
+  let db: Vec<ScannedHit> = slim_db(full.clone()).into_iter().map(hit).collect();
   let mut seen = HashSet::new();
   // First tick: everything new.
   let first = first_sightings(&mut seen, &db);
@@ -99,18 +142,21 @@ fn first_sightings_reports_each_id_once() {
   let again = vec![db[1].clone(), db[0].clone(), db[0].clone()];
   assert!(first_sightings(&mut seen, &again).is_empty());
   // A newcomer is reported alone.
-  let db2 = vec![db[0].clone(), activity("3", "Bluefin Tuna", None)];
+  let db2: Vec<ScannedHit> = slim_db(vec![full[0].clone(), activity("3", "Bluefin Tuna", None)])
+    .into_iter()
+    .map(hit)
+    .collect();
   let fresh = first_sightings(&mut seen, &db2);
   assert_eq!(fresh.len(), 1);
-  assert_eq!(fresh[0].id, "3");
+  assert_eq!(&*fresh[0].entry.id, "3");
 }
 
 #[test]
 fn aux_maps_cover_empty_executable_entries() {
-  let db = vec![
+  let db = slim_db(vec![
     activity("1", "How to Fish", Some("4001890")),
     activity("2", "Fish", Some("999")),
-  ];
+  ]);
   let (steam_map, name_map) = build_aux_maps(&db);
   assert_eq!(steam_map.get("4001890"), Some(&0));
   // multi-word name indexed, single-word name excluded
@@ -120,18 +166,18 @@ fn aux_maps_cover_empty_executable_entries() {
 
 #[test]
 fn aux_match_finds_custom_steam_sku_without_executables() {
-  let db = vec![activity("1", "How to Fish", Some("4001890"))];
+  let db = slim_db(vec![activity("1", "How to Fish", Some("4001890"))]);
   let (steam_map, _) = build_aux_maps(&db);
   // Override carrying only a steam distributor id (no executables to
   // index): invisible to the map, must still match as custom fallback.
-  let custom = vec![activity("9", "Custom Fish Port", Some("1234567"))];
+  let custom = slim_db(vec![activity("9", "Custom Fish Port", Some("1234567"))]);
 
   let hit = match_steam_id(Some("1234567"), 321, &steam_map, &db, &custom);
-  assert_eq!(hit.unwrap().id, "9");
+  assert_eq!(&*hit.unwrap().entry.id, "9");
 
   // Canonical map hits still win over the custom fallback.
   let hit = match_steam_id(Some("4001890"), 322, &steam_map, &db, &custom);
-  assert_eq!(hit.unwrap().id, "1");
+  assert_eq!(&*hit.unwrap().entry.id, "1");
 
   // Unknown ids miss everywhere.
   let miss = match_steam_id(Some("7654321"), 323, &steam_map, &db, &custom);
@@ -170,7 +216,7 @@ fn colon_titled_game_matches_spaceless_folder() {
       &mut obs_open,
     )
     .expect("folder words must match the punctuated title");
-  assert_eq!(hit.id, "4242");
+  assert_eq!(&*hit.entry.id, "4242");
 }
 
 #[test]
@@ -213,17 +259,17 @@ fn main_pattern_beats_custom_across_stripped_variants() {
       &mut obs_open,
     )
     .expect("stripped variant must match");
-  assert_eq!(hit.id, "1");
+  assert_eq!(&*hit.entry.id, "1");
 }
 
 #[test]
 fn aux_match_prefers_steam_then_name() {
-  let db = vec![activity("1", "How to Fish", Some("4001890"))];
+  let db = slim_db(vec![activity("1", "How to Fish", Some("4001890"))]);
   let (steam_map, name_map) = build_aux_maps(&db);
 
   // Steam AppId hit (legit Steam install)
   let hit = match_steam_id(Some("4001890"), 123, &steam_map, &db, &[]);
-  assert_eq!(hit.unwrap().id, "1");
+  assert_eq!(&*hit.unwrap().entry.id, "1");
 
   // No AppId (launcher shortcut): exe-stem fallback hits the same entry
   let hit = match_name_or_folder(
@@ -233,7 +279,7 @@ fn aux_match_prefers_steam_then_name() {
     &undotted_names(&name_map),
     &db,
   );
-  assert_eq!(hit.unwrap().id, "1");
+  assert_eq!(&*hit.unwrap().entry.id, "1");
 
   // Generic shell must never match
   let miss = match_name_or_folder(
@@ -248,10 +294,10 @@ fn aux_match_prefers_steam_then_name() {
 
 #[test]
 fn aux_match_falls_back_to_install_folder() {
-  let db = vec![
+  let db = slim_db(vec![
     activity("1", "How to Fish", Some("4001890")),
     activity("2", "Meccha Chameleon", Some("4704690")),
-  ];
+  ]);
   let (steam_map, name_map) = build_aux_maps(&db);
 
   // Hydra-style layout: generic Unreal exe, title only in the folders
@@ -263,12 +309,12 @@ fn aux_match_falls_back_to_install_folder() {
     &undotted_names(&name_map),
     &db,
   );
-  assert_eq!(hit.unwrap().id, "2");
+  assert_eq!(&*hit.unwrap().entry.id, "2");
 
   // Steam AppId still wins over a conflicting folder name (the folder
   // alone would say "2", the store id says "1").
   let hit = match_steam_id(Some("4001890"), 202, &steam_map, &db, &[]);
-  assert_eq!(hit.unwrap().id, "1");
+  assert_eq!(&*hit.unwrap().entry.id, "1");
   let folder_says = match_name_or_folder(
     "/home/user/steamapps/common/meccha chameleon/game.exe",
     202,
@@ -276,7 +322,7 @@ fn aux_match_falls_back_to_install_folder() {
     &undotted_names(&name_map),
     &db,
   );
-  assert_eq!(folder_says.unwrap().id, "2");
+  assert_eq!(&*folder_says.unwrap().entry.id, "2");
 
   // Generic folders alone never match, even nested deep.
   let miss = match_name_or_folder(
@@ -297,7 +343,7 @@ fn aux_match_falls_back_to_install_folder() {
     &undotted_names(&name_map),
     &db,
   );
-  assert_eq!(hit.unwrap().id, "1");
+  assert_eq!(&*hit.unwrap().entry.id, "1");
 }
 
 #[test]
@@ -416,15 +462,13 @@ fn ac_probe_needs_directories_that_cwd_reconstructs() {
   };
   let arcs = vec![Arc::new(entry)];
   let (_tx, _rx) = std::sync::mpsc::channel();
-  let server = ProcessServer::new(
+  let server = ProcessServer::new_with_custom(
     arcs.clone(),
+    Vec::new(),
     _tx,
     ProcessEventListeners::default(),
-    None,
-    false,
-    None,
+    RefreshConfig::default(),
     Vec::new(),
-    None,
   );
   let bundle = server.bundle();
   let reversed = |path: &str| path.chars().rev().collect::<String>();
@@ -438,9 +482,34 @@ fn ac_probe_needs_directories_that_cwd_reconstructs() {
   assert_eq!(
     server
       .ac_probe(&reversed("/games/doom/doomx64.exe"), &bundle)
-      .map(|(obj, _)| obj.id.clone()),
+      .map(|(obj, _)| obj.id.to_string()),
     Some("424242424242424242".to_string())
   );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn appid_memo_caches_negative_lookups() {
+  use crate::server::process::{ProcessEventListeners, ProcessServer};
+
+  let (_tx, _rx) = std::sync::mpsc::channel();
+  let server = ProcessServer::new_with_custom(
+    Vec::new(),
+    Vec::new(),
+    _tx,
+    ProcessEventListeners::default(),
+    RefreshConfig::default(),
+    Vec::new(),
+  );
+  // No such pid, so environ is unreadable: verified Absent, and the
+  // second lookup serves the memo (no re-read).
+  let dead = u64::MAX - 7;
+  assert_eq!(server.cached_app_id(dead), None);
+  assert_eq!(server.cached_app_id(dead), None);
+  // EXEC invalidation forces exactly one re-read, then Absent again.
+  server.drop_appid(dead);
+  assert_eq!(server.cached_app_id(dead), None);
+  assert_eq!(server.cached_app_id(dead), None);
 }
 
 #[test]
@@ -491,7 +560,7 @@ fn conditional_refresh_skips_unchanged_database() {
   let no_hash = None;
 
   // No tag yet: full fetch, empty DB, tag captured.
-  let (tag, empty) = match fetch_detectable_etag(&url, None, no_hash).unwrap() {
+  let (tag, empty) = match fetch_detectable_etag(&url, None, no_hash, no_hash).unwrap() {
     crate::server::process::FetchOutcome::Updated {
       etag, detectable, ..
     } => (etag, detectable),
@@ -505,15 +574,197 @@ fn conditional_refresh_skips_unchanged_database() {
 
   // Same tag: 304, nothing downloaded or parsed.
   assert!(matches!(
-    fetch_detectable_etag(&url, Some(&tag), no_hash),
+    fetch_detectable_etag(&url, Some(&tag), no_hash, no_hash),
     Ok(crate::server::process::FetchOutcome::Unchanged)
   ));
 
   // Rotated tag, identical bytes: no rebuild (the flap case).
   let known = crate::server::process::body_hash("[]");
   assert!(matches!(
-    fetch_detectable_etag(&url, Some("\"stale\""), Some(known)),
+    fetch_detectable_etag(&url, Some("\"stale\""), Some(known), no_hash),
     Ok(crate::server::process::FetchOutcome::SameContent { .. })
+  ));
+}
+
+#[test]
+fn conditional_refresh_skips_identical_games_under_new_bytes() {
+  use std::io::{Read, Write};
+
+  use crate::server::process::fetch_detectable_etag;
+
+  // Same games, different raw bytes (whitespace churn around the payload):
+  // the trimmed hash matches, so no rebuild happens.
+  let bodies = [
+    r#"[{"id":"1","name":"Doom"}]"#,
+    "[ { \"id\" : \"1\" , \"name\" : \"Doom\" } ]",
+  ];
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+  std::thread::spawn(move || {
+    // Three serves: first fetch, rotated-tag fetch, and the hash
+    // round-trip fetch below.
+    for stream in listener.incoming().take(3) {
+      let mut stream = match stream {
+        Ok(stream) => stream,
+        Err(_) => continue,
+      };
+      let mut buf = vec![0u8; 4096];
+      let _ = stream.read(&mut buf);
+      let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % bodies.len();
+      let db = bodies[n];
+      let body = format!(
+        "HTTP/1.1 200 OK\r\nETag: \"tag-{n}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        db.len(),
+        db
+      );
+      let _ = stream.write_all(body.as_bytes());
+    }
+  });
+  let url = format!("http://127.0.0.1:{port}/db");
+
+  // First fetch: new content, full update.
+  let (raw, trimmed) = match fetch_detectable_etag(&url, None, None, None).unwrap() {
+    crate::server::process::FetchOutcome::Updated {
+      content_hash,
+      trimmed_hash,
+      detectable,
+      ..
+    } => {
+      assert_eq!(detectable.len(), 1);
+      (content_hash, trimmed_hash)
+    }
+    other => panic!(
+      "first fetch must update, got {}",
+      matches!(other, crate::server::process::FetchOutcome::Unchanged)
+    ),
+  };
+
+  // Second fetch: same game, different bytes, new tag — same content.
+  // The carried hashes must also round-trip: a third fetch of either
+  // body takes a fast path without re-parsing.
+  let (raw2, trimmed2) = match fetch_detectable_etag(&url, None, Some(raw), Some(trimmed)).unwrap()
+  {
+    crate::server::process::FetchOutcome::SameContent {
+      content_hash,
+      trimmed_hash,
+      ..
+    } => (content_hash, trimmed_hash),
+    other => panic!(
+      "second fetch must be same-content, got {}",
+      matches!(other, crate::server::process::FetchOutcome::Unchanged)
+    ),
+  };
+  assert!(matches!(
+    fetch_detectable_etag(&url, None, Some(raw2), Some(trimmed2)),
+    Ok(crate::server::process::FetchOutcome::SameContent { .. })
+  ));
+}
+
+#[test]
+fn conditional_refresh_ignores_metadata_churn() {
+  use std::io::{Read, Write};
+
+  use crate::server::process::fetch_detectable_etag;
+
+  // Same scanner-visible games in the same order, but the CDN rewrote
+  // every scanner-ignored field (descriptions, hook flags): the
+  // canonical projection hash matches, so no rebuild happens. (Entry
+  // *order* is significant — see the reorder test below.)
+  let bodies = [
+    r#"[{"id":"1","name":"Doom","description":"A","hook":true},{"id":"2","name":"Quake","description":"B","hook":true}]"#,
+    r#"[ { "id" : "1" , "description" : "ALSO CHANGED" , "name" : "Doom" } ,
+         { "name" : "Quake" , "description" : "CHANGED" , "id" : "2" } ]"#,
+  ];
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+  std::thread::spawn(move || {
+    for stream in listener.incoming().take(2) {
+      let mut stream = match stream {
+        Ok(stream) => stream,
+        Err(_) => continue,
+      };
+      let mut buf = vec![0u8; 4096];
+      let _ = stream.read(&mut buf);
+      let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % bodies.len();
+      let db = bodies[n];
+      let body = format!(
+        "HTTP/1.1 200 OK\r\nETag: \"tag-{n}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        db.len(),
+        db
+      );
+      let _ = stream.write_all(body.as_bytes());
+    }
+  });
+  let url = format!("http://127.0.0.1:{port}/db");
+
+  let (raw, trimmed) = match fetch_detectable_etag(&url, None, None, None).unwrap() {
+    crate::server::process::FetchOutcome::Updated {
+      content_hash,
+      trimmed_hash,
+      detectable,
+      ..
+    } => {
+      assert_eq!(detectable.len(), 2);
+      (content_hash, trimmed_hash)
+    }
+    _ => panic!("first fetch must update"),
+  };
+  assert!(matches!(
+    fetch_detectable_etag(&url, None, Some(raw), Some(trimmed)),
+    Ok(crate::server::process::FetchOutcome::SameContent { .. })
+  ));
+}
+
+#[test]
+fn conditional_refresh_rebuilds_on_reorder() {
+  use std::io::{Read, Write};
+
+  use crate::server::process::fetch_detectable_etag;
+
+  // Same games, swapped entry order: the canonical hash preserves body
+  // order because first-wins index ties depend on it (two entries
+  // sharing a matchable name would swap winners). A reorder must
+  // rebuild, never silently keep the stale winner.
+  let bodies = [
+    r#"[{"id":"1","name":"Doom"},{"id":"2","name":"Quake"}]"#,
+    r#"[{"id":"2","name":"Quake"},{"id":"1","name":"Doom"}]"#,
+  ];
+  let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+  let port = listener.local_addr().unwrap().port();
+  let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+  std::thread::spawn(move || {
+    for stream in listener.incoming().take(2) {
+      let mut stream = match stream {
+        Ok(stream) => stream,
+        Err(_) => continue,
+      };
+      let mut buf = vec![0u8; 4096];
+      let _ = stream.read(&mut buf);
+      let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize % bodies.len();
+      let db = bodies[n];
+      let body = format!(
+        "HTTP/1.1 200 OK\r\nETag: \"tag-{n}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        db.len(),
+        db
+      );
+      let _ = stream.write_all(body.as_bytes());
+    }
+  });
+  let url = format!("http://127.0.0.1:{port}/db");
+
+  let (raw, trimmed) = match fetch_detectable_etag(&url, None, None, None).unwrap() {
+    crate::server::process::FetchOutcome::Updated {
+      content_hash,
+      trimmed_hash,
+      ..
+    } => (content_hash, trimmed_hash),
+    _ => panic!("first fetch must update"),
+  };
+  assert!(matches!(
+    fetch_detectable_etag(&url, None, Some(raw), Some(trimmed)),
+    Ok(crate::server::process::FetchOutcome::Updated { .. })
   ));
 }
 
@@ -521,7 +772,7 @@ fn conditional_refresh_skips_unchanged_database() {
 fn apply_ignore_list_drops_only_ignored_ids() {
   use std::sync::Arc;
 
-  use crate::detection::DetectableActivity;
+  use crate::server::process::ScannedHit;
   use crate::server::process::apply_ignore_list;
 
   fn activity(id: &str) -> Arc<DetectableActivity> {
@@ -559,13 +810,16 @@ fn apply_ignore_list_drops_only_ignored_ids() {
     })
   }
 
-  let detected = vec![activity("1"), activity("2"), activity("3")];
+  let detected: Vec<ScannedHit> = slim_db(vec![activity("1"), activity("2"), activity("3")])
+    .into_iter()
+    .map(|entry| ScannedHit::stamp(entry, 100))
+    .collect();
   // Empty list: everything passes, order preserved.
   let kept = apply_ignore_list(detected.clone(), &HashSet::new());
   assert_eq!(kept.len(), 3);
   // Ignored ids drop; the rest keep order (first-element semantics kept).
   let kept = apply_ignore_list(detected, &["2".to_string()].into_iter().collect());
-  let ids: Vec<_> = kept.iter().map(|game| game.id.clone()).collect();
+  let ids: Vec<_> = kept.iter().map(|game| game.entry.id.to_string()).collect();
   assert_eq!(ids, vec!["1".to_string(), "3".to_string()]);
 }
 
@@ -617,16 +871,32 @@ fn proton_server(db: Vec<Arc<DetectableActivity>>) -> crate::server::process::Pr
   use crate::server::process::{ProcessEventListeners, ProcessServer};
 
   let (_tx, _rx) = std::sync::mpsc::channel();
-  ProcessServer::new(
+  ProcessServer::new_with_custom(
     db,
+    Vec::new(),
     _tx,
     ProcessEventListeners::default(),
-    None,
-    false,
-    None,
+    RefreshConfig::default(),
     Vec::new(),
-    None,
   )
+}
+
+#[test]
+fn os_name_maps_hot_values_and_owns_exotics() {
+  use crate::server::process::{OsName, ScannedEntry};
+
+  // Hot values cost nothing and compare by variant.
+  assert_eq!(OsName::from_str("win32"), OsName::Win32);
+  assert_eq!(OsName::from_str("linux"), OsName::Linux);
+  assert_eq!(OsName::from_str("darwin"), OsName::Darwin);
+  assert!(OsName::from_str("").is_empty());
+  // Exotics round-trip owned (no process-lifetime leak): each conversion
+  // owns its copy, freed with its generation.
+  let exotic = proton_entry("1", "Exotic Game", Some(("game.exe", "plan9", false)), None);
+  let slim = ScannedEntry::from_activity(&exotic);
+  assert_eq!(slim.executables[0].os.as_str(), "plan9");
+  let moved = ScannedEntry::from_owned((*exotic).clone());
+  assert_eq!(moved.executables[0].os.as_str(), "plan9");
 }
 
 #[test]
@@ -659,7 +929,7 @@ fn proton_automaton_holds_win32_only() {
   assert_eq!(
     server
       .proton_probe(&reversed("/games/quest/game.exe"), &bundle)
-      .map(|(obj, _)| obj.id.clone()),
+      .map(|(obj, _)| obj.id.to_string()),
     Some("222".to_string())
   );
   // Native entries stay out of the fallback automaton...
@@ -683,7 +953,7 @@ fn proton_automaton_holds_win32_only() {
   assert_eq!(
     server
       .ac_probe(&reversed("/native/game"), &bundle)
-      .map(|(obj, _)| obj.id.clone()),
+      .map(|(obj, _)| obj.id.to_string()),
     Some("111".to_string())
   );
 }
@@ -735,8 +1005,8 @@ fn match_process_detects_win32_game_and_prefers_steam_id() {
     &mut obs_open,
   );
   let hit = hit.expect("win32 path must match via Proton automaton");
-  assert_eq!(hit.id, "222");
-  assert_eq!(hit.pid, Some(u64::MAX));
+  assert_eq!(&*hit.entry.id, "222");
+  assert_eq!(hit.pid, u64::MAX);
 
   // Same process, but the command line carries another game's Steam AppId:
   // the authoritative store id wins over the fuzzy path match.
@@ -748,7 +1018,7 @@ fn match_process_detects_win32_game_and_prefers_steam_id() {
     &mut obs_open,
   );
   let hit = hit.expect("steam AppId must match");
-  assert_eq!(hit.id, "999");
+  assert_eq!(&*hit.entry.id, "999");
 }
 
 // --- Aliases + exclusions (F1.2) ---
@@ -791,7 +1061,7 @@ fn aliases_indexed_and_gated() {
   ]);
   let mut clash = activity("2", "PlayerUnknown's Battlegrounds", None);
   Arc::get_mut(&mut clash).expect("fresh Arc").aliases = Some(vec!["Some Other Title".to_string()]);
-  let db = vec![pubg, clash];
+  let db = slim_db(vec![pubg, clash]);
   let (steam_map, name_map) = build_aux_maps(&db);
   assert_eq!(name_map.get("playerunknown's battlegrounds"), Some(&0));
   assert!(!name_map.contains_key("pubg"));
@@ -806,15 +1076,15 @@ fn aliases_indexed_and_gated() {
     &undotted_names(&name_map),
     &db,
   );
-  assert_eq!(hit.unwrap().id, "1");
+  assert_eq!(&*hit.unwrap().entry.id, "1");
 }
 
 #[test]
 fn undotted_names_cover_dotted_titles_only() {
-  let db = vec![
+  let db = slim_db(vec![
     activity("1", "How to Fish", Some("4001890")),
     proton_entry("2", "Rook R.E.P.O. Detail", None, None),
-  ];
+  ]);
   let (_, name_map) = build_aux_maps(&db);
   let nodot = undotted_names(&name_map);
   // Dotted title present de-dotted (dots become spaces, runs collapse);
@@ -822,10 +1092,10 @@ fn undotted_names_cover_dotted_titles_only() {
   assert_eq!(nodot.get("rook r e p o detail"), Some(&1));
   assert!(!nodot.contains_key("how to fish"));
   // Canonical-first ties: a later duplicate cannot shadow.
-  let db2 = vec![
+  let db2 = slim_db(vec![
     proton_entry("1", "Rook R.E.P.O. Detail", None, None),
     proton_entry("2", "Rook R E P O Detail", None, None),
-  ];
+  ]);
   let (_, name_map2) = build_aux_maps(&db2);
   assert_eq!(
     undotted_names(&name_map2).get("rook r e p o detail"),
@@ -864,7 +1134,7 @@ fn dotted_title_folder_matches_as_last_tier() {
       &mut obs_open,
     )
     .expect("de-dotted folder must match the dotted title");
-  assert_eq!(hit.id, "7");
+  assert_eq!(&*hit.entry.id, "7");
 
   // Exact matches still win: a version-looking folder never shadows a
   // real exact folder hit for another entry.
@@ -887,7 +1157,7 @@ fn dotted_title_folder_matches_as_last_tier() {
       &mut obs_open,
     )
     .expect("exact folder still matches");
-  assert_eq!(hit.id, "1");
+  assert_eq!(&*hit.entry.id, "1");
 }
 
 #[test]
@@ -986,7 +1256,7 @@ fn match_process_honors_exclusions() {
       &mut obs_open,
     )
     .expect("non-excluded path must match");
-  assert_eq!(hit.id, "222");
+  assert_eq!(&*hit.entry.id, "222");
 }
 
 #[test]
@@ -1025,7 +1295,7 @@ fn ac_matches_mixed_case_without_lowercasing() {
         &mut obs_open,
       )
       .expect("case must not matter");
-    assert_eq!(hit.id, "444");
+    assert_eq!(&*hit.entry.id, "444");
   }
 }
 
@@ -1123,7 +1393,7 @@ fn concurrent_swap_and_scan_never_tears() {
       &mut obs_open,
     )
     .expect("map coherent after concurrent swaps");
-  assert_eq!(hit.id, "444");
+  assert_eq!(&*hit.entry.id, "444");
 }
 
 // --- proc-events netlink parser (F1.5, Linux-only) ---
@@ -1367,6 +1637,24 @@ fn fake_steam_root(tag: &str, manifests: &[(&str, &str)]) -> crate::tests::TempD
 }
 
 #[test]
+fn refresh_prunes_watch_markers_of_vanished_roots() {
+  use crate::server::steam::SteamLibraries;
+
+  // One watched folders file...
+  let root = fake_steam_root("vanish", &[("12345", "Vdf Game")]);
+  let ghost = root.join("gone");
+  let mut libraries = SteamLibraries::from_root(&root);
+  assert_eq!(libraries.watched_len_for_test(), 1);
+  // ...whose disk disappears while discovery moves on: the marker must
+  // go with it instead of accumulating forever (mount churn). Deleting
+  // the dir flips the folders marker itself, which triggers re-resolution.
+  libraries.set_roots_for_test(vec![ghost], true);
+  drop(root);
+  libraries.refresh_if_stale();
+  assert_eq!(libraries.watched_len_for_test(), 0);
+}
+
+#[test]
 fn steam_libraries_match_prefix_and_refresh() {
   use std::time::SystemTime;
 
@@ -1470,7 +1758,7 @@ fn match_process_prefers_vdf_over_folder() {
       &mut obs_open,
     )
     .expect("steam library must match");
-  assert_eq!(hit.id, "999");
+  assert_eq!(&*hit.entry.id, "999");
 }
 
 #[test]
@@ -1522,7 +1810,7 @@ fn match_process_shortcut_id_prefers_name() {
     &mut obs_open,
   )
   .expect("folder must match for shortcut ids");
-  assert_eq!(hit.id, "888");
+  assert_eq!(&*hit.entry.id, "888");
 
   // Small unknown id (real game not in the DB yet): library ("999").
   let hit = classify(
@@ -1532,7 +1820,7 @@ fn match_process_shortcut_id_prefers_name() {
     &mut obs_open,
   )
   .expect("library must match for small unknown ids");
-  assert_eq!(hit.id, "999");
+  assert_eq!(&*hit.entry.id, "999");
 }
 
 #[test]

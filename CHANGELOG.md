@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- Removed `rsrpc::cmd::Button` (unreferenced; buttons travel as plain
+  values) and the deprecated `get_user_response` shim (its one-release
+  cycle since 0.33.0 is over — use `user_response`); `empty_activity`
+  is now private. New `RPCConfig::initial_db_content_hash` field
+  (seeded by the CLI; `..Default::default()` constructions are
+  unaffected, struct literals need the field).
+
+### Added
+- Trimmed-content refresh guard: the hourly DB check now hashes the
+  canonical scanner projection (trimmed fields, body order preserved
+  because first-wins ties depend on it) alongside the raw body, so
+  volatile CDN bytes around identical games skip the automaton rebuild
+  entirely (previously every new ETag rebuilt, spiking RSS to ~165MB).
+- `RPCServer::from_parsed` (infallible): build from already-parsed
+  activities, letting the CLI boot path parse the fetched body once
+  instead of twice.
+
+### Fixed
+- Staged overrides fold into the initial scanner build
+  (`ProcessServer::new_with_custom`): boot no longer builds the
+  automata twice (three times counting the fetch probe parse).
+- Negative SteamAppId lookups are memoized (`Absent` vs `Stale`): desktop
+  processes without a store id no longer re-read kilobytes of environ
+  every scan tick (the biggest per-process I/O cost).
+- Scan loop forwards detection deltas only, and the bridge skips fan-out
+  for byte-identical republications: steady-state wakeups, channel
+  traffic and snapshot rewrites drop to ~zero with no observable change
+  (dedup already lived downstream).
+- Scanner bundle stores a slim entry form (id/name/executables/steam
+  ids/aliases) instead of the ~30-field public struct, and hits carry
+  `(entry, pid, start)` instead of a full-struct clone per hit per tick.
+- Steam refresh returns early when all fingerprints match (no per-tick
+  prefix recopy) and re-collects roots every 120th tick instead of 30th.
+- OTA staging streams the binary to disk with incremental hashing
+  instead of holding the whole image in RAM.
+- Slim scanner strings (`Box<str>`) and an `os` enum (hot values as
+  unit variants, exotics owned per generation instead of leaked): ~130k
+  string fields drop the `String` capacity word, and the 11k `os`
+  values point at 3 shared statics instead of heap-allocating.
+- Aux lookups (`steam_map`/`name_map`/`nodot`) are sorted vectors with
+  binary search instead of hash maps: no buckets, no hashing, same
+  first-wins tie rules; lookups only happen on match misses.
+- Boot/rebuild logs report automaton heap bytes (`memory_usage`), and a
+  compile-time assert pins the slim entry layout against regrowth.
+- Hourly refresh seeds content hashes from the boot fetch
+  (`initial_db_content_hash`): the first check skips parse/rebuild like
+  later ones instead of one guaranteed redundant rebuild per boot; the
+  fat parse structs are dropped before the automata build, halving the
+  rebuild peak overlap.
+- Client event queues are bounded (backpressure, no drops): a spinning
+  local client throttles to bridge speed instead of growing the queue
+  without bound.
+- Steam watch markers prune vanished roots; dead helpers removed
+  (`Button`, deprecated `get_user_response` shim); duplicate trim/parse
+  paths unified.
+
 ## [0.34.0] - 2026-09-13
 
 ### Added

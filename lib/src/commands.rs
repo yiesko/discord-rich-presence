@@ -33,7 +33,7 @@ pub struct ProcessPayload {
 }
 
 #[must_use]
-pub fn empty_activity(pid: u64, socket_id: SocketId) -> String {
+fn empty_activity(pid: u64, socket_id: SocketId) -> String {
   format!(
     r#"
     {{
@@ -150,12 +150,6 @@ pub fn user_response(cmd: &ActivityCmd, user: Option<&crate::user::RpcUser>) -> 
     "nonce": cmd.nonce,
   }))
   .unwrap_or_else(|_| format!(r#"{{"cmd":"{}","evt":"ERROR"}}"#, cmd.cmd))
-}
-
-/// Previous name of [`user_response`]: kept for one release cycle.
-#[deprecated(since = "0.33.0", note = "renamed to `user_response`")]
-pub fn get_user_response(cmd: &ActivityCmd, user: Option<&crate::user::RpcUser>) -> String {
-  user_response(cmd, user)
 }
 
 /// Build the `CURRENT_USER_UPDATE` dispatch emitted when the local

@@ -341,8 +341,9 @@ pub(crate) struct SteamLibraries {
   /// re-resolves the stored roots only, never the full source list.
   exclusive: bool,
   /// Ticks since last full root re-collection (mounts are re-probed
-  /// every 30th tick — not every tick, the `/proc` exe sweep is the most
-  /// expensive discovery source).
+  /// every 120th tick — not every tick, the `/proc` exe sweep is the most
+  /// expensive discovery source; installs still surface immediately via
+  /// the folders-file marker).
   ticks: u64,
 }
 
@@ -370,6 +371,21 @@ impl SteamLibraries {
       libraries.scan_library(&lib);
     }
     libraries
+  }
+
+  /// Test seam: point re-resolution at these roots (see
+  /// `refresh_if_stale`). Lets pruning tests run hermetic, without the
+  /// real-machine sweep `collect_roots` performs.
+  #[cfg(test)]
+  pub(crate) fn set_roots_for_test(&mut self, roots: Vec<PathBuf>, exclusive: bool) {
+    self.roots = roots;
+    self.exclusive = exclusive;
+  }
+
+  /// Test probe: watch-marker count (see `watched`).
+  #[cfg(test)]
+  pub(crate) fn watched_len_for_test(&self) -> usize {
+    self.watched.len()
   }
 
   /// Full discovery: collect roots from every source, resolve them to
@@ -438,7 +454,7 @@ impl SteamLibraries {
 
   /// Revalidate once per scan tick: one stat per watched file plus one
   /// fingerprint per known library; only new or changed libraries pay
-  /// for manifest parsing. Vanished libraries are dropped. Every 30th
+  /// for manifest parsing. Vanished libraries are dropped. Every 120th
   /// tick the roots themselves are re-collected (fresh mounts): the
   /// `/proc` exe sweep costs ~5ms, so not every tick — and installs
   /// already trigger re-collection via the folders-file marker.
@@ -456,7 +472,7 @@ impl SteamLibraries {
     // marker moved or the mount-probe tick hit, else re-fingerprint the
     // known libraries.
     let mut libs: Vec<PathBuf>;
-    if folders_changed || self.ticks.is_multiple_of(30) {
+    if folders_changed || self.ticks.is_multiple_of(120) {
       if folders_changed {
         debug!("[Process Scanner] Steam folders changed, re-resolving libraries");
       }
@@ -487,8 +503,41 @@ impl SteamLibraries {
       }
       libs.sort();
       libs.dedup();
+      // Prune watch markers whose root no longer resolves a live Steam
+      // layout (unmounted/deleted steamapps): markers for live layouts
+      // stay exactly as before, so transiently-missing files keep their
+      // slots — but a root that remains a plain directory must not pin
+      // full re-resolution on every tick.
+      let live_files: std::collections::HashSet<PathBuf> = self
+        .roots
+        .iter()
+        .map(|root| root.join("steamapps"))
+        .filter(|apps| apps.is_dir())
+        .map(|apps| apps.join("libraryfolders.vdf"))
+        .collect();
+      self.watched.retain(|file| live_files.contains(file));
+      self.mtimes.retain(|file, _| live_files.contains(file));
     } else {
       libs = self.fingerprints.keys().map(PathBuf::from).collect();
+    }
+    // Fast path (steady state: every tick): every library fingerprints
+    // identically and the set is unchanged — the cached prefixes are
+    // current, so return without the O(libs x prefixes) recopy below
+    // and without touching the on-disk cache. Fingerprinting itself is
+    // a handful of stats.
+    if libs.len() == self.fingerprints.len()
+      && libs.iter().all(|lib| {
+        let key = lib.to_string_lossy();
+        match (
+          dir_fingerprint(&lib.join("steamapps")),
+          self.fingerprints.get(key.as_ref()),
+        ) {
+          (Some(live), Some(known)) => live == *known,
+          _ => false,
+        }
+      })
+    {
+      return;
     }
     let mut changed = false;
     let mut fresh_dirs: HashMap<String, String> = HashMap::new();
@@ -500,9 +549,13 @@ impl SteamLibraries {
         None => changed = true,
         Some(live) => {
           if self.fingerprints.get(&key) == Some(&live) {
-            // Unchanged: keep this library's current prefixes.
+            // Unchanged: keep this library's current prefixes. The
+            // owning-prefix form is hoisted per library (not rebuilt
+            // per cached prefix) — this whole branch only runs when
+            // some *other* library changed.
+            let owned = library_prefix(lib);
             for (prefix, appid) in &self.dirs {
-              if library_owns_prefix(lib, prefix) {
+              if prefix.starts_with(&owned) {
                 fresh_dirs.insert(prefix.clone(), appid.clone());
               }
             }
@@ -614,6 +667,12 @@ impl SteamLibraries {
 /// Keys are built as `<library-lower>/steamapps/...`, so a string-prefix
 /// test on the lowercased library path is exact.
 fn library_owns_prefix(library: &Path, prefix: &str) -> bool {
+  prefix.starts_with(&library_prefix(library))
+}
+
+/// Normalized owning-prefix form of one library (`<lib-lower>/steamapps/`),
+/// hoisted so hot loops build it once per library instead of per prefix.
+fn library_prefix(library: &Path) -> String {
   let mut lib = library.to_string_lossy().to_lowercase();
   if !lib.ends_with('/') {
     lib.push('/');
@@ -621,7 +680,8 @@ fn library_owns_prefix(library: &Path, prefix: &str) -> bool {
   if !lib.starts_with('/') {
     lib.insert(0, '/');
   }
-  prefix.starts_with(&format!("{lib}steamapps/"))
+  lib.push_str("steamapps/");
+  lib
 }
 
 /// One root's libraries: itself plus every path its `libraryfolders.vdf`

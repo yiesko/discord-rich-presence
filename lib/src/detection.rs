@@ -5,6 +5,26 @@ use serde_with::skip_serializing_none;
 /// `tools/updater`. Used for offline startup.
 pub const BUNDLED_DETECTABLE: &str = include_str!("../resources/detectable.json");
 
+/// Content hash for change detection (std-only SipHash: deterministic
+/// within a run, which is the only scope it is ever compared in).
+pub(crate) fn body_hash(body: &str) -> u64 {
+  use std::hash::{DefaultHasher, Hash, Hasher};
+  let mut hasher = DefaultHasher::new();
+  body.hash(&mut hasher);
+  hasher.finish()
+}
+
+/// Boot-time content hashes seeding the hourly refresh guard: the raw
+/// body hash (skips the parse when bytes are identical) plus the
+/// canonical trimmed hash (skips the rebuild when only volatile CDN
+/// bytes changed around identical games). The CLI computes this once
+/// from its startup fetch so the first hourly check is conditional like
+/// every other, instead of one guaranteed redundant rebuild per boot.
+pub fn content_hashes(raw_body: &str) -> (u64, u64) {
+  let raw = body_hash(raw_body);
+  (raw, canonical_content_hash(raw_body).unwrap_or(raw))
+}
+
 /// Trim a raw detectable games database down to the fields rsrpc actually
 /// uses: `id`/`name`/`hook`/`aliases`, `executables{name,is_launcher,os,arguments}`
 /// and `third_party_skus{distributor,id}`.
@@ -13,6 +33,35 @@ pub const BUNDLED_DETECTABLE: &str = include_str!("../resources/detectable.json"
 /// never drift apart.
 pub fn trim_detectable(body: &str) -> crate::error::Result<String> {
   Ok(serde_json::to_string(&trim_detectable_value(body)?)?)
+}
+
+/// Canonical hash of the scanner-visible projection of a database
+/// body: trim to matcher fields, drop scanner-ignored leftovers (`hook`,
+/// non-Steam SKUs), keep body order, hash the serialization. Volatile CDN
+/// bytes (whitespace, metadata the scanner never reads) hash identically,
+/// so those hours skip the automaton rebuild entirely. Entry order is
+/// deliberately preserved: first-wins index ties depend on it, so a pure
+/// reorder rebuilds (correctness over a skipped rebuild). Returns `None`
+/// when the body does not parse (callers treat it as changed — the safe
+/// direction).
+pub(crate) fn canonical_content_hash(body: &str) -> Option<u64> {
+  let trimmed = trim_detectable_value(body).ok()?;
+  // Destructure (not clone): the DOM is ours, so strip it in place
+  // instead of deep-copying ~5MB per hourly check.
+  let serde_json::Value::Array(mut games) = trimmed else {
+    return None;
+  };
+  for game in &mut games {
+    let Some(entry) = game.as_object_mut() else {
+      continue;
+    };
+    // Never matched on: drop before hashing so their churn is invisible.
+    entry.remove("hook");
+    if let Some(serde_json::Value::Array(skus)) = entry.get_mut("third_party_skus") {
+      skus.retain(|sku| sku.get("distributor").and_then(|d| d.as_str()) == Some("steam"));
+    }
+  }
+  serde_json::to_string(&games).ok().map(|s| body_hash(&s))
 }
 
 /// Trimmed database as a JSON value: same content as [`trim_detectable`]

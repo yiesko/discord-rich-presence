@@ -3,7 +3,7 @@ use server::{
   client_connector::ClientConnector,
   ipc::IpcConnector,
   ipc_utils::IpcFacilitator,
-  process::{ProcessEventListeners, ProcessScanState, ProcessServer},
+  process::{ProcessEventListeners, ProcessScanState, ProcessServer, RefreshConfig},
   websocket::WebsocketConnector,
 };
 use std::{
@@ -28,6 +28,11 @@ pub mod user;
 mod tests;
 
 pub type ProcessCallback = dyn FnMut(ProcessScanState) + Send + Sync;
+
+/// Depth of the client→bridge event queues (IPC and WebSocket legs).
+/// Bounded on purpose (see `start`): backpressure instead of unbounded
+/// growth under a spinning local client.
+pub(crate) const EVENT_QUEUE_BOUND: usize = 64;
 
 /// Discord application id: identifies a game/activity slot. Newtyped so
 /// socket ids, pids and raw strings can never mix at compile time; same
@@ -186,6 +191,13 @@ pub struct RPCConfig {
   /// conditional too (otherwise every restart pays one full redundant
   /// rebuild before learning the tag). `None` means unconditional.
   pub initial_db_etag: Option<String>,
+  /// Content hashes captured by the startup fetch — `(raw body, canonical
+  /// trimmed)` — so the first hourly refresh can skip the parse (same
+  /// bytes) or the rebuild (same games) exactly like later checks.
+  /// Without this, every restart pays one redundant rebuild before the
+  /// guard learns the content. `None` means unseeded (first check always
+  /// rebuilds, like before).
+  pub initial_db_content_hash: Option<(u64, u64)>,
   /// Application IDs the process scanner must never publish (coexistence
   /// with a richer publisher owning those slots). Scan-only by design:
   /// forwarded client frames always pass (a companion and a native frame
@@ -216,6 +228,7 @@ impl Default for RPCConfig {
       db_url: None,
       enable_db_update: false,
       initial_db_etag: None,
+      initial_db_content_hash: None,
       ignored_ids: Vec::new(),
       exclusions_url: None,
     }
@@ -261,9 +274,17 @@ impl RPCServer {
     let detectable: Vec<DetectableActivity> = serde_json::from_str(detectable.as_ref())
       .map_err(|err: serde_json::Error| crate::error::RsrpcError::InvalidJson { source: err })?;
 
+    Ok(Self::from_parsed(detectable, config))
+  }
+
+  /// Create a server from already-parsed activities (no parsing involved,
+  /// so infallible): lets callers that already hold a `Vec` — e.g. a
+  /// fetched body parsed once for validation — skip the second parse
+  /// `from_json_str` would perform.
+  pub fn from_parsed(detectable: Vec<DetectableActivity>, config: RPCConfig) -> Self {
     let detectable: Vec<Arc<DetectableActivity>> = detectable.into_iter().map(Arc::new).collect();
 
-    Ok(Self {
+    Self {
       detectable: Arc::new(Mutex::new(detectable)),
 
       // Default to empty servers
@@ -273,7 +294,7 @@ impl RPCServer {
 
       // Event listeners
       on_process_scan_complete: None,
-    })
+    }
   }
 
   /// Create a new RPCServer and read the detectable games list from file.
@@ -315,23 +336,21 @@ impl RPCServer {
   /// locks as [`RsrpcError`](crate::error::RsrpcError) variants.
   pub fn detect_once(&self) -> crate::error::Result<Vec<DetectedGame>> {
     let (tx, _rx) = mpsc::channel();
-    let server = ProcessServer::new(
+    // Staged overrides fold into the one-shot build, exactly like the
+    // daemon's initial build — what you see here is what running publishes.
+    let staged = self.staged_overrides.clone();
+    let server = ProcessServer::new_with_custom(
       self
         .detectable
         .lock()
         .map_err(|e| crate::error::RsrpcError::Poisoned("detectable", e.to_string()))?
         .to_vec(),
+      staged,
       tx,
       ProcessEventListeners::default(),
-      None,
-      false,
-      None,
+      RefreshConfig::default(),
       Vec::new(),
-      None,
     );
-    if !self.staged_overrides.is_empty() {
-      server.append_detectables(self.staged_overrides.clone());
-    }
     // Exclusions parity with the daemon: with hourly DB updates on, the
     // daemon filters installers/crash-reporters — fetch the same set
     // best-effort (fail-open) so diagnostics match what running publishes.
@@ -358,10 +377,10 @@ impl RPCServer {
     Ok(
       found
         .iter()
-        .map(|a| DetectedGame {
-          id: a.id.clone(),
-          name: a.name.clone(),
-          pid: a.pid,
+        .map(|hit| DetectedGame {
+          id: hit.entry.id.to_string(),
+          name: hit.entry.name.to_string(),
+          pid: Some(hit.pid),
         })
         .collect(),
     )
@@ -496,7 +515,18 @@ impl RPCServer {
   /// whether to exit. Never panics.
   pub fn start(&mut self) -> crate::error::Result<()> {
     let (proc_event_sender, proc_event_receiver) = mpsc::channel();
-    let (ipc_event_sender, ipc_event_receiver) = mpsc::channel();
+    // Bounded IPC queue (backpressure, not drops): a spinning local
+    // client throttles to bridge speed on a full queue instead of growing
+    // it without bound. 64 absorbs any legitimate burst; ordering and
+    // clears are preserved (blocking sender, never a drop). Each IPC
+    // connection runs its own handler thread, so a stalled sender only
+    // ever stalls that same connection — no shared resource is held.
+    // The WebSocket leg deliberately stays unbounded: its single poll
+    // thread serves every client, so blocking it on a full queue would
+    // stall handshakes, echoes and disconnects for innocent clients too
+    // (pre-change behavior, which never exhibited growth: the bridge
+    // drains continuously and `Responder::send` never blocks).
+    let (ipc_event_sender, ipc_event_receiver) = mpsc::sync_channel(EVENT_QUEUE_BOUND);
     let (ws_event_sender, ws_event_reciever) = mpsc::channel();
 
     // Shared READY identity (startup RSRPC_USER_* + runtime SET_USER).
@@ -522,20 +552,37 @@ impl RPCServer {
     )?;
     client_connector.set_extra_servers(ws_connector.bound_port, Some(ipc_connector.socket_path()));
 
+    // Staged overrides fold into the initial scanner build below: one
+    // automaton construction per boot instead of build-then-rebuild.
+    let staged = std::mem::take(&mut self.staged_overrides);
+    if !staged.is_empty() {
+      log!(
+        "[RPC Server] Folding {} staged override(s) into the initial build",
+        staged.len()
+      );
+    }
+    // Hourly refresh inputs travel as one value (see `RefreshConfig`).
+    let refresh = RefreshConfig {
+      db_url: self.config.db_url.clone(),
+      enable: self.config.enable_db_update,
+      etag: self.config.initial_db_etag.clone(),
+      content_hash: self.config.initial_db_content_hash,
+      exclusions_url: self.config.exclusions_url.clone(),
+    };
     let connectors = Connectors {
-      process_server: Arc::new(Mutex::new(ProcessServer::new(
+      process_server: Arc::new(Mutex::new(ProcessServer::new_with_custom(
         // Move, never clone: a second live generation here is exactly the
         // retained ~30MB the hourly rebuilds used to pin down.
         self.take_detectables(),
+        // Staged overrides fold into the initial build: one automaton
+        // construction per boot instead of build-then-rebuild.
+        staged,
         proc_event_sender,
         ProcessEventListeners {
           on_process_scan_complete: self.on_process_scan_complete.clone(),
         },
-        self.config.db_url.clone(),
-        self.config.enable_db_update,
-        self.config.initial_db_etag.clone(),
+        refresh,
         self.config.ignored_ids.clone(),
-        self.config.exclusions_url.clone(),
       ))),
       client_connector: Arc::new(Mutex::new(client_connector)),
       ipc_connector: Arc::new(Mutex::new(ipc_connector)),
@@ -588,17 +635,9 @@ impl RPCServer {
         .map_err(|e| crate::error::RsrpcError::Poisoned("process_server", e.to_string()))?
         .start(std::time::Duration::from_secs(config.scan_interval_secs));
     }
-    // Staged overrides (loaded before start): hand them to the live
-    // scanner now that it exists.
-    if !self.staged_overrides.is_empty() {
-      let staged = std::mem::take(&mut self.staged_overrides);
-      log!("[RPC Server] Applying {} staged override(s)", staged.len());
-      connectors
-        .process_server
-        .lock()
-        .map_err(|e| crate::error::RsrpcError::Poisoned("process_server", e.to_string()))?
-        .append_detectables(staged);
-    }
+    // Staged overrides were already folded into the initial scanner
+    // build above (`new_with_custom`): post-start `append_detectables`
+    // still rebuilds the live scanner directly when called later.
 
     if config.enable_websocket_connector || config.enable_secondary_events {
       log!("[RPC Server] Starting websocket connector...");

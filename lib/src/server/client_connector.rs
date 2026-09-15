@@ -1,7 +1,7 @@
 use std::{
   collections::HashMap,
   sync::{Arc, Mutex},
-  time::{Duration, Instant},
+  time::Instant,
 };
 
 use serde_json::Value;
@@ -27,12 +27,9 @@ pub(crate) const MAX_CACHED_ACTIVITIES: usize = 50;
 /// How often cached activities are rebroadcast so bridge clients that
 /// missed a frame converge (arRPC refreshes every 30s).
 pub(crate) const BRIDGE_REFRESH_INTERVAL_SECS: u64 = 30;
-/// Flood-guard window for `SET_ACTIVITY` duplicates (see
-/// [`commands::RecentActivities`]): conservative 5s — healthy SDK
-/// heartbeats re-send every 15s+, so only spin-loops collapse.
-pub(crate) const SET_ACTIVITY_DEDUP_WINDOW_SECS: u64 = 5;
-/// Cap for the dedup table (far above co-running games; bounds input).
-pub(crate) const MAX_RECENT_ACTIVITIES: usize = 128;
+// Note: the SET_ACTIVITY flood-guard window/cap live on
+// [`commands::RecentActivities`] (`DEFAULT_WINDOW`/`DEFAULT_CAP`); the
+// table is built with `::default()`.
 
 /// Which wire protocol a connected bridge client speaks.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -352,10 +349,7 @@ impl ClientConnector {
 
       last_process: Arc::new(Mutex::new(HashMap::new())),
       handoff: Arc::new(Mutex::new(HandoffState::default())),
-      recent: Arc::new(Mutex::new(commands::RecentActivities::new(
-        Duration::from_secs(SET_ACTIVITY_DEDUP_WINDOW_SECS),
-        MAX_RECENT_ACTIVITIES,
-      ))),
+      recent: Arc::new(Mutex::new(commands::RecentActivities::default())),
 
       ipc_event_rec: Arc::new(Mutex::new(Some(ipc_event_rec))),
       proc_event_rec: Arc::new(Mutex::new(Some(proc_event_rec))),
@@ -714,7 +708,19 @@ impl ClientConnector {
               debug!("[Client Connector] Duplicate clear ignored (pid {})", pid);
             }
           }
-          connector.broadcast_activity(payload, crate::SocketId::from(pid.to_string()));
+          // Identical republishes change nothing observable: the replay
+          // cache already holds these exact bytes (late joiners replay
+          // them) and the 30s refresh re-asserts them to live clients —
+          // so skip the fan-out, cache churn and snapshot rewrite. First
+          // publishes, real changes and effective clears always pass.
+          if changed {
+            connector.broadcast_activity(payload, crate::SocketId::from(pid.to_string()));
+          } else {
+            debug!(
+              "[Client Connector] Already published identical activity (app {}, pid {}), skipping fan-out",
+              app_key, pid
+            );
+          }
         }
         None => warn!("[Client Connector] Invalid activity command, skipping"),
       }
@@ -726,9 +732,7 @@ impl ClientConnector {
     connector: ClientConnector,
   ) {
     while let Ok(proc_event) = rec.recv() {
-      let proc_activity = proc_event.activity;
-
-      if proc_activity.id == "null" {
+      let Some(hit) = proc_event.hit else {
         connector
           .handoff
           .lock()
@@ -754,15 +758,15 @@ impl ClientConnector {
         }
 
         continue;
-      }
+      };
 
       // Remember the scan for the handoff: an IPC clear hands the slot
       // back to exactly this game (the scanner won't re-emit it).
       let game = ScannedGame {
-        id: crate::AppId(proc_activity.id.clone()),
-        name: proc_activity.name.clone(),
-        pid: proc_activity.pid.unwrap_or_default(),
-        start: proc_activity.timestamp.unwrap_or(0),
+        id: crate::AppId(hit.entry.id.to_string()),
+        name: hit.entry.name.to_string(),
+        pid: hit.pid,
+        start: hit.start,
       };
       connector
         .handoff
@@ -804,8 +808,9 @@ impl ClientConnector {
         continue;
       }
 
-      // Already showing this slot: the scanner emits every pass, so
-      // repeats dedup here instead of flapping the display.
+      // Already showing this slot: repeats dedup here instead of
+      // flapping the display (the scanner only forwards deltas, but the
+      // EXEC fast path can still re-emit a shown game).
       if connector
         .last_process
         .lock()
@@ -814,7 +819,7 @@ impl ClientConnector {
       {
         debug!(
           "[Client Connector] Already sent payload for activity: {}",
-          proc_activity.name
+          game.name
         );
         continue;
       }
@@ -825,12 +830,12 @@ impl ClientConnector {
           .lock()
           .unwrap_or_else(|e| e.into_inner()),
         game.id.clone(),
-        proc_activity.pid.unwrap_or_default(),
+        game.pid,
       );
 
       debug!(
         "[Client Connector] Publishing generic presence for activity: {}",
-        proc_activity.name
+        game.name
       );
 
       // Same bytes as the handoff resume path (one construction site).

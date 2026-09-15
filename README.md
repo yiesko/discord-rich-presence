@@ -245,6 +245,9 @@ let mut server = RPCServer::from_bundled(RPCConfig::default())
 server.start();
 ```
 
+If you already parsed the list yourself, skip the second parse with
+`RPCServer::from_parsed(vec, config)` (infallible).
+
 ### `RPCConfig` fields (defaults)
 
 | Field | Default | Meaning |
@@ -255,6 +258,7 @@ server.start();
 | `ws_port_start` / `ws_port_end` | `6463` / `6472` | Game websocket range, inclusive |
 | `scan_interval_secs` | `5` | Process scan interval (`--scan-interval-secs` / `RSRPC_SCAN_INTERVAL`) |
 | `db_url` / `enable_db_update` | `None` / `false` | Hourly DB refresh source + toggle |
+| `initial_db_etag` / `initial_db_content_hash` | `None` / `None` | Seeds from the startup fetch so the first hourly refresh skips parse/rebuild like later checks |
 | `ignored_ids` | `[]` | App IDs the scanner never publishes (`--ignore-ids` / `RSRPC_IGNORE_IDS`) |
 
 ### Runtime API

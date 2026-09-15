@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use rsrpc::RPCConfig;
-use rsrpc::detection::{DetectableActivity, trim_detectable};
+use rsrpc::detection::{DetectableActivity, trim_detectable_value};
 use std::path::PathBuf;
 
 mod update;
@@ -161,38 +161,40 @@ fn fetch_detectable(url: &str) -> Result<(String, Option<String>), Box<dyn std::
 /// `fetched-trimmed`, or `bundled-fallback` when the body is garbage).
 fn server_from_fetched(
   detectable: String,
-  config: RPCConfig,
+  mut config: RPCConfig,
 ) -> Result<(rsrpc::RPCServer, &'static str), Box<dyn std::error::Error>> {
-  let use_trimmed = serde_json::from_str::<Vec<DetectableActivity>>(&detectable).is_err();
-  let body = if use_trimmed {
-    trim_detectable(&detectable).unwrap_or(detectable)
-  } else {
-    detectable
-  };
+  // Parse once and keep the Vec: probing with one parse and handing the
+  // string to `from_json_str` would parse the ~5MB body twice for zero
+  // new information (double transient memory at boot). The trimmed
+  // fallback goes straight from Value (no String round-trip).
+  if let Ok(parsed) = serde_json::from_str::<Vec<DetectableActivity>>(&detectable) {
+    // Seed the hourly guard with this body: the first refresh check can
+    // then skip the parse/rebuild exactly like later checks, instead of
+    // one guaranteed redundant rebuild per boot.
+    config.initial_db_content_hash = Some(rsrpc::detection::content_hashes(&detectable));
+    return Ok((
+      rsrpc::RPCServer::from_parsed(parsed, config),
+      "fetched-direct",
+    ));
+  }
+  if let Ok(trimmed) = trim_detectable_value(&detectable)
+    && let Ok(parsed) = serde_json::from_value::<Vec<DetectableActivity>>(trimmed)
+  {
+    config.initial_db_content_hash = Some(rsrpc::detection::content_hashes(&detectable));
+    return Ok((
+      rsrpc::RPCServer::from_parsed(parsed, config),
+      "fetched-trimmed",
+    ));
+  }
   // A fetched-but-garbage body (CDN HTML, truncation) must not kill
   // boot: same offline fallback as a failed fetch (mirrors refresh,
-  // which keeps the old DB on parse errors).
-  let fallback_config = config.clone();
-  match rsrpc::RPCServer::from_json_str(body, config) {
-    Ok(server) => Ok((
-      server,
-      if use_trimmed {
-        "fetched-trimmed"
-      } else {
-        "fetched-direct"
-      },
-    )),
-    Err(err) => {
-      eprintln!(
-        "[rsrpc] Fetched DB unparseable ({}), using offline bundled snapshot",
-        err
-      );
-      Ok((
-        rsrpc::RPCServer::from_bundled(fallback_config)?,
-        "bundled-fallback",
-      ))
-    }
-  }
+  // which keeps the old DB on parse errors). The loaded DB is the
+  // bundled snapshot, not the fetched body — so drop the seeded ETag:
+  // sending it on the next refresh could answer 304 and pin the bundled
+  // database forever without ever downloading the rejected body.
+  eprintln!("[rsrpc] Fetched DB unparseable, using offline bundled snapshot");
+  config.initial_db_etag = None;
+  Ok((rsrpc::RPCServer::from_bundled(config)?, "bundled-fallback"))
 }
 
 /// Split a comma-separated id list (`--ignore-ids`): trims, drops blanks.

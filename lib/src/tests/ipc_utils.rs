@@ -7,7 +7,7 @@ fn send_empty_routes_as_set_activity_clear() {
   // Regression: disconnect clears must carry cmd == SET_ACTIVITY, or
   // event_loop misroutes them to broadcast_raw and the presence (and the
   // bridge replay cache) is never cleared — stuck card forever.
-  let (mut tx, rx) = mpsc::channel();
+  let (mut tx, rx) = mpsc::sync_channel(1);
   send_empty(&mut tx, 3).unwrap();
   let cmd = rx.try_recv().unwrap();
   assert_eq!(cmd.cmd, "SET_ACTIVITY");

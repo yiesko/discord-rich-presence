@@ -261,10 +261,3 @@ pub struct Timestamps {
   #[serde(default)]
   pub end: Option<TimeoutValue>,
 }
-
-#[skip_serializing_none]
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct Button {
-  pub label: String,
-  pub url: String,
-}

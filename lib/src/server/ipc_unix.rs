@@ -156,7 +156,7 @@ pub(crate) struct IpcConnector {
   pub nonce: String,
   user: Arc<Mutex<RpcUser>>,
 
-  event_sender: mpsc::Sender<ActivityCmd>,
+  event_sender: mpsc::SyncSender<ActivityCmd>,
 }
 
 impl IpcFacilitator for IpcConnector {
@@ -276,7 +276,7 @@ impl IpcFacilitator for IpcConnector {
     });
   }
 
-  fn event_sender(&mut self) -> &mut mpsc::Sender<ActivityCmd> {
+  fn event_sender(&mut self) -> &mut mpsc::SyncSender<ActivityCmd> {
     &mut self.event_sender
   }
 }
@@ -286,7 +286,7 @@ impl IpcConnector {
    * Create a socket and return a new IpcConnector
    */
   pub(crate) fn new(
-    event_sender: mpsc::Sender<ActivityCmd>,
+    event_sender: mpsc::SyncSender<ActivityCmd>,
     user: Arc<Mutex<RpcUser>>,
   ) -> crate::error::Result<Self> {
     let (socket, path) = Self::create_socket(0)?;
