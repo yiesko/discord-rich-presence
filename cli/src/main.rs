@@ -171,7 +171,7 @@ fn server_from_fetched(
     // Seed the hourly guard with this body: the first refresh check can
     // then skip the parse/rebuild exactly like later checks, instead of
     // one guaranteed redundant rebuild per boot.
-    config.initial_db_content_hash = Some(rsrpc::detection::content_hashes(&detectable));
+    config.initial_db_content_hash = Some(rsrpc::detection::content_hashes(&detectable, &parsed));
     return Ok((
       rsrpc::RPCServer::from_parsed(parsed, config),
       "fetched-direct",
@@ -180,7 +180,7 @@ fn server_from_fetched(
   if let Ok(trimmed) = trim_detectable_value(&detectable)
     && let Ok(parsed) = serde_json::from_value::<Vec<DetectableActivity>>(trimmed)
   {
-    config.initial_db_content_hash = Some(rsrpc::detection::content_hashes(&detectable));
+    config.initial_db_content_hash = Some(rsrpc::detection::content_hashes(&detectable, &parsed));
     return Ok((
       rsrpc::RPCServer::from_parsed(parsed, config),
       "fetched-trimmed",

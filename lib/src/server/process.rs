@@ -2296,44 +2296,44 @@ pub(crate) fn fetch_detectable_etag(
     });
   }
 
-  // Canonical hash of what the scanner actually consumes (trimmed
-  // fields, order-independent): metadata-only or reordered bodies match
-  // the known content without rebuilding the automata.
-  let canonical = super::super::detection::canonical_content_hash(&body);
-
   // Direct parse first: serde skips unknown fields, so the full body
   // parses with zero DOM overhead (~5x less transient memory than the
   // trimmed-Value pass). The trimming pass stays as fallback for entries
   // missing required fields (it defaults them). The first error is
   // reused below: re-parsing the same body a third time just to produce
   // an identical error would double the failure cost for nothing.
-  match serde_json::from_str::<Vec<DetectableActivity>>(&body) {
-    Ok(parsed) => finish_fetch(etag, content_hash, canonical, known_trimmed, parsed),
+  let parsed = match serde_json::from_str::<Vec<DetectableActivity>>(&body) {
+    Ok(parsed) => parsed,
     Err(first_err) => {
       if let Ok(trimmed) = super::super::detection::trim_detectable_value(&body)
         && let Ok(parsed) = serde_json::from_value::<Vec<DetectableActivity>>(trimmed)
       {
-        return finish_fetch(etag, content_hash, canonical, known_trimmed, parsed);
+        parsed
+      } else {
+        return Err(first_err.into());
       }
-      Err(first_err.into())
     }
-  }
+  };
+  // The raw body has served its purposes (raw hash above, parse input
+  // here): drop its ~13MB BEFORE the canonical hash and the automata
+  // build below, instead of letting it ride along to the end of this
+  // function and inflating the rebuild peak.
+  drop(body);
+  finish_fetch(etag, content_hash, known_trimmed, parsed)
 }
 
 /// Hash the canonical scanner projection and decide whether the parsed
-/// games actually changed: volatile CDN bytes (whitespace, ordering,
-/// metadata outside the trim) hash identically, so those hours skip the
-/// automaton rebuild entirely. `canonical` is `None` only when the body
-/// does not even trim (garbage): fall back to the raw hash, i.e. treat
-/// it as changed — the safe direction, and the parse below fails anyway.
+/// games actually changed: volatile CDN bytes (whitespace, metadata the
+/// scanner never reads) hash identically, so those hours skip the
+/// automaton rebuild entirely. Entry order is preserved (first-wins
+/// index ties depend on it), so a pure reorder rebuilds.
 fn finish_fetch(
   etag: Option<String>,
   content_hash: u64,
-  canonical: Option<u64>,
   known_trimmed: Option<u64>,
   detectable: Vec<DetectableActivity>,
 ) -> crate::error::Result<FetchOutcome> {
-  let trimmed_hash = canonical.unwrap_or(content_hash);
+  let trimmed_hash = super::super::detection::canonical_content_hash(&detectable);
   if known_trimmed.is_some_and(|known| known == trimmed_hash) {
     return Ok(FetchOutcome::SameContent {
       etag,

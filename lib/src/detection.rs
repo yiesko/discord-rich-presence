@@ -16,13 +16,12 @@ pub(crate) fn body_hash(body: &str) -> u64 {
 
 /// Boot-time content hashes seeding the hourly refresh guard: the raw
 /// body hash (skips the parse when bytes are identical) plus the
-/// canonical trimmed hash (skips the rebuild when only volatile CDN
+/// canonical projection hash (skips the rebuild when only volatile CDN
 /// bytes changed around identical games). The CLI computes this once
 /// from its startup fetch so the first hourly check is conditional like
 /// every other, instead of one guaranteed redundant rebuild per boot.
-pub fn content_hashes(raw_body: &str) -> (u64, u64) {
-  let raw = body_hash(raw_body);
-  (raw, canonical_content_hash(raw_body).unwrap_or(raw))
+pub fn content_hashes(raw_body: &str, parsed: &[DetectableActivity]) -> (u64, u64) {
+  (body_hash(raw_body), canonical_content_hash(parsed))
 }
 
 /// Trim a raw detectable games database down to the fields rsrpc actually
@@ -35,33 +34,59 @@ pub fn trim_detectable(body: &str) -> crate::error::Result<String> {
   Ok(serde_json::to_string(&trim_detectable_value(body)?)?)
 }
 
-/// Canonical hash of the scanner-visible projection of a database
-/// body: trim to matcher fields, drop scanner-ignored leftovers (`hook`,
-/// non-Steam SKUs), keep body order, hash the serialization. Volatile CDN
-/// bytes (whitespace, metadata the scanner never reads) hash identically,
-/// so those hours skip the automaton rebuild entirely. Entry order is
-/// deliberately preserved: first-wins index ties depend on it, so a pure
-/// reorder rebuilds (correctness over a skipped rebuild). Returns `None`
-/// when the body does not parse (callers treat it as changed — the safe
-/// direction).
-pub(crate) fn canonical_content_hash(body: &str) -> Option<u64> {
-  let trimmed = trim_detectable_value(body).ok()?;
-  // Destructure (not clone): the DOM is ours, so strip it in place
-  // instead of deep-copying ~5MB per hourly check.
-  let serde_json::Value::Array(mut games) = trimmed else {
-    return None;
-  };
-  for game in &mut games {
-    let Some(entry) = game.as_object_mut() else {
-      continue;
-    };
-    // Never matched on: drop before hashing so their churn is invisible.
-    entry.remove("hook");
-    if let Some(serde_json::Value::Array(skus)) = entry.get_mut("third_party_skus") {
-      skus.retain(|sku| sku.get("distributor").and_then(|d| d.as_str()) == Some("steam"));
+/// Canonical hash of the scanner-visible projection of parsed entries:
+/// id, name, executable inputs, Steam-only SKUs and aliases, in body
+/// order (first-wins index ties depend on it). Scanner-ignored fields
+/// (`hook`, descriptions, non-Steam SKUs…) contribute nothing, so their
+/// churn is invisible. Incremental SipHash — no DOM, no serialization
+/// buffer, just the hasher state. Field tags and lengths are mixed in so
+/// adjacent fields can never alias each other (`("ab","c")` vs
+/// `("a","bc")` hash differently).
+pub(crate) fn canonical_content_hash(parsed: &[DetectableActivity]) -> u64 {
+  use std::hash::{DefaultHasher, Hash, Hasher};
+  let mut hasher = DefaultHasher::new();
+  parsed.len().hash(&mut hasher);
+  for entry in parsed {
+    // `None` and `[]` hash identically on purpose: the direct struct
+    // parse yields `None` for missing lists while the trim fallback
+    // yields `Some([])` — same scanner input either way, so they must
+    // not diverge the hash (this bit us in test).
+    0x01u8.hash(&mut hasher);
+    entry.id.hash(&mut hasher);
+    0x02u8.hash(&mut hasher);
+    entry.name.hash(&mut hasher);
+    let executables = entry.executables.as_deref().unwrap_or(&[]);
+    executables.len().hash(&mut hasher);
+    for exe in executables {
+      0x03u8.hash(&mut hasher);
+      exe.name.hash(&mut hasher);
+      exe.os.hash(&mut hasher);
+      exe.is_launcher.hash(&mut hasher);
+      exe.arguments.hash(&mut hasher);
+    }
+    // Steam-distributor ids only: the only SKUs any matcher reads.
+    let mut steam = 0usize;
+    if let Some(skus) = entry.third_party_skus.as_ref() {
+      for sku in skus {
+        if sku.distributor == "steam"
+          && let Some(id) = sku.id.as_ref()
+          && !id.is_empty()
+        {
+          steam += 1;
+          0x04u8.hash(&mut hasher);
+          id.hash(&mut hasher);
+        }
+      }
+    }
+    steam.hash(&mut hasher);
+    let aliases = entry.aliases.as_deref().unwrap_or(&[]);
+    aliases.len().hash(&mut hasher);
+    for alias in aliases {
+      0x05u8.hash(&mut hasher);
+      alias.hash(&mut hasher);
     }
   }
-  serde_json::to_string(&games).ok().map(|s| body_hash(&s))
+  hasher.finish()
 }
 
 /// Trimmed database as a JSON value: same content as [`trim_detectable`]
