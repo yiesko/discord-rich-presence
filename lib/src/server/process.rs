@@ -1699,7 +1699,7 @@ fn spawn_proc_watcher(server: &ProcessServer) -> super::utils::QueueGauge {
   std::thread::spawn(move || {
     let mut attempts = 0u32;
     loop {
-      match watch(tx.clone()) {
+      match watch(&tx) {
         // Receiver gone: daemon shutting down.
         Ok(()) => break,
         Err(err) => {

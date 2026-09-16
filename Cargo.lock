@@ -1503,6 +1503,7 @@ dependencies = [
  "libc",
  "regex",
  "rmp-serde",
+ "rsrpc-proc-events",
  "rsrpc-protocol",
  "rsrpc-state",
  "rsrpc-telemetry",
@@ -1550,6 +1551,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "ureq",
+]
+
+[[package]]
+name = "rsrpc-proc-events"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rsrpc-telemetry",
+ "tracing",
 ]
 
 [[package]]

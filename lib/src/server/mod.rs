@@ -6,7 +6,7 @@ pub mod utils;
 pub mod websocket;
 
 #[cfg(target_os = "linux")]
-pub(crate) mod proc_events;
+pub(crate) use rsrpc_proc_events as proc_events;
 
 #[cfg(target_os = "windows")]
 pub mod ipc_win;

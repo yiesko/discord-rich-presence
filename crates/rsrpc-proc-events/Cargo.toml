@@ -1,0 +1,18 @@
+[package]
+name = "rsrpc-proc-events"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["spikehd"]
+description = "Linux cn_proc netlink watcher: EXEC/EXIT lifecycle events with loss accounting"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["linux", "netlink", "process"]
+categories = ["os", "network-programming"]
+
+[dependencies]
+rsrpc-telemetry = { path = "../rsrpc-telemetry" }
+tracing = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

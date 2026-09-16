@@ -5,9 +5,8 @@
 //! a full interval, game EXIT waits just as long to clear. This watcher
 //! closes both gaps without polling:
 //!
-//! - `EXEC(pid)`: classify that ONE process immediately (same
-//!   [`crate::server::process::ProcessServer::match_process`] as the scan
-//!   loop) and emit hits at once — cards appear in milliseconds.
+//! - `EXEC(pid)`: classify that ONE process immediately (same matcher as
+//!   the scan loop) and emit hits at once — cards appear in milliseconds.
 //! - `EXIT(pid)`: when a tracked game pid dies, wake the scan loop early
 //!   so the natural full scan clears the slot at once instead of waiting
 //!   out the interval.
@@ -38,7 +37,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use crate::{debug, log};
+use rsrpc_telemetry::GaugeSender;
 
 /// Netlink family for the kernel connector multiplexer.
 const NETLINK_CONNECTOR: i32 = 11;
@@ -65,7 +64,7 @@ const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 
 /// Lifecycle event worth waking up for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProcEvent {
+pub enum ProcEvent {
   Exec(u64),
   Exit(u64),
 }
@@ -91,10 +90,7 @@ pub(crate) enum ProcEvent {
 /// `ERROR`s stop it with nothing further — exactly the historical
 /// `parse_event` outcomes, which delegates here (single walk, single
 /// WHAT mapping, no duplicated parse logic).
-pub(crate) fn walk_proc_messages(
-  buf: &[u8],
-  visit: &mut impl FnMut(u32, u32, Option<ProcEvent>) -> bool,
-) {
+pub fn walk_proc_messages(buf: &[u8], visit: &mut impl FnMut(u32, u32, Option<ProcEvent>) -> bool) {
   let mut offset = 0;
   while buf.len() - offset >= SIZE_NLMSGHDR {
     let len = u32::from_le_bytes([
@@ -146,7 +142,7 @@ pub(crate) fn walk_proc_messages(
   }
 }
 
-pub(crate) fn parse_event(buf: &[u8]) -> Option<ProcEvent> {
+pub fn parse_event(buf: &[u8]) -> Option<ProcEvent> {
   let mut found = None;
   walk_proc_messages(buf, &mut |_, _, event| {
     found = found.or(event);
@@ -187,7 +183,7 @@ fn parse_proc_event(body: &[u8]) -> Option<ProcEvent> {
 /// (backward jump, no alarm), so the worst case on exotic kernels is a
 /// quiet no-op, never false alarms.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SeqTracker {
+pub struct SeqTracker {
   last: HashMap<u32, u32>,
   missed: u64,
 }
@@ -240,6 +236,7 @@ impl SeqTracker {
 /// arrived (an ACK proves the LISTEN registered; its absence with later
 /// silence points at registration, not traffic), or a message when the
 /// kernel refuses (caller falls back to polling).
+#[cfg(target_os = "linux")]
 fn subscribe() -> Result<(i32, bool), String> {
   // SAFETY: socket/bind/sendmsg/recv/close are called with valid
   // arguments; the fd is closed by the caller on every path (see `watch`).
@@ -360,11 +357,13 @@ fn subscribe() -> Result<(i32, bool), String> {
   Ok((fd, ack_seen))
 }
 
+#[cfg(target_os = "linux")]
 fn last_os_error() -> String {
   std::io::Error::last_os_error().to_string()
 }
 
 /// Set (or clear) the receive timeout on the netlink fd.
+#[cfg(target_os = "linux")]
 fn set_recv_timeout(fd: i32, timeout: Option<std::time::Duration>) {
   let (secs, usecs) = match timeout {
     Some(duration) => (
@@ -397,7 +396,7 @@ fn set_recv_timeout(fd: i32, timeout: Option<std::time::Duration>) {
 /// - zeros: the kernel is silent for this socket (transient stall or a
 ///   filtering kernel/LSM — retryable, see the caller).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SelfTestReport {
+pub struct SelfTestReport {
   pub datagrams: u32,
   pub parsed: u32,
   /// Recvs that timed out (EAGAIN) — silence, not failure.
@@ -420,6 +419,7 @@ impl SelfTestReport {
 /// proc event. Some kernels/LSMs accept the LISTEN message yet deliver
 /// nothing — without this check the watcher would idle forever claiming
 /// to be live while polling does all the work unnoticed.
+#[cfg(target_os = "linux")]
 fn self_test(fd: i32) -> SelfTestReport {
   // Bound every recv below: without this, a silently non-delivering
   // kernel hangs the watcher thread forever with zero logs.
@@ -480,7 +480,14 @@ fn self_test(fd: i32) -> SelfTestReport {
 /// Block on `cn_proc` broadcasts forever, forwarding lifecycle events.
 /// Returns only on receive errors (the caller logs once and keeps
 /// polling); the fd is closed on the way out.
-pub(crate) fn watch(events: super::utils::GaugeSender<ProcEvent>) -> Result<(), String> {
+/// Block on `cn_proc` broadcasts forever, forwarding lifecycle events.
+/// Returns only on receive errors (the caller logs once and keeps
+/// polling); the fd is closed on the way out.
+///
+/// Linux only: other platforms get a stub that always refuses (the
+/// periodic scan is the only path there).
+#[cfg(target_os = "linux")]
+pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
   let (fd, ack_seen) = subscribe()?;
   let report = self_test(fd);
   if !report.live() {
@@ -501,7 +508,7 @@ pub(crate) fn watch(events: super::utils::GaugeSender<ProcEvent>) -> Result<(), 
       report.datagrams, report.parsed, report.timeouts, fatal, ack
     ));
   }
-  log!(
+  tracing::info!(
     "[Process Scanner] proc-events watcher live (netlink cn_proc; best-effort, may rarely go silent — polling backstops)"
   );
   // Back to blocking: the self-test's timeout was temporary.
@@ -543,7 +550,9 @@ pub(crate) fn watch(events: super::utils::GaugeSender<ProcEvent>) -> Result<(), 
     walk_proc_messages(bytes, &mut |cpu, seq, event| {
       let missed = seqs.note(cpu, seq);
       if missed > 0 {
-        debug!("[Process Scanner] cn_proc sequence gap on cpu {cpu}: missed {missed} event(s)");
+        tracing::debug!(
+          "[Process Scanner] cn_proc sequence gap on cpu {cpu}: missed {missed} event(s)"
+        );
       }
       found = found.or(event);
       true
@@ -558,4 +567,11 @@ pub(crate) fn watch(events: super::utils::GaugeSender<ProcEvent>) -> Result<(), 
       return Ok(());
     }
   }
+}
+
+/// Non-Linux stub: `cn_proc` does not exist there, so watching always
+/// refuses and the periodic scan stays the only path.
+#[cfg(not(target_os = "linux"))]
+pub fn watch(_events: &rsrpc_telemetry::GaugeSender<ProcEvent>) -> Result<(), String> {
+  Err("proc-events unsupported on this platform".to_string())
 }
