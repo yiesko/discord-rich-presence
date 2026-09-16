@@ -95,7 +95,7 @@ pub const MAX_IPC_PAYLOAD: u32 = 1024 * 1024;
 pub(crate) const MAX_TRACKED_PIDS: usize = 16;
 
 /// Record a published pid, refreshing re-published pids as most recent
-/// and dropping the oldest beyond [`MAX_TRACKED_PIDS`].
+/// and dropping the oldest beyond the per-connection cap.
 ///
 /// Public so custom [`IpcFacilitator`] implementors share the exact
 /// disconnect-clear semantics instead of reimplementing the bound.

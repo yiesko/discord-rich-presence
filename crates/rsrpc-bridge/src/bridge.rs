@@ -954,7 +954,7 @@ fn is_genuine_clear(cmd: &ActivityCmd) -> bool {
 /// JSON body. Returns `None` when neither yields a usable pid — pid 0
 /// included: unidentifiable publishers can never be proven dead, and
 /// clearing them risks darkening a live-but-broken client (same
-/// convention as [`is_genuine_clear`]).
+/// convention as the private `is_genuine_clear`).
 pub fn cache_entry_pid(socket_id: &SocketId, payload: &CachedActivity) -> Option<u64> {
   if let Ok(pid) = socket_id.as_ref().parse::<u64>() {
     return (pid != 0).then_some(pid);
