@@ -67,6 +67,12 @@ impl From<String> for AppId {
   }
 }
 
+impl From<Box<str>> for AppId {
+  fn from(id: Box<str>) -> Self {
+    Self(Arc::from(id))
+  }
+}
+
 impl From<&str> for AppId {
   fn from(id: &str) -> Self {
     Self(Arc::from(id))
@@ -76,6 +82,12 @@ impl From<&str> for AppId {
 impl From<String> for SocketId {
   fn from(id: String) -> Self {
     Self(id.into())
+  }
+}
+
+impl From<Box<str>> for SocketId {
+  fn from(id: Box<str>) -> Self {
+    Self(Arc::from(id))
   }
 }
 
@@ -163,6 +175,18 @@ mod tests {
     assert_eq!(sock.as_ref(), "abc");
     let moved = SocketId::from(AppId::from("abc"));
     assert_eq!(moved.as_ref(), "abc");
+  }
+
+  #[test]
+  fn boxed_str_converts() {
+    // One copy into the refcounted layout (Arc stores counters inline, so
+    // in-place adoption is impossible); every later clone is free.
+    let id = AppId::from(Box::<str>::from("boxed-id"));
+    assert_eq!(id.as_ref(), "boxed-id");
+    let cloned = id.clone();
+    assert!(std::ptr::eq(id.as_ref().as_ptr(), cloned.as_ref().as_ptr()));
+    let sock = SocketId::from(Box::<str>::from("sock-id"));
+    assert_eq!(sock.as_ref(), "sock-id");
   }
 
   #[test]

@@ -253,6 +253,14 @@ fn normalize_timestamp(value: i64, millis_threshold: i64) -> i64 {
 #[skip_serializing_none]
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct TimeoutValue(pub(crate) i64);
+
+impl TimeoutValue {
+  /// Raw timestamp value: caller unit before [`ActivityCmd::fix`], millis after.
+  #[must_use]
+  pub fn value(&self) -> i64 {
+    self.0
+  }
+}
 #[skip_serializing_none]
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Timestamps {
