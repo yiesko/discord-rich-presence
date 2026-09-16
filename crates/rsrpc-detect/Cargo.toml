@@ -38,3 +38,4 @@ winapi = { version = "0.3", features = ["namedpipeapi", "winbase", "heapapi"] }
 
 [dev-dependencies]
 serde_json = "1.0"
+rsrpc-telemetry = { path = "../rsrpc-telemetry" }

@@ -6,4 +6,10 @@
 //! lock-free (`ArcSwap` bundle, `RwLock` exclusions); only genuinely
 //! mutable per-tick state sits behind short `Mutex` sections.
 
+pub mod bundle;
+pub mod cache;
 pub mod db;
+pub mod refresh;
+pub mod scan;
+pub mod server;
+pub mod types;

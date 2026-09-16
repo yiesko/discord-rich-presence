@@ -580,7 +580,7 @@ fn conditional_refresh_skips_unchanged_database() {
   ));
 
   // Rotated tag, identical bytes: no rebuild (the flap case).
-  let known = crate::server::process::body_hash("[]");
+  let known = crate::detection::body_hash("[]");
   assert!(matches!(
     fetch_detectable_etag(&url, Some("\"stale\""), Some(known), no_hash),
     Ok(crate::server::process::FetchOutcome::SameContent { .. })
@@ -887,10 +887,10 @@ fn os_name_maps_hot_values_and_owns_exotics() {
   use crate::server::process::{OsName, ScannedEntry};
 
   // Hot values cost nothing and compare by variant.
-  assert_eq!(OsName::from_str("win32"), OsName::Win32);
-  assert_eq!(OsName::from_str("linux"), OsName::Linux);
-  assert_eq!(OsName::from_str("darwin"), OsName::Darwin);
-  assert!(OsName::from_str("").is_empty());
+  assert_eq!(OsName::from_os("win32"), OsName::Win32);
+  assert_eq!(OsName::from_os("linux"), OsName::Linux);
+  assert_eq!(OsName::from_os("darwin"), OsName::Darwin);
+  assert!(OsName::from_os("").is_empty());
   // Exotics round-trip owned (no process-lifetime leak): each conversion
   // owns its copy, freed with its generation.
   let exotic = proton_entry("1", "Exotic Game", Some(("game.exe", "plan9", false)), None);
@@ -1397,143 +1397,6 @@ fn concurrent_swap_and_scan_never_tears() {
   assert_eq!(&*hit.entry.id, "444");
 }
 
-// --- proc-events netlink parser (F1.5, Linux-only) ---
-
-/// One synthetic kernel datagram: `nlmsghdr` + `cn_msg` (idx/val = 1/1)
-/// + `proc_event` with `what` and the pid at the exec/exit union offset.
-#[cfg(target_os = "linux")]
-fn proc_buf(what: u32, pid: u32) -> Vec<u8> {
-  let total = 16 + 20 + 24;
-  let mut buf = vec![0u8; total];
-  buf[0..4].copy_from_slice(&(total as u32).to_le_bytes());
-  buf[4..6].copy_from_slice(&16u16.to_le_bytes());
-  buf[6..8].copy_from_slice(&1u16.to_le_bytes());
-  buf[16..20].copy_from_slice(&1u32.to_le_bytes());
-  buf[20..24].copy_from_slice(&1u32.to_le_bytes());
-  buf[36..40].copy_from_slice(&what.to_le_bytes());
-  buf[52..56].copy_from_slice(&pid.to_le_bytes());
-  buf
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-fn proc_event_parses_exec_and_exit() {
-  use crate::server::proc_events::{ProcEvent, parse_event};
-
-  assert_eq!(
-    parse_event(&proc_buf(0x2, 1234)),
-    Some(ProcEvent::Exec(1234))
-  );
-  // EXIT is a bitmask (0x80000000), not a sequence number.
-  assert_eq!(
-    parse_event(&proc_buf(0x8000_0000, 5678)),
-    Some(ProcEvent::Exit(5678))
-  );
-  // Anything else is ignored, never an error: fork, uid-change...
-  assert_eq!(parse_event(&proc_buf(0x1, 1)), None);
-  assert_eq!(parse_event(&proc_buf(0x4, 1)), None);
-  // ...unknown discriminants...
-  assert_eq!(parse_event(&proc_buf(0x9999, 1)), None);
-  // ...foreign connector traffic...
-  let mut foreign = proc_buf(0x2, 9);
-  foreign[16..20].copy_from_slice(&7u32.to_le_bytes());
-  assert_eq!(parse_event(&foreign), None);
-  // ...control traffic (NOOP / zero-code ERROR ack)...
-  let mut noop = proc_buf(0x2, 9);
-  noop[4..6].copy_from_slice(&1u16.to_le_bytes());
-  assert_eq!(parse_event(&noop), None);
-  let mut ack = proc_buf(0x2, 9);
-  ack[4..6].copy_from_slice(&2u16.to_le_bytes());
-  ack[16..20].copy_from_slice(&0u32.to_le_bytes());
-  assert_eq!(parse_event(&ack), None);
-  // ...while the kernel wraps real events in NLMSG_DONE (seen live).
-  let mut done_exec = proc_buf(0x2, 4242);
-  done_exec[4..6].copy_from_slice(&3u16.to_le_bytes());
-  assert_eq!(parse_event(&done_exec), Some(ProcEvent::Exec(4242)));
-  // ...and short/corrupt buffers.
-  assert_eq!(parse_event(&[]), None);
-  assert_eq!(parse_event(&proc_buf(0x2, 1)[..10]), None);
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-fn self_test_report_distinguishes_silence_from_drift() {
-  use crate::server::proc_events::SelfTestReport;
-
-  // Proven delivery: any parsed event counts.
-  assert!(
-    SelfTestReport {
-      datagrams: 3,
-      parsed: 1,
-      ..SelfTestReport::default()
-    }
-    .live()
-  );
-  // Kernel talks but nothing parses: framing drift, not liveness.
-  assert!(
-    !SelfTestReport {
-      datagrams: 9,
-      parsed: 0,
-      ..SelfTestReport::default()
-    }
-    .live()
-  );
-  // Kernel silent: retryable stall, not proof of anything.
-  assert!(!SelfTestReport::default().live());
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-fn seq_tracker_counts_gaps_wraps_and_resets() {
-  use crate::server::proc_events::SeqTracker;
-
-  let mut tracker = SeqTracker::default();
-  // Anchoring is silent, per cpu independently.
-  assert_eq!(tracker.note(0, 100), 0);
-  assert_eq!(tracker.note(1, 5000), 0);
-  assert_eq!(tracker.note(0, 101), 0);
-  assert_eq!(tracker.missed(), 0);
-  // Forward jumps count their distance and re-anchor there.
-  assert_eq!(tracker.note(0, 105), 3);
-  assert_eq!(tracker.missed(), 3);
-  assert_eq!(tracker.note(0, 106), 0);
-  // u32 wrap is continuity, not a gap.
-  assert_eq!(tracker.note(2, u32::MAX - 1), 0);
-  assert_eq!(tracker.note(2, u32::MAX), 0);
-  assert_eq!(tracker.note(2, 0), 0);
-  assert_eq!(tracker.note(2, 2), 1);
-  // Backward jump (counter restart, e.g. CPU hotplug) re-anchors silently.
-  assert_eq!(tracker.note(3, 9000), 0);
-  assert_eq!(tracker.note(3, 12), 0);
-  assert_eq!(tracker.note(3, 13), 0);
-  assert_eq!(tracker.missed(), 4);
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-fn walk_observes_every_message_while_parse_takes_first() {
-  use crate::server::proc_events::{ProcEvent, parse_event, walk_proc_messages};
-
-  // Two EXEC messages in one datagram, on different (cpu, seq).
-  let mut first = proc_buf(0x2, 111);
-  let mut second = proc_buf(0x2, 222);
-  first[24..28].copy_from_slice(&10u32.to_le_bytes());
-  second[24..28].copy_from_slice(&20u32.to_le_bytes());
-  second[40..44].copy_from_slice(&1u32.to_le_bytes());
-  let mut both = first;
-  both.extend_from_slice(&second);
-
-  // Forwarding keeps first-event-wins.
-  assert_eq!(parse_event(&both), Some(ProcEvent::Exec(111)));
-  // Tracking sees both (no early stop): continuity, not a gap.
-  let mut seen = Vec::new();
-  walk_proc_messages(&both, &mut |cpu, seq, event| {
-    seen.push((cpu, seq, event.is_some()));
-    true
-  });
-  assert_eq!(seen, vec![(0, 10, true), (1, 20, true)]);
-}
-
 #[test]
 fn proc_events_watcher_defaults_on_and_opts_out() {
   let mut server = proton_server(Vec::new());
@@ -1541,81 +1404,6 @@ fn proc_events_watcher_defaults_on_and_opts_out() {
   assert!(crate::RPCConfig::default().enable_proc_events);
   server.set_proc_events(false);
   assert!(!server.enable_proc_events);
-}
-
-#[test]
-fn vdf_rejects_nesting_attacks_and_truncation() {
-  use crate::server::steam::parse_vdf_str;
-
-  // 10k-deep nesting: iterative parser survives, depth cap stops it.
-  // The shallow prefix still parses (fail-open for data, fail-closed
-  // for the stack).
-  let mut hostile = String::from("\"root\"\n{\n\"ok\" \"yes\"\n");
-  for _ in 0..10_000 {
-    hostile.push_str("\"a\"\n{\n");
-  }
-  let doc = parse_vdf_str(&hostile);
-  assert!(doc.contains_key("root"));
-
-  // Untterminated quote: partial token dropped, prior data kept.
-  let doc = parse_vdf_str("\"a\"\n{\n\"k\" \"v\"\n\"open");
-  let inner = doc.get("a").and_then(|v| match v {
-    crate::server::steam::Vdf::Map(map) => Some(map),
-    _ => None,
-  });
-  // `k/v` parsed before the break; the unterminated tail is gone.
-  assert!(inner.is_some_and(|map| map.get("k").is_some()));
-
-  // Stray closing brace ends the parse instead of corrupting it.
-  let doc = parse_vdf_str("\"a\" \"1\"\n}\n\"b\" \"2\"");
-  assert!(!doc.contains_key("b"));
-}
-
-#[test]
-fn vdf_parses_libraryfolders_and_manifest() {
-  use crate::server::steam::{library_paths, manifest_ids, parse_vdf_str};
-
-  // New format: paths nested under "path".
-  let doc = parse_vdf_str(
-    r#""libraryfolders"
-{
-  "0"
-  {
-    "path"  "/home/u/.local/share/Steam"
-    "label"  ""
-    "apps"
-    {
-      "3513350"  "89181523617"
-    }
-  }
-  "1"
-  {
-    "path"  "/mnt/games/Steam"
-  }
-}"#,
-  );
-  let mut paths = library_paths(&doc);
-  paths.sort();
-  assert_eq!(
-    paths,
-    vec!["/home/u/.local/share/Steam", "/mnt/games/Steam"]
-  );
-
-  // Legacy format: path directly as the value.
-  let doc = parse_vdf_str("\"libraryfolders\"\n{\n\"0\"\t\t\"/old/steam\"\n}");
-  assert_eq!(library_paths(&doc), vec!["/old/steam"]);
-
-  // Manifest excerpt (real NTE shape): appid + installdir.
-  let doc = parse_vdf_str(
-    "\"AppState\"\n{\n\"appid\"\t\t\"4508340\"\n\"Universe\"\t\t\"1\"\n\"name\"\t\t\"NTE: Neverness to Everness\"\n\"installdir\"\t\t\"Neverness to Everness\"\n}",
-  );
-  assert_eq!(
-    manifest_ids(&doc),
-    Some(("4508340".to_string(), "Neverness to Everness".to_string()))
-  );
-  // Missing halves degrade to None, never panic.
-  assert!(manifest_ids(&parse_vdf_str("\"AppState\"\n{\n\"appid\"\t\t\"1\"\n}")).is_none());
-  assert!(manifest_ids(&parse_vdf_str("")).is_none());
 }
 
 /// Hermetic fake Steam root under the temp dir (unique per process, so
@@ -1644,7 +1432,7 @@ fn fake_steam_root(tag: &str, manifests: &[(&str, &str)]) -> crate::tests::TempD
 fn steam_libraries_match_prefix_and_refresh() {
   use std::time::SystemTime;
 
-  use crate::server::steam::SteamLibraries;
+  use rsrpc_steam::SteamLibraries;
 
   // Direct injection (no env): hermetic by construction, no races possible.
   let root = fake_steam_root("prefix", &[("12345", "Vdf Game")]);
@@ -1721,7 +1509,7 @@ fn match_process_prefers_vdf_over_folder() {
     proton_entry("999", "Steam Other", None, Some("777777")),
   ];
   let server = proton_server(db.clone());
-  server.set_steam_libraries(crate::server::steam::SteamLibraries::from_root(&root));
+  server.set_steam_libraries(rsrpc_steam::SteamLibraries::from_root(&root));
   let bundle = server.bundle();
   let mut variant_bufs: [String; 5] = Default::default();
   let mut reversed_path = String::with_capacity(256);
@@ -1763,7 +1551,7 @@ fn match_process_shortcut_id_prefers_name() {
     proton_entry("999", "Steam Other", None, Some("777777")),
   ];
   let server = proton_server(db.clone());
-  server.set_steam_libraries(crate::server::steam::SteamLibraries::from_root(&root));
+  server.set_steam_libraries(rsrpc_steam::SteamLibraries::from_root(&root));
   let bundle = server.bundle();
   let mut variant_bufs: [String; 5] = Default::default();
   let mut reversed_path = String::with_capacity(256);
@@ -1810,51 +1598,8 @@ fn match_process_shortcut_id_prefers_name() {
 }
 
 #[test]
-fn mount_roots_detect_partition_layouts() {
-  use crate::server::steam::mount_library_roots_for;
-
-  // A second disk carrying a library outside every Steam root: the mount
-  // table alone must surface it (pseudo filesystems never do).
-  // TempDir guard: removed on drop, panic or not.
-  let disk = crate::tests::TempDir::new("disk");
-  let lib = disk.join("SteamLibrary");
-  std::fs::create_dir_all(lib.join("steamapps")).unwrap();
-  let mounts = format!(
-    "proc /proc proc rw 0 0\n\
-     sysfs /sys sysfs rw 0 0\n\
-     /dev/sda1 / ext4 rw 0 0\n\
-     /dev/sdb1 /mnt/data ext4 rw 0 0\n\
-     /dev/sdc1 {} ext4 rw 0 0\n",
-    disk.to_string_lossy()
-  );
-  let roots = mount_library_roots_for(&mounts);
-  assert!(roots.contains(&lib), "partition library missing: {roots:?}");
-  // Pseudo mounts contribute nothing.
-  assert!(
-    !roots
-      .iter()
-      .any(|r| r.starts_with("/proc") || r.starts_with("/sys"))
-  );
-}
-
-#[test]
-fn mount_escapes_decode_octal() {
-  use crate::server::steam::unescape_mount;
-
-  assert_eq!(unescape_mount("/mnt/data"), "/mnt/data");
-  assert_eq!(unescape_mount("/mnt/my\\040disk"), "/mnt/my disk");
-  assert_eq!(unescape_mount("/mnt/a\\012b"), "/mnt/a\nb");
-  assert_eq!(unescape_mount("/mnt/back\\134slash"), "/mnt/back\\slash");
-  // Encoded backslash followed by digits is literal, not a space.
-  assert_eq!(unescape_mount("/mnt/x\\134040"), "/mnt/x\\040");
-  // Truncated/invalid escapes pass through untouched.
-  assert_eq!(unescape_mount("/mnt/tail\\"), "/mnt/tail\\");
-  assert_eq!(unescape_mount("/mnt/x\\4y"), "/mnt/x\\4y");
-}
-
-#[test]
 fn steam_cache_roundtrip_and_corrupt_fallback() {
-  use crate::server::steam::SteamLibraries;
+  use rsrpc_steam::SteamLibraries;
 
   // Borrowed process-global env (serialized with the overrides test
   // via lock_env); TempDir + EnvRestore guards clean up dirs and env on

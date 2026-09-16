@@ -4,11 +4,6 @@ pub mod process;
 pub mod utils;
 pub mod websocket;
 
-pub use rsrpc_steam as steam;
-
-#[cfg(target_os = "linux")]
-pub(crate) use rsrpc_proc_events as proc_events;
-
 #[cfg(target_os = "windows")]
 pub mod ipc_win;
 

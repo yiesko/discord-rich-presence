@@ -30,7 +30,8 @@ pub use rsrpc_types::{AppId, SocketId};
 #[cfg(test)]
 mod tests;
 
-pub type ProcessCallback = dyn FnMut(ProcessScanState) + Send + Sync;
+/// Scan-tick callback (re-exported: owned by `rsrpc-detect`).
+pub use rsrpc_detect::types::ProcessCallback;
 
 /// Depth of the client→bridge event queues (IPC and WebSocket legs).
 /// Bounded on purpose (see `start`): backpressure instead of unbounded

@@ -1,0 +1,422 @@
+//! One database generation: automata, index tables and entry lists.
+//!
+//! The atomic unit is the whole [`DetectablesBundle`], swapped via
+//! `ArcSwap`: readers hold one `Arc` per tick and always observe a
+//! self-consistent snapshot, never a torn mix mid-refresh.
+
+use std::sync::Arc;
+
+use aho_corasick::AhoCorasick;
+
+use crate::db::DetectableActivity;
+use crate::scan::{name_matchable, normalize_name, os_matches};
+use crate::types::{OsName, ScannedEntry};
+
+/// Sorted key→index table replacing a `HashMap` for the aux lookups: no
+/// buckets (~33B each in SwissTable), no hashing, no per-key `String`
+/// capacity field. Lookups happen only on match misses (rare per tick),
+/// where O(log n) binary search over ~20k short keys is noise next to a
+/// single `/proc` read. First-inserted index wins ties — identical to the
+/// `or_insert` it replaces (callers insert canonical entries before
+/// aliases, preserving canonical-first ties).
+#[derive(Clone, Debug, Default)]
+pub struct SortedIndex {
+  entries: Vec<(Box<str>, usize)>,
+}
+
+impl SortedIndex {
+  /// Build from `(key, index)` pairs: stable-sorts by key and keeps the
+  /// first index per duplicate key (canonical-first ties, like the
+  /// `or_insert` this replaces), then shrinks to fit.
+  pub(crate) fn build(mut entries: Vec<(Box<str>, usize)>) -> Self {
+    // Stable sort: equal keys keep insertion order, so `dedup_by` below
+    // (which keeps the FIRST of each run) preserves first-wins.
+    entries.sort_by(|a, b| {
+      let (ka, kb): (&str, &str) = (&a.0, &b.0);
+      ka.cmp(kb)
+    });
+    entries.dedup_by(|curr, prev| curr.0 == prev.0);
+    entries.shrink_to_fit();
+    Self { entries }
+  }
+
+  /// Look up one key by binary search: O(log n), only used on match
+  /// misses (rare per tick).
+  pub fn get(&self, key: &str) -> Option<&usize> {
+    self
+      .entries
+      .binary_search_by(|(k, _)| {
+        let ka: &str = k;
+        ka.cmp(key)
+      })
+      .ok()
+      .map(|idx| &self.entries[idx].1)
+  }
+
+  /// Number of indexed keys (boot diagnostics).
+  pub(crate) fn len(&self) -> usize {
+    self.entries.len()
+  }
+
+  /// Membership probe (test-only; production only needs [`get`](SortedIndex::get)).
+  pub fn contains_key(&self, key: &str) -> bool {
+    self.get(key).is_some()
+  }
+
+  /// Iterate all entries (used to derive the de-dotted twin table).
+  pub(crate) fn iter(&self) -> impl Iterator<Item = &(Box<str>, usize)> + '_ {
+    self.entries.iter()
+  }
+}
+
+/// Everything derived from one database generation, swapped atomically.
+///
+/// The atomic unit is automata, index tables, lists and aux maps. The
+/// independent exclusions filter and Steam roots refresh alongside (two
+/// swaps, not one): a tick may briefly mix generations. Harmless by
+/// construction — exclusions only subtract, roots only add candidates —
+/// so folding them into the bundle would buy nothing.
+///
+/// Rationale: the scanner used to hold the automaton, the index table,
+/// the activity list and the aux maps under SEPARATE locks, replaced one
+/// at a time by the hourly refresh. A scan landing mid-swap then probed a
+/// NEW automaton against OLD indexes: index-out-of-bounds panic (dead
+/// scan thread) or, worse, a silently mis-attributed game. With the whole
+/// generation behind ONE Arc, readers clone it once per tick (or per
+/// event) and can only ever observe a self-consistent snapshot; the
+/// writer builds the next generation off-thread and swaps the pointer.
+pub struct DetectablesBundle {
+  pub(crate) list: Vec<Arc<ScannedEntry>>,
+  pub(crate) ac: AhoCorasick,
+  pub(crate) indexes: Vec<[usize; 2]>,
+  /// Proton fallback automaton (Linux only): `win32` executables from the
+  /// main DB, probed after the native patterns and the authoritative Steam
+  /// AppId, but before the stem/folder heuristics. Empty on other platforms.
+  pub(crate) proton_ac: Option<AhoCorasick>,
+  pub(crate) proton_indexes: Vec<[usize; 2]>,
+  /// Steam AppId (steam-distributor SKUs only) -> activity index.
+  /// Lets us detect store games whose DB entry ships empty `executables`.
+  /// Sorted vec, not a map: lookups only happen on match misses.
+  pub(crate) steam_map: SortedIndex,
+  /// Normalized game name -> activity index, for the conservative exe-stem
+  /// fallback (exact, multi-word names only, e.g. `how to fish`).
+  /// Sorted vec, not a map: lookups only happen on match misses.
+  pub(crate) name_map: SortedIndex,
+  /// De-dotted twin of `name_map` above (only keys containing dots):
+  /// last-tier fallback for dotted title folders (`R.E.P.O.`,
+  /// `Q.U.B.E.`), which the exact walk skips as versions. Built by
+  /// [`undotted_names`], same canonical-first ties.
+  pub(crate) name_map_nodot: SortedIndex,
+  pub(crate) custom: Vec<Arc<ScannedEntry>>,
+  pub(crate) custom_ac: Option<AhoCorasick>,
+  pub(crate) custom_indexes: Vec<[usize; 2]>,
+}
+
+impl DetectablesBundle {
+  /// Blind-but-valid generation for catastrophic automaton build
+  /// failures (network-supplied DB exceeds builder limits): detection
+  /// misses everything instead of panicking the daemon.
+  fn empty() -> Self {
+    Self {
+      list: Vec::new(),
+      ac: build_ac_automaton(&[]).expect("[bug] empty automaton always builds"),
+      indexes: Vec::new(),
+      proton_ac: None,
+      proton_indexes: Vec::new(),
+      steam_map: SortedIndex::default(),
+      name_map: SortedIndex::default(),
+      name_map_nodot: SortedIndex::default(),
+      custom: Vec::new(),
+      custom_ac: None,
+      custom_indexes: Vec::new(),
+    }
+  }
+}
+
+/// Auxiliary lookup maps over the main DB:
+/// Steam store id -> activity index, normalized game name -> activity index.
+/// Alternative titles (`aliases`) join the name map under the same
+/// conservative gate — exact, multi-word only — so a generic alias can
+/// never collide; canonical names are inserted first and win ties.
+pub fn build_aux_maps(detectables: &[Arc<ScannedEntry>]) -> (SortedIndex, SortedIndex) {
+  let mut steam: Vec<(Box<str>, usize)> = Vec::new();
+  let mut names: Vec<(Box<str>, usize)> = Vec::new();
+
+  for (index, activity) in detectables.iter().enumerate() {
+    for id in &activity.steam_ids {
+      if !id.is_empty() {
+        steam.push((id.clone(), index));
+      }
+    }
+
+    // Only matchable names participate in the exe-stem fallback, so generic
+    // stems (`fish`, `steam`, `game`) can never collide with `Fish`/`Steam`.
+    let normalized = normalize_name(&activity.name);
+    if name_matchable(&normalized) {
+      names.push((normalized.into_boxed_str(), index));
+    }
+    for alias in &activity.aliases {
+      let normalized = normalize_name(alias);
+      if name_matchable(&normalized) {
+        names.push((normalized.into_boxed_str(), index));
+      }
+    }
+  }
+
+  let (steam_map, name_map) = (SortedIndex::build(steam), SortedIndex::build(names));
+  tracing::info!(
+    "[Process Scanner] Aux maps: {} steam ids, {} matchable names",
+    steam_map.len(),
+    name_map.len()
+  );
+  (steam_map, name_map)
+}
+
+/// De-dotted form for the folder-walk fallback tier: dots become
+/// spaces (runs collapsed), so `R.E.P.O. Ghost Haul` compares equal on
+/// the map-key side and the on-disk folder side alike.
+pub(crate) fn dedot(name: &str) -> String {
+  name
+    .replace('.', " ")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// De-dotted twin of the name map, for the folder-walk fallback (see
+/// [`match_name_or_folder`](crate::scan::match_name_or_folder)): only keys that actually contain dots, so
+/// the extra table stays tiny. Built in canonical order (lowest index
+/// wins ties), exactly like the main map.
+pub fn undotted_names(name_map: &SortedIndex) -> SortedIndex {
+  let mut dotted: Vec<(usize, Box<str>)> = name_map
+    .iter()
+    .filter(|(key, _)| key.contains('.'))
+    .map(|(key, index)| (*index, key.clone()))
+    .collect();
+  // Lowest index first: `SortedIndex::build` keeps the first of each
+  // duplicate key, so canonical entries win ties exactly like before.
+  dotted.sort_by_key(|(index, _)| *index);
+  SortedIndex::build(
+    dotted
+      .into_iter()
+      .map(|(index, key)| (dedot(&key).into_boxed_str(), index))
+      .collect(),
+  )
+}
+
+/// Generate matching variants of a process path, removing 64-bit markers
+/// (parity with arrpc/pog5-rsrpc). E.g. `/games/wow64.exe` produces
+/// `/games/wow.exe` which matches a `wow.exe` database entry.
+///
+/// Writes into caller-owned buffers and returns how many are filled, so the
+/// per-process scan allocates nothing at steady state (buffers are reused
+/// across processes and scans; only marker hits allocate one temp string).
+pub fn path_variants_into(path: &str, out: &mut [String; 5]) -> usize {
+  out[0].clear();
+  out[0].push_str(path);
+  let mut count = 1;
+  for marker in ["64", ".x64", "x64", "_64"] {
+    if !path.contains(marker) {
+      continue;
+    }
+    let variant = path.replace(marker, "");
+    if variant != path && !out[..count].contains(&variant) && count < out.len() {
+      out[count].clear();
+      out[count].push_str(&variant);
+      count += 1;
+    }
+  }
+  count
+}
+
+/// Exe file name when the normalized `argv[0]` carries no directories
+/// (bare exe, e.g. some Proton launches): `None` when directories are
+/// present (the direct-path match covers those) or the name is empty.
+#[inline]
+pub fn bare_exe(normalized_path: &str) -> Option<&str> {
+  let trimmed = normalized_path.strip_prefix('/').unwrap_or(normalized_path);
+  if trimmed.is_empty() || trimmed.contains('/') {
+    return None;
+  }
+  Some(trimmed)
+}
+
+fn build_ac_patterns(
+  detectables: &[Arc<ScannedEntry>],
+) -> Result<(AhoCorasick, Vec<[usize; 2]>), aho_corasick::BuildError> {
+  build_ac_patterns_with_os_filter(detectables, true)
+}
+
+fn build_ac_patterns_allow_all_os(
+  detectables: &[Arc<ScannedEntry>],
+) -> Result<(AhoCorasick, Vec<[usize; 2]>), aho_corasick::BuildError> {
+  build_ac_patterns_with_os_filter(detectables, false)
+}
+
+/// Build one self-consistent detection generation from slim entries:
+/// every automaton, index table, list and aux map derived from the same
+/// inputs. The caller swaps the resulting bundle in with a single pointer
+/// write — readers never observe a torn mix, no matter when the refresh
+/// lands. Callers convert full [`DetectableActivity`] inputs once via
+/// [`ScannedEntry::from_activity`] before calling.
+pub(crate) fn build_bundle(
+  detectable: Vec<Arc<ScannedEntry>>,
+  custom: Vec<Arc<ScannedEntry>>,
+) -> Result<DetectablesBundle, aho_corasick::BuildError> {
+  let (ac, idx) = build_ac_patterns(&detectable)?;
+  let (proton_ac, proton_idx) = build_proton_ac_patterns(&detectable)?;
+  tracing::info!(
+    "[Process Scanner] Automata heap: native {} bytes, proton {} bytes",
+    ac.memory_usage(),
+    proton_ac.as_ref().map(|ac| ac.memory_usage()).unwrap_or(0)
+  );
+  let (steam_map, name_map) = build_aux_maps(&detectable);
+  let name_map_nodot = undotted_names(&name_map);
+  let (custom_ac, custom_idx) = if custom.is_empty() {
+    (None, Vec::new())
+  } else {
+    let (ac, idx) = build_ac_patterns_allow_all_os(&custom)?;
+    (Some(ac), idx)
+  };
+  Ok(DetectablesBundle {
+    list: detectable,
+    ac,
+    indexes: idx,
+    proton_ac,
+    proton_indexes: proton_idx,
+    steam_map,
+    name_map,
+    name_map_nodot,
+    custom,
+    custom_ac,
+    custom_indexes: custom_idx,
+  })
+}
+
+fn build_ac_patterns_with_os_filter(
+  detectables: &[Arc<ScannedEntry>],
+  enforce_os: bool,
+) -> Result<(AhoCorasick, Vec<[usize; 2]>), aho_corasick::BuildError> {
+  let mut exe_patterns: Vec<String> = Vec::new();
+  let mut exe_indexes: Vec<[usize; 2]> = Vec::new();
+
+  for (activity_index, activity) in detectables.iter().enumerate() {
+    for (exe_index, executable) in activity.executables.iter().enumerate() {
+      if executable.is_launcher {
+        continue;
+      }
+
+      // Only build patterns for executables that could run on this platform
+      // For custom overrides (enforce_os=false) we skip the OS filter entirely
+      // so that win32 executables can be detected on Linux via Proton/Wine
+      // — this is the fix for NFS HP Remastered etc that only ships win32 entries.
+      if enforce_os && !executable.os.is_empty() && !os_matches(executable.os.as_str()) {
+        continue;
+      }
+
+      exe_patterns.push(normalize_exe_pattern(&executable.name));
+      exe_indexes.push([activity_index, exe_index]);
+    }
+  }
+
+  Ok((build_ac_automaton(&exe_patterns)?, exe_indexes))
+}
+
+/// Build the automaton with ASCII case-insensitive matching: process
+/// paths are compared in their original case, so the scan loop never
+/// allocates a lowercased copy per process (the single hottest
+/// allocation in the profiler). Slashes/case in patterns are normalized
+/// at build time (rare), never per scan (hot).
+fn build_ac_automaton(exe_patterns: &[String]) -> Result<AhoCorasick, aho_corasick::BuildError> {
+  AhoCorasick::builder()
+    .ascii_case_insensitive(true)
+    .build(exe_patterns)
+}
+
+/// Normalize one DB executable name into a reversed AC pattern:
+/// consistent slashes, leading `/` (`>` becomes `/`, arrpc parity).
+/// Case is left alone — the automaton matches insensitively.
+fn normalize_exe_pattern(name: &str) -> String {
+  // Make paths consistent, and fix some additional checks
+  let mut exec_name = name.replace('\\', "/");
+
+  // Checks adapted from arrpc, remain the '>' in DetectableActivity for later argument checks
+  if exec_name.starts_with(">") {
+    exec_name.replace_range(0..1, "/");
+  } else if !exec_name.starts_with("/") {
+    exec_name.insert(0, '/');
+  }
+
+  exec_name.chars().rev().collect::<String>()
+}
+
+/// Proton fallback automaton: `win32` executables from the main DB, for
+/// Wine/Proton games on Linux whose store id is unreadable and whose exe
+/// is too generic for the stem/folder heuristics. Linux-only: `None`
+/// (plus empty indexes) elsewhere, so the probe is a cheap miss off-Linux.
+fn build_proton_ac_patterns(
+  detectables: &[Arc<ScannedEntry>],
+) -> Result<(Option<AhoCorasick>, Vec<[usize; 2]>), aho_corasick::BuildError> {
+  #[cfg(not(target_os = "linux"))]
+  {
+    let _ = detectables;
+    Ok((None, Vec::new()))
+  }
+  #[cfg(target_os = "linux")]
+  {
+    let mut exe_patterns: Vec<String> = Vec::new();
+    let mut exe_indexes: Vec<[usize; 2]> = Vec::new();
+
+    for (activity_index, activity) in detectables.iter().enumerate() {
+      for (exe_index, executable) in activity.executables.iter().enumerate() {
+        if executable.is_launcher || executable.os != OsName::Win32 {
+          continue;
+        }
+        exe_patterns.push(normalize_exe_pattern(&executable.name));
+        exe_indexes.push([activity_index, exe_index]);
+      }
+    }
+
+    if exe_patterns.is_empty() {
+      return Ok((None, Vec::new()));
+    }
+    tracing::info!(
+      "[Process Scanner] Proton fallback: {} win32 patterns",
+      exe_patterns.len()
+    );
+    Ok((Some(build_ac_automaton(&exe_patterns)?), exe_indexes))
+  }
+}
+
+/// Build the initial detection generation, folding `custom` overrides
+/// in: one automaton construction per boot instead of build-then-rebuild.
+pub(crate) fn initial_bundle(
+  detectable: Vec<Arc<DetectableActivity>>,
+  custom: Vec<DetectableActivity>,
+) -> Arc<DetectablesBundle> {
+  tracing::info!(
+    "[Process Scanner] Building Aho-Corasick patterns for main detectable activities..."
+  );
+  // Convert both sides straight to the slim scanner form: no
+  // intermediate `Vec<Arc>` of full entries (24k Arcs built just to be
+  // re-walked and dropped).
+  let slim = |list: Vec<Arc<DetectableActivity>>| {
+    list
+      .iter()
+      .map(|entry| Arc::new(ScannedEntry::from_activity(entry)))
+      .collect::<Vec<_>>()
+  };
+  let custom: Vec<Arc<ScannedEntry>> = custom
+    .into_iter()
+    .map(|entry| Arc::new(ScannedEntry::from_owned(entry)))
+    .collect();
+  let bundle = Arc::new(build_bundle(slim(detectable), custom).unwrap_or_else(|e| {
+    tracing::warn!(
+      "[Process Scanner] Bundled database failed to build ({}), starting blind",
+      e
+    );
+    DetectablesBundle::empty()
+  }));
+  tracing::info!("[Process Scanner] Done!");
+  bundle
+}
