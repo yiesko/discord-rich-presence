@@ -313,6 +313,7 @@ const MAX_PATTERN_BYTES: usize = 1 << 20;
 impl Exclusions {
   /// Basename already normalized (lowercase, `/`-separated path): `true`
   /// when this process must stay invisible to detection.
+  #[inline]
   pub fn is_excluded(&self, basename: &str) -> bool {
     if self.executables.is_empty() && self.patterns.is_empty() {
       return false;

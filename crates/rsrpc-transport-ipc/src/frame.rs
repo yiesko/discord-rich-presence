@@ -149,9 +149,14 @@ pub fn send_empty(sink: &EventSink, pid: u64) {
 /// pipe): reads block the calling thread, so run this in `spawn_blocking`
 /// or a dedicated thread — never on an async worker.
 pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Write)) {
+  // Reused across frames: the 8 KiB read buffer and the message string
+  // would otherwise reallocate on every frame (`mem-reuse-collections`).
+  // Replies go through `buffer.get_mut()` (unbuffered writes bypass the
+  // read buffer; full-duplex TCP keeps ordering correct).
+  let mut buffer = std::io::BufReader::new(&mut *stream);
+  let mut message = String::new();
   loop {
     let current_pid = ipc.pid();
-    let mut buffer = std::io::BufReader::new(&mut *stream);
 
     let mut packet_type = [0; 4];
     let mut data_size = [0; 4];
@@ -177,13 +182,13 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
       break;
     }
 
-    let mut message = String::new();
+    message.clear();
     let data_size = u32::from_le_bytes(data_size);
     if data_size > MAX_IPC_PAYLOAD {
       tracing::warn!(
         "[ipc] Frame of {data_size} bytes exceeds the {MAX_IPC_PAYLOAD} byte limit, closing"
       );
-      send_close(stream, 1003, "Payload too large");
+      send_close(buffer.get_mut(), 1003, "Payload too large");
       break;
     }
 
@@ -203,7 +208,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
           "[ipc] Unknown packet type {}, closing",
           u32::from_le_bytes(packet_type)
         );
-        send_close(stream, 1003, "Unsupported packet type");
+        send_close(buffer.get_mut(), 1003, "Unsupported packet type");
         break;
       }
     };
@@ -219,18 +224,21 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
         };
         if data.v != 1 {
           tracing::warn!("[ipc] Invalid version: {}", data.v);
-          send_close(stream, 4004, "Invalid version");
+          send_close(buffer.get_mut(), 4004, "Invalid version");
           break;
         }
         if data.client_id.is_empty() {
           tracing::warn!("[ipc] Invalid client_id (empty)");
-          send_close(stream, 4000, "Invalid client_id");
+          send_close(buffer.get_mut(), 4000, "Invalid client_id");
           break;
         }
         ipc.set_handshake(true);
         ipc.set_client_id(data.client_id.clone());
         tracing::info!("[ipc] Client connected: {}", data.client_id);
-        if let Err(err) = stream.write_all(&encode(PacketType::Frame, &ipc.user_payload())) {
+        if let Err(err) = buffer
+          .get_mut()
+          .write_all(&encode(PacketType::Frame, &ipc.user_payload()))
+        {
           tracing::warn!("[ipc] Error sending connection response: {err}");
         }
       }
@@ -247,7 +255,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
               PacketType::Frame,
               &commands::rpc_error("", &Value::Null, 4005, "Invalid encoding"),
             );
-            if let Err(err) = stream.write_all(&resp) {
+            if let Err(err) = buffer.get_mut().write_all(&resp) {
               tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
             }
             continue;
@@ -261,12 +269,18 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
           // they never reach the event sink.
           "SUBSCRIBE" | "UNSUBSCRIBE" => {
             let resp = encode(PacketType::Frame, &commands::subscribe_ack(&activity_cmd));
-            if let Err(err) = stream.write_all(&resp) {
+            if let Err(err) = buffer.get_mut().write_all(&resp) {
               tracing::warn!("[ipc] Error sending subscribe ack: {err}");
             }
           }
           "SET_ACTIVITY" => {
-            handle_set_activity(ipc, stream, &message, &mut activity_cmd, current_pid);
+            handle_set_activity(
+              ipc,
+              buffer.get_mut(),
+              &message,
+              &mut activity_cmd,
+              current_pid,
+            );
           }
           "GET_USER" => {
             // Official response: the user object, or null when the id
@@ -283,7 +297,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
               PacketType::Frame,
               &commands::user_response(&activity_cmd, matched.then_some(&user)),
             );
-            if let Err(err) = stream.write_all(&resp) {
+            if let Err(err) = buffer.get_mut().write_all(&resp) {
               tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
             }
           }
@@ -299,7 +313,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
                 "CONNECTIONS_CALLBACK is not supported",
               ),
             );
-            if let Err(err) = stream.write_all(&resp) {
+            if let Err(err) = buffer.get_mut().write_all(&resp) {
               tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
             }
           }
@@ -309,7 +323,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
             activity_cmd.application_id = Some(ipc.client_id());
             ipc.send_event(activity_cmd.clone());
             let resp = encode(PacketType::Frame, &commands::generic_ack(&activity_cmd));
-            if let Err(err) = stream.write_all(&resp) {
+            if let Err(err) = buffer.get_mut().write_all(&resp) {
               tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
             }
           }
@@ -326,7 +340,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
               PacketType::Frame,
               &commands::rpc_error(&activity_cmd.cmd, &activity_cmd.nonce, code, message),
             );
-            if let Err(err) = stream.write_all(&resp) {
+            if let Err(err) = buffer.get_mut().write_all(&resp) {
               tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
             }
           }
@@ -357,7 +371,10 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
       }
       PacketType::Ping => {
         tracing::debug!("[ipc] Recieved ping");
-        if let Err(err) = stream.write_all(&encode(PacketType::Pong, &message)) {
+        if let Err(err) = buffer
+          .get_mut()
+          .write_all(&encode(PacketType::Pong, &message))
+        {
           tracing::info!("[ipc] Error sending pong: {err}");
         }
       }
@@ -398,7 +415,7 @@ fn handle_set_activity(
   // Echo the activity back intact (official echo semantics): the
   // lock-step guarantee is the reply itself, not a rewritten body.
   activity_cmd.fix();
-  let response = commands::set_activity_response(activity_cmd).unwrap_or(raw.to_string());
+  let response = commands::set_activity_response(activity_cmd).unwrap_or_else(|| raw.to_string());
   if let Err(err) = stream.write_all(&encode(PacketType::Frame, &response)) {
     tracing::warn!("[ipc] Error sending connection response: {err}");
   }

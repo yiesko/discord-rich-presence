@@ -61,7 +61,11 @@ impl StateSnapshot {
   pub fn new(app_version: &str, servers: StateServers, activities: Vec<StateActivity>) -> Self {
     Self {
       app_version: app_version.to_string(),
-      timestamp: chrono::Utc::now().timestamp_millis(),
+      timestamp: std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|age| i64::try_from(age.as_millis()).ok())
+        .unwrap_or(0),
       servers,
       activities,
     }

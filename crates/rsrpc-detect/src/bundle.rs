@@ -42,6 +42,7 @@ impl SortedIndex {
 
   /// Look up one key by binary search: O(log n), only used on match
   /// misses (rare per tick).
+  #[inline]
   pub fn get(&self, key: &str) -> Option<&usize> {
     self
       .entries

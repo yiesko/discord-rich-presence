@@ -49,7 +49,11 @@ impl ActivityCmd {
       .and_then(|args| args.activity.as_mut())
       .and_then(|activity| activity.timestamps.as_mut())
     {
-      let cur = chrono::Utc::now().timestamp() + (100 * 365 * 24 * 3600);
+      let cur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_secs() as i64)
+        .unwrap_or(0)
+        + (100 * 365 * 24 * 3600);
 
       // convert starting timestamp
       if let Some(start) = timestamps.start.as_mut() {

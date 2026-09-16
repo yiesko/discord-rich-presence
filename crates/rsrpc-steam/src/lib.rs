@@ -581,6 +581,7 @@ impl SteamLibraries {
 
   /// AppId whose install dir is the longest prefix of `normalized_path`
   /// (already lowercased, `/`-separated, leading `/` — the scanner's form).
+  #[inline]
   pub fn match_prefix(&self, normalized_path: &str) -> Option<&str> {
     let mut best: Option<&str> = None;
     let mut best_len = 0;
