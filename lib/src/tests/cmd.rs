@@ -130,8 +130,8 @@ fn fix_timestamps_converts_seconds_to_millis() {
 
   let activity = cmd.args.unwrap().activity.unwrap();
   let timestamps = activity.timestamps.unwrap();
-  assert_eq!(timestamps.start.unwrap().0, 1_000_000_000_000);
-  assert_eq!(timestamps.end.unwrap().0, 2_000_000_000_000);
+  assert_eq!(timestamps.start.unwrap().value(), 1_000_000_000_000);
+  assert_eq!(timestamps.end.unwrap().value(), 2_000_000_000_000);
 }
 
 #[test]
@@ -158,8 +158,8 @@ fn fix_timestamps_converts_micros_and_nanos_to_millis() {
 
   let activity = cmd.args.unwrap().activity.unwrap();
   let timestamps = activity.timestamps.unwrap();
-  assert_eq!(timestamps.start.unwrap().0, micros / 1_000);
-  assert_eq!(timestamps.end.unwrap().0, nanos / 1_000_000);
+  assert_eq!(timestamps.start.unwrap().value(), micros / 1_000);
+  assert_eq!(timestamps.end.unwrap().value(), nanos / 1_000_000);
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn fix_timestamps_keeps_millis_untouched() {
 
   let activity = cmd.args.unwrap().activity.unwrap();
   let timestamps = activity.timestamps.unwrap();
-  assert_eq!(timestamps.start.unwrap().0, future_ms);
+  assert_eq!(timestamps.start.unwrap().value(), future_ms);
 }
 
 #[test]

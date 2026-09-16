@@ -56,16 +56,16 @@ fn clones_share_detection_state() {
   b.last_process
     .lock()
     .unwrap()
-    .insert(crate::AppId("123456789012345678".to_string()), 42);
+    .insert(crate::AppId::from("123456789012345678".to_string()), 42);
   assert_eq!(
     a.last_process.lock().unwrap().clone(),
-    [(crate::AppId("123456789012345678".to_string()), 42)]
+    [(crate::AppId::from("123456789012345678".to_string()), 42)]
       .into_iter()
       .collect::<std::collections::HashMap<_, _>>()
   );
   assert_eq!(
     take_process_clear(&a),
-    vec![(42, crate::AppId("123456789012345678".to_string()))]
+    vec![(42, crate::AppId::from("123456789012345678".to_string()))]
   );
   assert!(b.last_process.lock().unwrap().is_empty());
 }
@@ -87,10 +87,10 @@ fn process_clear_consumes_outstanding_publication_once() {
     .last_process
     .lock()
     .unwrap()
-    .insert(crate::AppId("111111111111111111".to_string()), 1234);
+    .insert(crate::AppId::from("111111111111111111".to_string()), 1234);
   assert_eq!(
     take_process_clear(&connector),
-    vec![(1234, crate::AppId("111111111111111111".to_string()))]
+    vec![(1234, crate::AppId::from("111111111111111111".to_string()))]
   );
   // Consumed: further null scans skip (no clear spam, no re-clear).
   assert_eq!(take_process_clear(&connector), Vec::new());
@@ -103,8 +103,11 @@ fn replay_cache_evicts_oldest_beyond_cap() {
   let mut cache = std::collections::HashMap::new();
   for i in 0..=(MAX_CACHED_ACTIVITIES as u64) {
     cache.insert(
-      crate::SocketId(format!("pid-{i}")),
-      (empty_cached(1, crate::SocketId(format!("pid-{i}"))), i),
+      crate::SocketId::from(format!("pid-{i}")),
+      (
+        empty_cached(1, crate::SocketId::from(format!("pid-{i}"))),
+        i,
+      ),
     );
   }
   assert_eq!(cache.len(), MAX_CACHED_ACTIVITIES + 1);
@@ -119,8 +122,8 @@ fn replay_cache_evicts_oldest_beyond_cap() {
   // Within cap: a lone entry is untouched (no-shrink control case).
   let mut small = std::collections::HashMap::new();
   small.insert(
-    crate::SocketId("a".to_string()),
-    (empty_cached(1, crate::SocketId("a".to_string())), 7),
+    crate::SocketId::from("a".to_string()),
+    (empty_cached(1, crate::SocketId::from("a".to_string())), 7),
   );
   prune_cache(&mut small);
   assert!(small.contains_key("a"));
@@ -193,7 +196,7 @@ fn state_activities_flatten_replay_cache() {
   .expect("parse");
   let payload = cached_activity(&mut cmd).expect("encodes");
   let mut cache = std::collections::HashMap::new();
-  cache.insert(crate::SocketId("9".to_string()), (payload, 1));
+  cache.insert(crate::SocketId::from("9".to_string()), (payload, 1));
 
   let activities = state_activities(&cache);
   assert_eq!(activities.len(), 1);
@@ -208,7 +211,7 @@ fn handoff_suppresses_while_ipc_live_and_resumes_on_owner_clear() {
   use crate::server::client_connector::{HandoffState, ScannedGame};
 
   let game = ScannedGame {
-    id: crate::AppId("111111111111111111".to_string()),
+    id: crate::AppId::from("111111111111111111".to_string()),
     name: "Game".to_string(),
     pid: 1234,
     start: 0,
@@ -259,7 +262,7 @@ fn handoff_resume_only_matches_scanned_game() {
   assert_eq!(handoff.resume_for("1"), None);
 
   handoff.note_scan(Some(ScannedGame {
-    id: crate::AppId("2".to_string()),
+    id: crate::AppId::from("2".to_string()),
     name: "Other".to_string(),
     pid: 9,
     start: 0,
@@ -284,7 +287,10 @@ fn abrupt_close_releases_every_slot_of_dead_pid() {
   released.sort();
   assert_eq!(
     released,
-    vec![crate::AppId("1".to_string()), crate::AppId("2".to_string())]
+    vec![
+      crate::AppId::from("1".to_string()),
+      crate::AppId::from("2".to_string())
+    ]
   );
   // Other pids untouched; release is idempotent.
   assert!(handoff.is_suppressed("3"));
@@ -306,14 +312,14 @@ fn process_clear_drains_every_armed_slot_sorted() {
 
   {
     let mut armed = connector.last_process.lock().unwrap();
-    armed.insert(crate::AppId("222222222222222222".to_string()), 22);
-    armed.insert(crate::AppId("111111111111111111".to_string()), 11);
+    armed.insert(crate::AppId::from("222222222222222222".to_string()), 22);
+    armed.insert(crate::AppId::from("111111111111111111".to_string()), 11);
   }
   assert_eq!(
     take_process_clear(&connector),
     vec![
-      (11, crate::AppId("111111111111111111".to_string())),
-      (22, crate::AppId("222222222222222222".to_string())),
+      (11, crate::AppId::from("111111111111111111".to_string())),
+      (22, crate::AppId::from("222222222222222222".to_string())),
     ]
   );
   assert_eq!(take_process_clear(&connector), Vec::new());
@@ -355,7 +361,7 @@ fn generic_payload_carries_scanned_identity() {
   use crate::server::client_connector::{ScannedGame, generic_payload};
 
   let payload = generic_payload(&ScannedGame {
-    id: crate::AppId("111111111111111111".to_string()),
+    id: crate::AppId::from("111111111111111111".to_string()),
     name: "Game".to_string(),
     pid: 1234,
     start: 7,
@@ -375,7 +381,7 @@ fn generic_payload_start_is_numeric_millis() {
   use crate::server::client_connector::{ScannedGame, generic_payload};
 
   let payload = generic_payload(&ScannedGame {
-    id: crate::AppId("111111111111111111".to_string()),
+    id: crate::AppId::from("111111111111111111".to_string()),
     name: "Game".to_string(),
     pid: 1234,
     start: 1_700_000_000_000,
@@ -399,7 +405,7 @@ fn handoff_tables_are_bounded() {
   for i in 0..(MAX_HANDOFF_ENTRIES + 10) {
     handoff.note_publish(&format!("dead-app-{i}"), u64::MAX);
     handoff.note_scan(Some(ScannedGame {
-      id: crate::AppId(format!("dead-scan-{i}")),
+      id: crate::AppId::from(format!("dead-scan-{i}")),
       name: "Dead".to_string(),
       pid: u64::MAX,
       start: 1,

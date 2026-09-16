@@ -14,16 +14,18 @@ use std::{
 
 use user::RpcUser;
 
-pub mod cmd;
-pub mod commands;
 pub mod detection;
-pub mod error;
 mod logger;
 pub mod overrides;
 mod server;
 pub mod state;
 mod url_params;
-pub mod user;
+
+pub use rsrpc_protocol::commands;
+pub use rsrpc_protocol::error;
+pub use rsrpc_types::cmd;
+pub use rsrpc_types::user;
+pub use rsrpc_types::{AppId, SocketId};
 
 #[cfg(test)]
 mod tests;
@@ -34,112 +36,6 @@ pub type ProcessCallback = dyn FnMut(ProcessScanState) + Send + Sync;
 /// Bounded on purpose (see `start`): backpressure instead of unbounded
 /// growth under a spinning local client.
 pub(crate) const EVENT_QUEUE_BOUND: usize = 64;
-
-/// Discord application id: identifies a game/activity slot. Newtyped so
-/// socket ids, pids and raw strings can never mix at compile time; same
-/// wire format as the inner string.
-#[derive(
-  Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub struct AppId(pub String);
-
-/// Bridge socket id: identifies one client connection slot. See [`AppId`].
-#[derive(
-  Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub struct SocketId(pub String);
-
-impl std::fmt::Display for AppId {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    self.0.fmt(f)
-  }
-}
-
-impl std::fmt::Display for SocketId {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    self.0.fmt(f)
-  }
-}
-
-impl AsRef<str> for AppId {
-  fn as_ref(&self) -> &str {
-    &self.0
-  }
-}
-
-/// Borrow as `str` so `HashMap<AppId, _>` lookups accept `&str` without
-/// allocating an owned key on the hot path.
-impl std::borrow::Borrow<str> for AppId {
-  fn borrow(&self) -> &str {
-    &self.0
-  }
-}
-
-/// Same as [`AppId`]: socket maps accept `&str` lookups directly.
-impl std::borrow::Borrow<str> for SocketId {
-  fn borrow(&self) -> &str {
-    &self.0
-  }
-}
-
-impl AsRef<str> for SocketId {
-  fn as_ref(&self) -> &str {
-    &self.0
-  }
-}
-
-impl From<String> for AppId {
-  fn from(id: String) -> Self {
-    Self(id)
-  }
-}
-
-impl From<&str> for AppId {
-  fn from(id: &str) -> Self {
-    Self(id.to_string())
-  }
-}
-
-impl From<String> for SocketId {
-  fn from(id: String) -> Self {
-    Self(id)
-  }
-}
-
-impl From<&str> for SocketId {
-  fn from(id: &str) -> Self {
-    Self(id.to_string())
-  }
-}
-
-/// An app slot doubles as its own socket on the generic (scanner-driven)
-/// path: move the id across instead of cloning it.
-impl From<AppId> for SocketId {
-  fn from(id: AppId) -> Self {
-    Self(id.0)
-  }
-}
-
-/// Borrow an app id as its socket without touching the inner string.
-impl From<&AppId> for SocketId {
-  fn from(id: &AppId) -> Self {
-    Self(id.0.clone())
-  }
-}
-
-/// Unwrap back to the wire string (Display also works for formatting).
-impl From<AppId> for String {
-  fn from(id: AppId) -> Self {
-    id.0
-  }
-}
-
-/// Unwrap back to the wire string (Display also works for formatting).
-impl From<SocketId> for String {
-  fn from(id: SocketId) -> Self {
-    id.0
-  }
-}
 
 /// HTTP agent for Discord fetches (database, exclusions) with a global
 /// timeout: without it, a blackholed endpoint hangs the hourly refresh

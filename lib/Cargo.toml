@@ -12,6 +12,8 @@ keywords = ["discord", "rich-presence", "rpc", "bridge", "gaming"]
 categories = ["network-programming"]
 
 [dependencies]
+rsrpc-types = { path = "../crates/rsrpc-types" }
+rsrpc-protocol = { path = "../crates/rsrpc-protocol" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.21"

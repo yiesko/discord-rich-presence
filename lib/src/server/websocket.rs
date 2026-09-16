@@ -97,9 +97,10 @@ impl WebsocketConnector {
       }),
       // Empty range (or only launch_from_listener failures): no bind
       // error to keep — same text as before, lowercase, no log prefix.
-      None => Err(crate::error::RsrpcError::Message(format!(
-        "failed to start websocket server on ports {ws_port_start}-{ws_port_end}: all in use"
-      ))),
+      None => Err(crate::error::RsrpcError::WsExhausted {
+        start: ws_port_start,
+        end: ws_port_end,
+      }),
     }
   }
 

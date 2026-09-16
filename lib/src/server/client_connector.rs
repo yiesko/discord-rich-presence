@@ -86,6 +86,11 @@ pub(crate) struct HandoffState {
   last_scans: HashMap<crate::AppId, ScannedGame>,
 }
 
+/// Replay cache: socket id → (shared payload, sequence).
+/// The `Arc` shares one build across cache, refresh and broadcast instead
+/// of cloning the payload per use (`mem-zero-copy`).
+type ReplayCache = HashMap<crate::SocketId, (Arc<commands::CachedActivity>, u64)>;
+
 /// Cap for the handoff tables: distinct live app-ids are tiny in practice
 /// (co-running games plus their companions). The cap only bites a client
 /// publishing hundreds of ids without clearing (malicious or buggy) —
@@ -213,7 +218,7 @@ pub(crate) fn is_process_alive(pid: u64) -> bool {
 
 /// Build the generic process-detection payload for a scanned game (the
 /// shape `process_loop` broadcasts; reused by the handoff resume path).
-pub(crate) fn generic_payload(game: &ScannedGame) -> commands::CachedActivity {
+pub(crate) fn generic_payload(game: &ScannedGame) -> Arc<commands::CachedActivity> {
   let payload_struct = commands::ProcessPayload {
     activity: commands::ProcessActivity {
       application_id: game.id.clone(),
@@ -239,6 +244,7 @@ pub(crate) fn generic_payload(game: &ScannedGame) -> commands::CachedActivity {
       Vec::new()
     }),
   }
+  .into()
 }
 
 #[derive(Clone)]
@@ -267,7 +273,7 @@ pub(crate) struct ClientConnector {
   /// clients that connect after the activity was set (like arRPC). Each
   /// entry carries a sequence number so the cache can evict the oldest
   /// first when it hits [`MAX_CACHED_ACTIVITIES`].
-  last_activities: Arc<Mutex<HashMap<crate::SocketId, (commands::CachedActivity, u64)>>>,
+  last_activities: Arc<Mutex<ReplayCache>>,
   /// Monotonic sequence for replay-cache recency (LRU eviction order).
   activity_seq: Arc<Mutex<u64>>,
 
@@ -475,7 +481,7 @@ impl ClientConnector {
   fn poll_loop(
     server: EventHub,
     clients: Arc<Mutex<HashMap<u64, Responder>>>,
-    last_activities: Arc<Mutex<HashMap<crate::SocketId, (commands::CachedActivity, u64)>>>,
+    last_activities: Arc<Mutex<ReplayCache>>,
     user: Arc<Mutex<RpcUser>>,
     default_protocol: BridgeProtocol,
   ) {
@@ -785,7 +791,7 @@ impl ClientConnector {
       // Remember the scan for the handoff: an IPC clear hands the slot
       // back to exactly this game (the scanner won't re-emit it).
       let game = ScannedGame {
-        id: crate::AppId(hit.entry.id.to_string()),
+        id: crate::AppId::from(hit.entry.id.clone()),
         name: hit.entry.name.to_string(),
         pid: hit.pid,
         start: hit.start,
@@ -893,7 +899,7 @@ impl ClientConnector {
   /// Broadcast an activity payload to all connected clients, updating the
   /// replay cache so clients connecting later catch up on the current presence.
   #[hotpath::measure]
-  fn broadcast_activity(&self, payload: commands::CachedActivity, socket_id: crate::SocketId) {
+  fn broadcast_activity(&self, payload: Arc<commands::CachedActivity>, socket_id: crate::SocketId) {
     // Keep the replay cache in sync, pruning cleared activities
     let is_clear = serde_json::from_str::<Value>(&payload.json)
       .ok()
@@ -923,7 +929,7 @@ impl ClientConnector {
   /// Rebroadcast every cached activity (refresh tick): no cache bookkeeping,
   /// just convergence for clients that missed a frame.
   fn refresh_clients(&self) {
-    let payloads: Vec<commands::CachedActivity> = self
+    let payloads: Vec<Arc<commands::CachedActivity>> = self
       .last_activities
       .lock()
       .unwrap_or_else(|e| e.into_inner())
@@ -1174,9 +1180,7 @@ pub(crate) fn handle_bridge_control(
 
 /// Flatten the replay cache into state-snapshot activities (best-effort:
 /// unparseable entries contribute their socket id only).
-pub(crate) fn state_activities(
-  cache: &HashMap<crate::SocketId, (commands::CachedActivity, u64)>,
-) -> Vec<StateActivity> {
+pub(crate) fn state_activities(cache: &ReplayCache) -> Vec<StateActivity> {
   let mut out = Vec::with_capacity(cache.len());
   out.extend(cache.iter().map(|(socket_id, (payload, _))| {
     let body: Value = serde_json::from_str(&payload.json).unwrap_or(Value::Null);
@@ -1206,7 +1210,7 @@ pub(crate) fn state_activities(
 
 /// Evict the oldest entries while the replay cache exceeds
 /// [`MAX_CACHED_ACTIVITIES`]. Pure map operation (no locks taken here).
-pub(crate) fn prune_cache(cache: &mut HashMap<crate::SocketId, (commands::CachedActivity, u64)>) {
+pub(crate) fn prune_cache(cache: &mut ReplayCache) {
   while cache.len() > MAX_CACHED_ACTIVITIES {
     let oldest = cache
       .iter()
@@ -1225,7 +1229,7 @@ fn launch_in_range(
   start: u16,
   end: u16,
   skip: Option<u16>,
-  name: &str,
+  name: &'static str,
 ) -> crate::error::Result<(EventHub, u16)> {
   let end = end.max(start);
   for port in start..=end {
@@ -1246,9 +1250,7 @@ fn launch_in_range(
     }
   }
 
-  Err(crate::error::RsrpcError::Message(format!(
-    "bridge {name} launch failed on ports {start}-{end}: all in use"
-  )))
+  Err(crate::error::RsrpcError::BridgeBind { name, start, end })
 }
 
 /// Send a raw JSON string, encoding it to MessagePack when the client speaks

@@ -1523,7 +1523,7 @@ impl ProcessServer {
     // exit path — including `?` and panics — releases it.
     let _scan_guard = ScanGuard::try_acquire(&self.scanning).ok_or_else(|| {
       debug!("[Process Scanner] Scanning already in progress");
-      crate::error::RsrpcError::Message("Scanning already in progress".to_string())
+      crate::error::RsrpcError::ScanInProgress
     })?;
 
     let mut obs_open = false;

@@ -1503,6 +1503,8 @@ dependencies = [
  "libc",
  "regex",
  "rmp-serde",
+ "rsrpc-protocol",
+ "rsrpc-types",
  "serde",
  "serde_json",
  "serde_with",
