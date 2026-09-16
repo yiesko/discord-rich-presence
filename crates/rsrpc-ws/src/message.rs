@@ -1,17 +1,23 @@
-//! Wire message with cheap clone for binary payloads.
+//! Wire message with cheap clone for both payload kinds.
 
 use bytes::Bytes;
+use tungstenite::Utf8Bytes;
+
+/// Re-exported so consumers can name the text backing without depending
+/// on `tungstenite` directly.
+pub use tungstenite::Utf8Bytes as TextBytes;
 
 /// An incoming/outgoing WebSocket message.
 ///
-/// `Binary` clones are O(1): [`Bytes`] is refcounted, so broadcast fan-out
-/// shares the allocation instead of copying per client (`mem-zero-copy`).
-/// `Text` is an owned [`String`]; tungstenite's `Utf8Bytes` stays internal.
+/// Both variants clone in O(1): [`Bytes`] and [`Utf8Bytes`] are refcounted,
+/// so broadcast fan-out shares the allocation instead of copying per
+/// client (`mem-zero-copy`). Builders that already own a `String`/`Vec<u8>`
+/// hand the allocation over with no copy (`From` impls below).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Message {
   /// UTF-8 text message.
-  Text(String),
+  Text(Utf8Bytes),
   /// Binary message (zero-copy clone).
   Binary(Bytes),
 }
@@ -35,13 +41,19 @@ impl Message {
 
 impl From<String> for Message {
   fn from(s: String) -> Self {
-    Self::Text(s)
+    Self::Text(s.into())
   }
 }
 
 impl From<&str> for Message {
   fn from(s: &str) -> Self {
-    Self::Text(s.to_owned())
+    Self::Text(s.into())
+  }
+}
+
+impl From<Utf8Bytes> for Message {
+  fn from(s: Utf8Bytes) -> Self {
+    Self::Text(s)
   }
 }
 
@@ -73,11 +85,25 @@ mod tests {
   }
 
   #[test]
+  fn text_clone_shares_allocation() {
+    let msg = Message::from(String::from("hello"));
+    let cloned = msg.clone();
+    let (Message::Text(a), Message::Text(b)) = (msg, cloned) else {
+      panic!("expected Text variants");
+    };
+    assert_eq!(a.as_str(), "hello");
+    assert!(std::ptr::eq(a.as_str().as_ptr(), b.as_str().as_ptr()));
+  }
+
+  #[test]
   fn conversions_cover_common_inputs() {
-    assert_eq!(Message::from("hi"), Message::Text("hi".to_owned()));
+    assert_eq!(
+      Message::from("hi"),
+      Message::from(Utf8Bytes::from_static("hi"))
+    );
     assert_eq!(
       Message::from(String::from("hi")),
-      Message::Text("hi".to_owned())
+      Message::from(Utf8Bytes::from_static("hi"))
     );
     assert_eq!(
       Message::from(vec![1u8, 2]),

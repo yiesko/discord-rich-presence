@@ -391,12 +391,12 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
         // and MessagePack loops are independent; control traffic
         // practically only arrives on the JSON port).
         match message {
-          Message::Text(text) => match handle_bridge_control(&shared.user, &text) {
+          Message::Text(text) => match handle_bridge_control(&shared.user, text.as_str()) {
             Some((ack, changed)) => {
               let clients = shared.clients_for(default_protocol);
               let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
               if let Some(responder) = clients.get(&id) {
-                let _ = responder.try_send(Message::Text(ack));
+                let _ = responder.try_send(Message::Text(ack.into()));
               }
               if let Some(user) = changed {
                 let dispatch = commands::current_user_update(&user);
@@ -404,7 +404,7 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
                   .iter()
                   .filter_map(|(id, responder)| {
                     responder
-                      .try_send(Message::Text(dispatch.clone()))
+                      .try_send(Message::Text(dispatch.clone().into()))
                       .err()
                       .map(|_| *id)
                   })
@@ -795,7 +795,7 @@ impl Shared {
       (&mut json_clients, Message::Text(payload.json.clone())),
       (
         &mut msgpack_clients,
-        Message::Binary(bytes::Bytes::from(payload.msgpack.clone())),
+        Message::Binary(payload.msgpack.clone()),
       ),
     ] {
       // try_send never blocks: a full outbox reports Full here and the
@@ -853,7 +853,7 @@ impl Shared {
         .iter()
         .filter_map(|(id, responder)| {
           responder
-            .try_send(Message::Text(payload.clone()))
+            .try_send(Message::Text(payload.clone().into()))
             .err()
             .map(|_| *id)
         })
@@ -983,14 +983,18 @@ fn generic_payload(game: &ScannedGame) -> Arc<CachedActivity> {
   // encode failure is a future-field bug — degrade loudly in diagnostics,
   // never panic the broadcast path.
   Arc::new(commands::CachedActivity {
-    json: serde_json::to_string(&payload_struct).unwrap_or_else(|err| {
-      tracing::debug!("[bridge] Generic payload encode failed: {err}");
-      String::new()
-    }),
-    msgpack: rmp_serde::to_vec_named(&payload_struct).unwrap_or_else(|err| {
-      tracing::debug!("[bridge] Generic payload encode failed: {err}");
-      Vec::new()
-    }),
+    json: serde_json::to_string(&payload_struct)
+      .map(tungstenite::Utf8Bytes::from)
+      .unwrap_or_else(|err| {
+        tracing::debug!("[bridge] Generic payload encode failed: {err}");
+        tungstenite::Utf8Bytes::from_static("")
+      }),
+    msgpack: rmp_serde::to_vec_named(&payload_struct)
+      .map(bytes::Bytes::from)
+      .unwrap_or_else(|err| {
+        tracing::debug!("[bridge] Generic payload encode failed: {err}");
+        bytes::Bytes::new()
+      }),
     // Always built with `activity: Some` above.
     is_clear: false,
   })
@@ -1066,7 +1070,7 @@ fn take_process_clear(shared: &Shared) -> Vec<(u64, AppId)> {
 fn send_message(responder: &Responder, data: &str, protocol: BridgeProtocol) {
   match protocol {
     BridgeProtocol::Json => {
-      let _ = responder.try_send(Message::Text(data.to_string()));
+      let _ = responder.try_send(Message::Text(data.to_string().into()));
     }
     BridgeProtocol::MsgPack => {
       if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
@@ -1085,7 +1089,7 @@ fn send_cached(responder: &Responder, payload: &CachedActivity, protocol: Bridge
       let _ = responder.try_send(Message::Text(payload.json.clone()));
     }
     BridgeProtocol::MsgPack => {
-      let _ = responder.try_send(Message::Binary(bytes::Bytes::from(payload.msgpack.clone())));
+      let _ = responder.try_send(Message::Binary(payload.msgpack.clone()));
     }
   }
 }

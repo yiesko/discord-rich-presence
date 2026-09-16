@@ -267,6 +267,12 @@ fn cached_builds_share_one_allocation() {
   // Deref reaches both encodings without unwrapping.
   assert!(payload.json.contains("\"pid\": 42"));
   assert!(!payload.msgpack.is_empty());
+  // Cloning shares the refcounted backing, not the bytes.
+  assert!(std::ptr::eq(
+    payload.json.as_str().as_ptr(),
+    shared.json.as_str().as_ptr()
+  ));
+  assert_eq!(payload.msgpack.as_ptr(), shared.msgpack.as_ptr());
 }
 
 #[test]

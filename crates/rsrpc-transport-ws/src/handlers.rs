@@ -51,12 +51,9 @@ pub(crate) async fn handle_browser_command(
   if !has_code {
     tracing::warn!("[transport-ws] {} without code", event.cmd);
     return responder
-      .send_async(Message::Text(commands::rpc_error(
-        &event.cmd,
-        &event.nonce,
-        code,
-        message,
-      )))
+      .send_async(Message::Text(
+        commands::rpc_error(&event.cmd, &event.nonce, code, message).into(),
+      ))
       .await
       .is_ok();
   }
@@ -82,7 +79,10 @@ pub(crate) async fn handle_browser_command(
     );
     return true;
   };
-  responder.send_async(Message::Text(response)).await.is_ok()
+  responder
+    .send_async(Message::Text(response.into()))
+    .await
+    .is_ok()
 }
 
 /// Acknowledge a deep link (forwarded downstream).
@@ -99,7 +99,10 @@ pub(crate) async fn handle_deep_link(event: &ActivityCmd, responder: &Responder)
     tracing::warn!("[transport-ws] Dropping unserializable deep-link response");
     return true;
   };
-  responder.send_async(Message::Text(response)).await.is_ok()
+  responder
+    .send_async(Message::Text(response.into()))
+    .await
+    .is_ok()
 }
 
 /// Answer `CONNECTIONS_CALLBACK` with the official-shaped error.
@@ -123,14 +126,17 @@ pub(crate) async fn handle_connections_callback(
     tracing::warn!("[transport-ws] Dropping unserializable connections response");
     return true;
   };
-  responder.send_async(Message::Text(response)).await.is_ok()
+  responder
+    .send_async(Message::Text(response.into()))
+    .await
+    .is_ok()
 }
 
 /// Blind-ACK a subscription (no voice/guild backend exists; clients wait
 /// for the lock-step reply).
 pub(crate) async fn handle_subscribe(event: &ActivityCmd, responder: &Responder) -> bool {
   responder
-    .send_async(Message::Text(commands::subscribe_ack(event)))
+    .send_async(Message::Text(commands::subscribe_ack(event).into()))
     .await
     .is_ok()
 }
@@ -144,10 +150,9 @@ pub(crate) async fn handle_get_user(
   let wanted = event.args.as_ref().and_then(|args| args.user_id.as_ref());
   let matched = wanted.is_none_or(|id| *id == user.id);
   responder
-    .send_async(Message::Text(commands::user_response(
-      event,
-      matched.then_some(user),
-    )))
+    .send_async(Message::Text(
+      commands::user_response(event, matched.then_some(user)).into(),
+    ))
     .await
     .is_ok()
 }
@@ -160,12 +165,9 @@ pub(crate) async fn handle_unknown(cmd: &str, event: &ActivityCmd, responder: &R
   }
   let (code, message) = unsupported.unwrap_or((1000, "Unknown command"));
   responder
-    .send_async(Message::Text(commands::rpc_error(
-      &event.cmd,
-      &event.nonce,
-      code,
-      message,
-    )))
+    .send_async(Message::Text(
+      commands::rpc_error(&event.cmd, &event.nonce, code, message).into(),
+    ))
     .await
     .is_ok()
 }
@@ -197,7 +199,10 @@ pub(crate) async fn handle_set_activity(
   // considering the presence set. No confirm to send means the client is
   // still considered alive.
   let alive = match commands::set_activity_response(&stored) {
-    Some(response) => responder.send_async(Message::Text(response)).await.is_ok(),
+    Some(response) => responder
+      .send_async(Message::Text(response.into()))
+      .await
+      .is_ok(),
     None => true,
   };
   (alive, stored)

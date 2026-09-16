@@ -346,7 +346,11 @@ async fn on_connect(
     .lock()
     .unwrap_or_else(|e| e.into_inner())
     .ready_payload();
-  if responder.send_async(Message::Text(ready)).await.is_err() {
+  if responder
+    .send_async(Message::Text(ready.into()))
+    .await
+    .is_err()
+  {
     // Vanished mid-handshake: nothing to track.
     return;
   }

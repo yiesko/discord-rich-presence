@@ -323,7 +323,8 @@ impl ConnTask {
           match next {
             Some(Ok(WsMessage::Text(text))) => {
               last_seen = Instant::now();
-              let event = Event::Message(id, Message::Text(text.as_str().to_owned()));
+              // Moved, not copied: tungstenite already hands us refcounted text.
+              let event = Event::Message(id, Message::Text(text));
               if event_tx.send(event).await.is_err() {
                 break DisconnectReason::ServerShutdown;
               }
@@ -367,7 +368,7 @@ impl ConnTask {
 impl Message {
   fn into_ws(self) -> WsMessage {
     match self {
-      Self::Text(text) => WsMessage::Text(text.into()),
+      Self::Text(text) => WsMessage::Text(text),
       Self::Binary(bytes) => WsMessage::Binary(bytes),
     }
   }

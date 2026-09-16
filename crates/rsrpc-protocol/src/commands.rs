@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
 use serde_with::skip_serializing_none;
+use tungstenite::Utf8Bytes;
 
 use rsrpc_types::cmd::{ActivityCmd, ActivityPayload};
 use rsrpc_types::user::RpcUser;
@@ -50,10 +52,14 @@ fn empty_activity(pid: u64, socket_id: SocketId) -> String {
 /// frames for the 1337 port, MessagePack binary frames for the 1338 port).
 /// Builders return `Arc<CachedActivity>` so broadcast fan-out shares the
 /// single build instead of cloning per client (`mem-zero-copy`).
+///
+/// Both encodings are refcounted (`Utf8Bytes`/`Bytes`): cloning a payload
+/// bumps counters, and builders adopt their serialization buffers with no
+/// copy (`String`/`Vec<u8>` move straight in).
 #[derive(Clone, Debug)]
 pub struct CachedActivity {
-  pub json: String,
-  pub msgpack: Vec<u8>,
+  pub json: Utf8Bytes,
+  pub msgpack: Bytes,
   /// Whether this payload clears presence (`activity: null`). Recorded at
   /// construction so consumers never re-parse the JSON to find out.
   pub is_clear: bool,
@@ -76,8 +82,10 @@ pub fn empty_cached(pid: u64, socket_id: SocketId) -> Arc<CachedActivity> {
   // logger by design (`obs-library-facade`); callers that need the signal
   // should validate before building.
   Arc::new(CachedActivity {
-    json: empty_activity(pid, socket_id),
-    msgpack: rmp_serde::to_vec_named(&payload).unwrap_or_default(),
+    json: empty_activity(pid, socket_id).into(),
+    msgpack: rmp_serde::to_vec_named(&payload)
+      .map(Bytes::from)
+      .unwrap_or_default(),
     is_clear: true,
   })
 }
@@ -107,8 +115,8 @@ pub fn cached_activity(cmd: &mut ActivityCmd) -> Option<Arc<CachedActivity>> {
   };
 
   Some(Arc::new(CachedActivity {
-    json: serde_json::to_string(&payload).ok()?,
-    msgpack: rmp_serde::to_vec_named(&payload).ok()?,
+    json: serde_json::to_string(&payload).ok()?.into(),
+    msgpack: rmp_serde::to_vec_named(&payload).ok().map(Bytes::from)?,
     // Reached only when `args.activity` is `Some`: the serialized body
     // carries a real activity object, never null.
     is_clear: false,

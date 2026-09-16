@@ -202,8 +202,20 @@ fn parse_ignore_ids(input: Option<&str>) -> Vec<String> {
     .collect()
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Tokio runtime tuned for this daemon: I/O-light pumps plus a few
+/// blocking threads (scanner build, snapshot writes, one per IPC
+/// connection). Far below the defaults (workers = CPUs, 512 blocking
+/// threads) — fewer idle stacks, same headroom for real bursts.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+  tokio::runtime::Builder::new_multi_thread()
+    .worker_threads(4)
+    .max_blocking_threads(32)
+    .enable_all()
+    .build()?
+    .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
   // Fail-fast supervision (ADR-1): worker threads dying silently would
   // leave a zombie daemon (systemd green, detection/bridge dead) that
   // Restart=on-failure can never catch. Any panic anywhere exits the
