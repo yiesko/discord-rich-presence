@@ -174,14 +174,16 @@ pub(crate) async fn handle_unknown(cmd: &str, event: &ActivityCmd, responder: &R
 
 /// Forward `SET_ACTIVITY` and confirm with the arRPC-shaped reply.
 ///
-/// Returns `(alive, stored)`: `stored` is the fixed command (with the
-/// connect-query `client_id` fallback applied) for clear-on-disconnect.
+/// Returns whether the client is still alive; `false` prunes the slot
+/// immediately. The fixed command (with the connect-query `client_id`
+/// fallback applied) goes to the sink; the caller records the slim
+/// [`PublishedSlot`] itself, so no second deep clone happens here.
 pub(crate) async fn handle_set_activity(
   event: &ActivityCmd,
   query_client_id: Option<&str>,
   responder: &Responder,
   sink: &Sink,
-) -> (bool, ActivityCmd) {
+) -> bool {
   // Fall back to the client_id provided on connect (query param) when the
   // command itself does not carry an application_id.
   let mut event = event.clone();
@@ -192,44 +194,51 @@ pub(crate) async fn handle_set_activity(
   // Apply field fixes so the confirmation reply carries labels/urls (fix is
   // idempotent, so a downstream fix pass is harmless).
   event.fix();
-  let stored = event.clone();
-  sink.emit(event).await;
+  sink.emit(event.clone()).await;
 
   // Confirm to the game client; some RPC libraries wait for this before
   // considering the presence set. No confirm to send means the client is
   // still considered alive.
-  let alive = match commands::set_activity_response(&stored) {
+  match commands::set_activity_response(&event) {
     Some(response) => responder
       .send_async(Message::Text(response.into()))
       .await
       .is_ok(),
     None => true,
-  };
-  (alive, stored)
+  }
 }
 
-/// Build the clear command emitted when a client with a last activity dies.
-pub(crate) fn clear_for(last: &ActivityCmd) -> ActivityCmd {
+/// Slim per-pid publication record: everything a disconnect clear needs,
+/// without retaining the full command. A connection normally publishes
+/// one pid; companions multiplexing several stay covered up to
+/// [`MAX_TRACKED_PIDS`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishedSlot {
+  pub app_id: Option<String>,
+  pub pid: u64,
+  pub nonce: Value,
+}
+
+/// Cap on tracked pids per connection: bounds memory against pathological
+/// publishers while covering every realistic multiplexer. Beyond the cap
+/// the oldest entry drops (same as today's single-slot behavior for it).
+pub(crate) const MAX_TRACKED_PIDS: usize = 16;
+
+/// Build the clear command emitted when a published pid dies.
+pub(crate) fn clear_for_slot(published: &PublishedSlot) -> ActivityCmd {
   ActivityCmd {
-    application_id: last.application_id.clone(),
+    application_id: published.app_id.clone(),
     cmd: "SET_ACTIVITY".to_string(),
     data: None,
     evt: None,
     args: Some(ActivityCmdArgs {
-      // pid defaults to 0 when the last command had no args (malformed
-      // SET_ACTIVITY): pid 0 is never a genuine clear, so it is safely
-      // ignored downstream.
-      pid: Some(
-        last
-          .args
-          .as_ref()
-          .and_then(|args| args.pid)
-          .unwrap_or_default(),
-      ),
+      // pid 0 is never a genuine clear, so it is safely ignored
+      // downstream — same convention as the old whole-command clear.
+      pid: Some(published.pid),
       activity: None,
       code: None,
       user_id: None,
     }),
-    nonce: last.nonce.clone(),
+    nonce: published.nonce.clone(),
   }
 }

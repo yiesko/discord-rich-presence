@@ -191,3 +191,93 @@ async fn closed_sink_counts_drops_and_stays_alive() {
 
   transport.shutdown().await;
 }
+
+fn activity_cmd(pid: u64, app: &str, name: &str) -> String {
+  format!(
+    r#"{{"cmd":"SET_ACTIVITY","application_id":"{app}","args":{{"pid":{pid},"activity":{{"name":"{name}","type":0}}}},"nonce":"n{pid}"}}"#
+  )
+}
+
+async fn recv_clear(
+  rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>,
+) -> (Option<String>, Option<u64>) {
+  let cmd = next_cmd(rx).await;
+  assert_eq!(cmd.cmd, "SET_ACTIVITY");
+  assert!(
+    cmd
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "expected clear, got activity"
+  );
+  (
+    cmd.application_id.clone(),
+    cmd.args.as_ref().and_then(|a| a.pid),
+  )
+}
+
+#[tokio::test]
+async fn abrupt_close_clears_every_published_pid() {
+  let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+  // One connection publishes two games under different app ids.
+  for (pid, app) in [(11u64, "app-a"), (22u64, "app-b")] {
+    ws.send(tungstenite::Message::Text(
+      activity_cmd(pid, app, "G").into(),
+    ))
+    .await
+    .unwrap();
+    let _echo = read_text(&mut ws).await;
+    let cmd = next_cmd(&mut rx).await;
+    assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(pid));
+  }
+
+  // Abrupt close: raw TCP drop, no close frame.
+  drop(ws);
+  let mut clears = vec![recv_clear(&mut rx).await, recv_clear(&mut rx).await];
+  clears.sort();
+  assert_eq!(
+    clears,
+    vec![
+      (Some("app-a".to_string()), Some(11)),
+      (Some("app-b".to_string()), Some(22)),
+    ]
+  );
+
+  transport.shutdown().await;
+}
+
+#[tokio::test]
+async fn published_pid_history_is_bounded() {
+  let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+  // 20 distinct pids on one connection: only the 16 most recent may
+  // produce clears (MAX_TRACKED_PIDS); the rest are dropped history.
+  for pid in 1u64..=20 {
+    ws.send(tungstenite::Message::Text(
+      activity_cmd(pid, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+    let _echo = read_text(&mut ws).await;
+    let _ = next_cmd(&mut rx).await;
+  }
+  drop(ws);
+
+  let mut pids = Vec::new();
+  for _ in 0..16 {
+    let (_, pid) = recv_clear(&mut rx).await;
+    pids.push(pid.expect("clear carries pid"));
+  }
+  pids.sort_unstable();
+  assert_eq!(pids, (5u64..=20).collect::<Vec<_>>());
+
+  transport.shutdown().await;
+}

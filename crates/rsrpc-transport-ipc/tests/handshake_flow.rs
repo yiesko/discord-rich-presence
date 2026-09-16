@@ -23,6 +23,7 @@ struct TestFacilitator {
   pid: u64,
   nonce: String,
   sink: EventSink,
+  published_pids: Vec<u64>,
 }
 
 impl IpcFacilitator for TestFacilitator {
@@ -59,6 +60,12 @@ impl IpcFacilitator for TestFacilitator {
   fn sink(&self) -> &EventSink {
     &self.sink
   }
+  fn note_published_pid(&mut self, pid: u64) {
+    rsrpc_transport_ipc::frame::track_pid(&mut self.published_pids, pid);
+  }
+  fn take_published_pids(&mut self) -> Vec<u64> {
+    std::mem::take(&mut self.published_pids)
+  }
 }
 
 #[test]
@@ -75,6 +82,7 @@ fn handshake_set_activity_close_flow() {
     pid: 0,
     nonce: String::new(),
     sink,
+    published_pids: Vec::new(),
   };
   let mut server_stream = server_stream;
   let server = std::thread::spawn(move || handle_stream(&mut facil, &mut server_stream));
@@ -167,6 +175,7 @@ fn spawn_server() -> (
     pid: 0,
     nonce: String::new(),
     sink,
+    published_pids: Vec::new(),
   };
   let mut server_stream = server_stream;
   let server = std::thread::spawn(move || handle_stream(&mut facil, &mut server_stream));
@@ -225,6 +234,123 @@ fn unknown_packet_type_close_still_clears_presence() {
       .and_then(|a| a.activity.as_ref())
       .is_none()
   );
+
+  server.join().expect("server thread");
+}
+
+fn publish_pid(
+  client: &mut UnixStream,
+  rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>,
+  pid: u64,
+) {
+  write_frame(
+    client,
+    PacketType::Frame,
+    &format!(
+      r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{pid},"activity":{{"name":"G{pid}","type":0}}}},"nonce":"n{pid}"}}"#
+    ),
+  );
+  let (_, echo) = read_frame(client);
+  assert!(echo.contains("SET_ACTIVITY"), "expected echo, got: {echo}");
+  let cmd = recv_cmd(rx);
+  assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(pid));
+}
+
+fn recv_clear_pid(rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) -> u64 {
+  let cmd = recv_cmd(rx);
+  assert_eq!(cmd.cmd, "SET_ACTIVITY");
+  assert!(
+    cmd
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "expected clear"
+  );
+  cmd
+    .args
+    .as_ref()
+    .and_then(|a| a.pid)
+    .expect("clear carries pid")
+}
+
+#[test]
+fn abrupt_close_clears_every_published_pid() {
+  let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
+  client
+    .set_read_timeout(Some(Duration::from_secs(5)))
+    .expect("timeout");
+  let (sink, mut rx) = EventSink::bounded(16);
+  let mut facil = TestFacilitator {
+    handshake: false,
+    client_id: String::new(),
+    pid: 0,
+    nonce: String::new(),
+    sink,
+    published_pids: Vec::new(),
+  };
+  let mut server_stream = server_stream;
+  let server = std::thread::spawn(move || handle_stream(&mut facil, &mut server_stream));
+
+  write_frame(
+    &mut client,
+    PacketType::Handshake,
+    r#"{"v":1,"client_id":"test-app"}"#,
+  );
+  let (_, body) = read_frame(&mut client);
+  assert!(body.contains("READY"));
+
+  // One connection publishes two games, then dies without Close.
+  publish_pid(&mut client, &mut rx, 7);
+  publish_pid(&mut client, &mut rx, 8);
+  drop(client);
+
+  let mut pids = vec![recv_clear_pid(&mut rx), recv_clear_pid(&mut rx)];
+  pids.sort_unstable();
+  assert_eq!(pids, vec![7, 8]);
+
+  server.join().expect("server thread");
+}
+
+#[test]
+fn published_pid_history_is_bounded() {
+  let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
+  client
+    .set_read_timeout(Some(Duration::from_secs(5)))
+    .expect("timeout");
+  let (sink, mut rx) = EventSink::bounded(64);
+  let mut facil = TestFacilitator {
+    handshake: false,
+    client_id: String::new(),
+    pid: 0,
+    nonce: String::new(),
+    sink,
+    published_pids: Vec::new(),
+  };
+  let mut server_stream = server_stream;
+  let server = std::thread::spawn(move || handle_stream(&mut facil, &mut server_stream));
+
+  write_frame(
+    &mut client,
+    PacketType::Handshake,
+    r#"{"v":1,"client_id":"test-app"}"#,
+  );
+  let (_, body) = read_frame(&mut client);
+  assert!(body.contains("READY"));
+
+  // 20 distinct pids: only the 16 most recent may produce clears
+  // (MAX_TRACKED_PIDS); older history drops.
+  for pid in 1u64..=20 {
+    publish_pid(&mut client, &mut rx, pid);
+  }
+  drop(client);
+
+  let mut pids = Vec::new();
+  for _ in 0..16 {
+    pids.push(recv_clear_pid(&mut rx));
+  }
+  pids.sort_unstable();
+  assert_eq!(pids, (5u64..=20).collect::<Vec<_>>());
 
   server.join().expect("server thread");
 }

@@ -48,6 +48,20 @@ pub trait IpcFacilitator: Send {
   /// Downstream sink for validated commands.
   fn sink(&self) -> &EventSink;
 
+  /// Record a published pid for disconnect-clear coverage. Called on
+  /// every forwarded `SET_ACTIVITY`.
+  ///
+  /// Default: ignore (preserves single-pid behavior for external
+  /// implementors; the current pid is still cleared via [`send_empty`]).
+  fn note_published_pid(&mut self, _pid: u64) {}
+
+  /// Drain tracked pids for disconnect clears, oldest first.
+  ///
+  /// Default: none (external implementors keep today's exact behavior).
+  fn take_published_pids(&mut self) -> Vec<u64> {
+    Vec::new()
+  }
+
   /// Forward one command downstream (shed counted when the sink is full).
   /// Default impl suffices unless the server needs extra bookkeeping.
   fn send_event(&self, cmd: ActivityCmd) {
@@ -73,6 +87,38 @@ pub enum PacketType {
 /// Maximum IPC frame payload in bytes, matching arRPC/Discord (1 MiB).
 /// Larger frames are refused with a `1003` close instead of being read.
 pub const MAX_IPC_PAYLOAD: u32 = 1024 * 1024;
+
+/// Cap on tracked pids per connection: bounds memory against pathological
+/// publishers while covering every realistic multiplexer (one connection
+/// normally publishes one pid). Beyond the cap the oldest entry drops —
+/// same as today's single-pid behavior for it.
+pub(crate) const MAX_TRACKED_PIDS: usize = 16;
+
+/// Record a published pid, refreshing re-published pids as most recent
+/// and dropping the oldest beyond [`MAX_TRACKED_PIDS`].
+///
+/// Public so custom [`IpcFacilitator`] implementors share the exact
+/// disconnect-clear semantics instead of reimplementing the bound.
+pub fn track_pid(history: &mut Vec<u64>, pid: u64) {
+  if let Some(pos) = history.iter().position(|known| *known == pid) {
+    history.remove(pos);
+  } else if history.len() >= MAX_TRACKED_PIDS {
+    history.remove(0);
+  }
+  history.push(pid);
+}
+
+/// Pids needing clears on connection loss: tracked history (oldest
+/// first) plus the current pid unless already listed. External
+/// implementors using the trait defaults get exactly `[current_pid]` —
+/// today's behavior, unchanged.
+fn clear_pids(ipc: &mut dyn IpcFacilitator, current_pid: u64) -> Vec<u64> {
+  let mut pids = ipc.take_published_pids();
+  if !pids.contains(&current_pid) {
+    pids.push(current_pid);
+  }
+  pids
+}
 
 impl PacketType {
   /// `None` for out-of-range types: the caller must refuse those with a
@@ -172,13 +218,17 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
       } else {
         tracing::debug!("[ipc] Error reading packet type: {err}, socket likely closed");
       }
-      send_empty(ipc.sink(), current_pid);
+      for pid in clear_pids(ipc, current_pid) {
+        send_empty(ipc.sink(), pid);
+      }
       break;
     }
 
     if let Err(err) = buffer.by_ref().take(4).read_exact(&mut data_size) {
       tracing::debug!("[ipc] Error reading data size: {err}");
-      send_empty(ipc.sink(), current_pid);
+      for pid in clear_pids(ipc, current_pid) {
+        send_empty(ipc.sink(), pid);
+      }
       break;
     }
 
@@ -191,7 +241,9 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
       send_close(buffer.get_mut(), 1003, "Payload too large");
       // The connection may have published before misbehaving: clear it
       // like every other connection loss, or the card sticks forever.
-      send_empty(ipc.sink(), current_pid);
+      for pid in clear_pids(ipc, current_pid) {
+        send_empty(ipc.sink(), pid);
+      }
       break;
     }
 
@@ -213,7 +265,9 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
         );
         send_close(buffer.get_mut(), 1003, "Unsupported packet type");
         // Same as above: a desynced client may hold a live card.
-        send_empty(ipc.sink(), current_pid);
+        for pid in clear_pids(ipc, current_pid) {
+          send_empty(ipc.sink(), pid);
+        }
         break;
       }
     };
@@ -367,6 +421,15 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
           nonce: Value::String(ipc.nonce()),
         };
         ipc.send_event(activity_cmd);
+        // A multiplexing client may hold cards under older pids: clear
+        // those too (app-less, like abrupt closes; the full clear above
+        // already carried this pid with identity).
+        let current = ipc.pid();
+        for pid in ipc.take_published_pids() {
+          if pid != current {
+            send_empty(ipc.sink(), pid);
+          }
+        }
         // Reset for a potential reuse of this facilitator; the server
         // listener itself is never rebound (see crate docs).
         ipc.set_handshake(false);
@@ -404,13 +467,17 @@ fn handle_set_activity(
     Some(ref args) => args,
     None => {
       tracing::warn!("[ipc] Invalid activity command, skipping");
-      send_empty(ipc.sink(), current_pid);
+      for pid in clear_pids(ipc, current_pid) {
+        send_empty(ipc.sink(), pid);
+      }
       return;
     }
   };
 
   activity_cmd.application_id = Some(ipc.client_id());
-  ipc.set_pid(args.pid.unwrap_or_default());
+  let pid = args.pid.unwrap_or_default();
+  ipc.set_pid(pid);
+  ipc.note_published_pid(pid);
   ipc.set_nonce(activity_cmd.nonce.to_string());
   ipc.send_event(activity_cmd.clone());
 

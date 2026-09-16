@@ -37,6 +37,8 @@ struct ConnFacilitator {
   nonce: String,
   user: Arc<Mutex<RpcUser>>,
   sink: EventSink,
+  /// Pids published on this connection, oldest first (bounded).
+  published_pids: Vec<u64>,
 }
 
 impl ConnFacilitator {
@@ -48,6 +50,7 @@ impl ConnFacilitator {
       nonce: String::new(),
       user,
       sink,
+      published_pids: Vec::new(),
     }
   }
 }
@@ -89,6 +92,12 @@ impl IpcFacilitator for ConnFacilitator {
   }
   fn sink(&self) -> &EventSink {
     &self.sink
+  }
+  fn note_published_pid(&mut self, pid: u64) {
+    crate::frame::track_pid(&mut self.published_pids, pid);
+  }
+  fn take_published_pids(&mut self) -> Vec<u64> {
+    std::mem::take(&mut self.published_pids)
   }
 }
 

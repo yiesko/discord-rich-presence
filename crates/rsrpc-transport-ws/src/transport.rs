@@ -22,6 +22,7 @@ use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
 use rsrpc_ws::{ClientId, CloseCode, Event, EventHub, Message, Responder};
 use rustc_hash::FxHashMap;
+use serde_json::Value;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
@@ -39,22 +40,39 @@ const ALLOWED_ORIGINS: [&str; 3] = [
   "https://ptb.discord.com",
 ];
 
-/// Per-client slot: responder plus the state clear-on-disconnect needs.
+/// Per-client slot: responder plus the publication history needed for
+/// clear-on-disconnect.
 ///
-/// Deliberately NOT `Clone` (see `SlotSnapshot`): a derived clone would
-/// deep-copy the stored `ActivityCmd`, and every such copy must be a
-/// conscious decision at the call site.
+/// No `Clone` derive (see `SlotSnapshot`): the history must only ever be
+/// read under a short guard, never duplicated wholesale.
 #[derive(Debug)]
 struct ClientSlot {
   responder: Responder,
-  last_cmd: Option<ActivityCmd>,
+  /// Every pid published on this connection (slim records), oldest first.
+  /// A single-pid client — the norm — keeps exactly one entry.
+  published: Vec<handlers::PublishedSlot>,
   query_client_id: Option<String>,
 }
 
+impl ClientSlot {
+  /// Record a publication, refreshing a re-published pid as most recent
+  /// and dropping the oldest beyond [`handlers::MAX_TRACKED_PIDS`].
+  fn note_published(&mut self, app_id: Option<String>, pid: u64, nonce: Value) {
+    if let Some(pos) = self.published.iter().position(|entry| entry.pid == pid) {
+      self.published.remove(pos);
+    } else if self.published.len() >= handlers::MAX_TRACKED_PIDS {
+      self.published.remove(0);
+    }
+    self
+      .published
+      .push(handlers::PublishedSlot { app_id, pid, nonce });
+  }
+}
+
 /// Cheap per-message snapshot: `responder` is an `Arc` bump and the id is
-/// a short string. The stored `last_cmd` (`ActivityCmd`, deep) is never
-/// cloned here — it is only read on disconnect and written on
-/// `SET_ACTIVITY`, both under short write guards.
+/// a short string. Publication history is never cloned here — it is only
+/// read on disconnect and appended on `SET_ACTIVITY`, both under short
+/// write guards.
 struct SlotSnapshot {
   responder: Responder,
   query_client_id: Option<String>,
@@ -358,13 +376,15 @@ async fn on_connect(
     id,
     ClientSlot {
       responder,
-      last_cmd: None,
+      published: Vec::new(),
       query_client_id,
     },
   );
 }
 
-/// Remove the slot and emit its clear (shared by Disconnect and prune paths).
+/// Remove the slot and emit one clear per published pid (shared by
+/// Disconnect and prune paths). A connection that published several pids
+/// (multiplexing companion) clears every card, not just the latest.
 async fn remove_and_clear(
   id: ClientId,
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
@@ -372,8 +392,8 @@ async fn remove_and_clear(
 ) {
   let slot = clients.write().await.remove(&id);
   let Some(slot) = slot else { return };
-  if let Some(last) = slot.last_cmd {
-    sink.emit(handlers::clear_for(&last)).await;
+  for published in &slot.published {
+    sink.emit(handlers::clear_for_slot(published)).await;
   }
 }
 
@@ -452,7 +472,7 @@ async fn on_message(
       if !set_activity {
         return;
       }
-      let (alive, stored) = handlers::handle_set_activity(
+      let alive = handlers::handle_set_activity(
         &event,
         slot.query_client_id.as_deref(),
         &slot.responder,
@@ -460,9 +480,16 @@ async fn on_message(
       )
       .await;
       if alive {
-        // Only arm mutating the slot: short write-back, no await inside.
+        // Record the publication for disconnect clears, applying the same
+        // connect-query client_id fallback the forwarded command carries.
+        // Short write-back, no await inside.
+        let app_id = event
+          .application_id
+          .clone()
+          .or_else(|| slot.query_client_id.clone());
+        let pid = event.args.as_ref().and_then(|a| a.pid).unwrap_or_default();
         if let Some(entry) = clients.write().await.get_mut(&id) {
-          entry.last_cmd = Some(stored);
+          entry.note_published(app_id, pid, event.nonce.clone());
         }
       }
       alive
