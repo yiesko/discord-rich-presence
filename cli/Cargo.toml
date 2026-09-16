@@ -12,7 +12,8 @@ keywords = ["discord", "rich-presence", "rpc", "bridge", "cli"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-rsrpc = { path = "../lib" }
+rsrpc-core = { path = "../crates/rsrpc-core" }
+rsrpc-detect = { path = "../crates/rsrpc-detect" }
 clap = { version = "4.6.6", features = ["derive", "std", "env", "help", "usage", "error-context"], default-features = false }
 ureq = { version = "3.4.0", default-features = false, features = ["rustls", "charset"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -20,10 +21,5 @@ serde_json = "1.0"
 semver = "1.0"
 sha2 = "0.10"
 minisign-verify = "0.2"
-ctrlc = "3.4"
-hotpath = "0.25"
-
-[features]
-hotpath = ["hotpath/hotpath", "rsrpc/hotpath"]
-hotpath-cpu = ["hotpath/hotpath-cpu", "rsrpc/hotpath-cpu"]
-hotpath-alloc = ["hotpath/hotpath-alloc", "rsrpc/hotpath-alloc"]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

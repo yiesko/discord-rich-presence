@@ -373,7 +373,7 @@ pub enum CheckOutcome {
 
 /// Fetch + parse the latest-release metadata (thin ureq wrapper).
 fn fetch_release() -> Result<ReleaseInfo, Box<dyn std::error::Error>> {
-  let body = rsrpc::http_agent(HTTP_TIMEOUT)
+  let body = rsrpc_core::http_agent(HTTP_TIMEOUT)
     .get(LATEST_RELEASE_URL)
     .header("Accept", "application/vnd.github+json")
     .call()
@@ -430,7 +430,7 @@ pub fn check() -> Result<CheckOutcome, Box<dyn std::error::Error>> {
 }
 
 fn download(url: &str, limit: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-  rsrpc::http_agent(HTTP_TIMEOUT)
+  rsrpc_core::http_agent(HTTP_TIMEOUT)
     .get(url)
     .header("Accept", "application/octet-stream")
     .call()
@@ -456,7 +456,7 @@ fn download_to_file(
 
   // Bound in two steps: the config (and its reader) borrows the body,
   // so the response must live in a local — not a temporary.
-  let response = rsrpc::http_agent(HTTP_TIMEOUT)
+  let response = rsrpc_core::http_agent(HTTP_TIMEOUT)
     .get(url)
     .header("Accept", "application/octet-stream")
     .call()
