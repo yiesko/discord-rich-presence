@@ -1545,6 +1545,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsrpc-transport-ipc"
+version = "0.1.0"
+dependencies = [
+ "interprocess",
+ "rsrpc-protocol",
+ "rsrpc-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "rsrpc-transport-ws"
 version = "0.1.0"
 dependencies = [

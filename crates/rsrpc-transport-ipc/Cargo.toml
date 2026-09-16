@@ -1,0 +1,25 @@
+[package]
+name = "rsrpc-transport-ipc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["spikehd"]
+description = "Discord IPC transport: framed protocol, Unix socket and Windows pipe servers with JoinSet lifecycle"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["discord", "rich-presence", "rpc", "ipc"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+rsrpc-types = { path = "../rsrpc-types" }
+rsrpc-protocol = { path = "../rsrpc-protocol" }
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-util = { version = "0.7", features = ["full"] }
+interprocess = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+serde_json = "1.0"
