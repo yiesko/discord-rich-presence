@@ -267,3 +267,62 @@ async fn shutdown_removes_state_file() {
   assert!(!state_path.exists(), "shutdown releases the slot");
   let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn null_scan_reaps_dead_pid_cards_from_replay() {
+  let fx = fixture().await;
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+
+  // Publish from a pid that is already dead (/proc entry absent): the
+  // card broadcasts normally (presence first, questions later)...
+  let dead = u32::MAX as u64;
+  fx.ipc_tx.send(set_activity(dead, "Ghost")).await.unwrap();
+  let got = read_json(&mut json).await;
+  assert_eq!(got["activity"]["name"], "Ghost");
+
+  // ...but the scanner's empty table proves nothing with that pid lives:
+  // the null scan must broadcast its clear and evict it from replay.
+  fx.proc_tx.send(ProcInput::Cleared).await.unwrap();
+  let cleared = read_json(&mut json).await;
+  assert!(
+    cleared["activity"].is_null(),
+    "expected clear for dead pid, got: {cleared}"
+  );
+  assert_eq!(cleared["pid"], dead);
+
+  // Late joiner must not replay the ghost.
+  let mut late = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut late).await; // READY
+  assert!(
+    tokio::time::timeout(Duration::from_millis(300), late.next())
+      .await
+      .is_err(),
+    "ghost must not replay after reap"
+  );
+
+  fx.bridge.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn null_scan_keeps_live_pid_cards() {
+  let fx = fixture().await;
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+
+  // Our own test-runner pid is alive: its card must survive null scans.
+  let live = std::process::id() as u64;
+  fx.ipc_tx.send(set_activity(live, "Live")).await.unwrap();
+  let got = read_json(&mut json).await;
+  assert_eq!(got["activity"]["name"], "Live");
+
+  fx.proc_tx.send(ProcInput::Cleared).await.unwrap();
+  // No clear may arrive for a live pid: only READY-gated silence, then
+  // the cached card still replays to a late joiner.
+  let mut late = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut late).await; // READY
+  let replay = read_json(&mut late).await;
+  assert_eq!(replay["activity"]["name"], "Live");
+
+  fx.bridge.shutdown().await;
+}

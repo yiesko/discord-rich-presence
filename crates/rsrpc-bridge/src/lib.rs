@@ -13,6 +13,6 @@ pub mod bridge;
 pub mod config;
 pub mod handoff;
 
-pub use bridge::{Bridge, BridgeInputs};
+pub use bridge::{Bridge, BridgeInputs, cache_entry_pid};
 pub use config::BridgeConfig;
 pub use handoff::{ProcInput, ScannedGame};

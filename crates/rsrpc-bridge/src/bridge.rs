@@ -494,6 +494,28 @@ async fn proc_pump(
           let payload = commands::empty_cached(pid, socket_id.clone());
           shared.broadcast_activity(payload, socket_id);
         }
+        // Reap replay-cache ghosts: cards whose pid is provably dead but
+        // which never got a clear (abrupt companion death + game exit).
+        // Without this the refresh loop re-asserts them every 30s forever
+        // and late joiners replay a dead presence.
+        let ghosts: Vec<(SocketId, u64)> = {
+          let cache = shared.cache.lock().unwrap_or_else(|e| e.into_inner());
+          cache
+            .iter()
+            .filter_map(|(id, (payload, _))| {
+              cache_entry_pid(id, payload)
+                .filter(|pid| !is_process_alive(*pid))
+                .map(|pid| (id.clone(), pid))
+            })
+            .collect()
+        };
+        for (socket_id, pid) in ghosts {
+          tracing::info!("[bridge] Reaping ghost card for dead pid {pid}");
+          shared.broadcast_activity(
+            commands::empty_cached(pid, socket_id.clone()),
+            socket_id,
+          );
+        }
       }
       ProcInput::Detected(game) => {
         // Remember the scan for the handoff: a clear hands the slot back
@@ -924,6 +946,26 @@ fn is_genuine_clear(cmd: &ActivityCmd) -> bool {
       .as_ref()
       .is_some_and(|args| args.activity.is_none()),
     _ => false,
+  }
+}
+
+/// Resolve the owning pid of a replay-cache entry for ghost reaping:
+/// numeric socket ids are pids verbatim, otherwise the pid rides in the
+/// JSON body. Returns `None` when neither yields a usable pid — pid 0
+/// included: unidentifiable publishers can never be proven dead, and
+/// clearing them risks darkening a live-but-broken client (same
+/// convention as [`is_genuine_clear`]).
+pub fn cache_entry_pid(socket_id: &SocketId, payload: &CachedActivity) -> Option<u64> {
+  if let Ok(pid) = socket_id.as_ref().parse::<u64>() {
+    return (pid != 0).then_some(pid);
+  }
+  match serde_json::from_str::<serde_json::Value>(&payload.json)
+    .ok()?
+    .get("pid")
+    .and_then(serde_json::Value::as_u64)
+  {
+    Some(0) | None => None,
+    Some(pid) => Some(pid),
   }
 }
 
