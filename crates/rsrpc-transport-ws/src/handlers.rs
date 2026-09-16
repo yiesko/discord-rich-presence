@@ -16,9 +16,11 @@ use serde_json::Value;
 use crate::transport::Sink;
 
 /// Serialize command args to a string map, preserving value types.
-fn event_args_as_hashmap(args: Option<ActivityCmdArgs>) -> HashMap<String, Value> {
+/// Borrows: `to_value` already produces an owned `Value`, so cloning the
+/// args first would copy the whole subtree twice.
+fn event_args_as_hashmap(args: Option<&ActivityCmdArgs>) -> HashMap<String, Value> {
   let args = match args {
-    Some(args) => serde_json::to_value(&args).unwrap_or(Value::Null),
+    Some(args) => serde_json::to_value(args).unwrap_or(Value::Null),
     None => Value::Null,
   };
   match args {
@@ -64,7 +66,7 @@ pub(crate) async fn handle_browser_command(
     application_id: event.application_id.clone(),
     cmd: event.cmd.clone(),
     args: None,
-    data: Some(event_args_as_hashmap(event.args.clone())),
+    data: Some(event_args_as_hashmap(event.args.as_ref())),
     evt: None,
     nonce: event.nonce.clone(),
   };

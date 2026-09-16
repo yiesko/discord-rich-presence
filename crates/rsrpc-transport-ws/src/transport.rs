@@ -41,11 +41,22 @@ const ALLOWED_ORIGINS: [&str; 3] = [
 
 /// Per-client slot: responder plus the state clear-on-disconnect needs.
 ///
-/// Cloned out of the map per message so the guard never crosses an `.await`.
-#[derive(Debug, Clone)]
+/// Deliberately NOT `Clone` (see `SlotSnapshot`): a derived clone would
+/// deep-copy the stored `ActivityCmd`, and every such copy must be a
+/// conscious decision at the call site.
+#[derive(Debug)]
 struct ClientSlot {
   responder: Responder,
   last_cmd: Option<ActivityCmd>,
+  query_client_id: Option<String>,
+}
+
+/// Cheap per-message snapshot: `responder` is an `Arc` bump and the id is
+/// a short string. The stored `last_cmd` (`ActivityCmd`, deep) is never
+/// cloned here — it is only read on disconnect and written on
+/// `SET_ACTIVITY`, both under short write guards.
+struct SlotSnapshot {
+  responder: Responder,
   query_client_id: Option<String>,
 }
 
@@ -372,11 +383,17 @@ async fn on_message(
   set_activity: bool,
   secondary_events: bool,
 ) {
-  // Clone out; the read guard drops before any await below.
-  let slot = clients.read().await.get(&id).cloned();
-  let Some(slot) = slot else {
-    // Stale message for a removed slot (pruned or rejected client).
-    return;
+  // Snapshot the cheap fields; the read guard drops before any await
+  // below (and the deep `last_cmd` is never cloned here).
+  let slot = match clients.read().await.get(&id) {
+    Some(slot) => SlotSnapshot {
+      responder: slot.responder.clone(),
+      query_client_id: slot.query_client_id.clone(),
+    },
+    None => {
+      // Stale message for a removed slot (pruned or rejected client).
+      return;
+    }
   };
   let Message::Text(text) = message else {
     tracing::warn!("[transport-ws] Ignoring non-text message from client {id}");
