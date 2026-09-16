@@ -33,6 +33,11 @@ pub enum RsrpcError {
   #[error("{0} lock poisoned: {1}")]
   Poisoned(&'static str, String),
 
+  /// A transport was configured with an unusable value (zero bound, ...).
+  /// Caller bug by construction: fix the config, not the error.
+  #[error("invalid transport config: {0}")]
+  InvalidConfig(&'static str),
+
   /// A scan was requested while another scan is still running
   /// (re-entrant trigger racing the scan thread).
   #[error("Scanning already in progress")]

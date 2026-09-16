@@ -33,3 +33,11 @@ fn bind_exhaustion_names_range() {
     "bridge json launch failed on ports 1337-1347: all in use"
   );
 }
+
+#[test]
+fn invalid_config_names_the_field() {
+  assert_eq!(
+    RsrpcError::InvalidConfig("event_queue must be non-zero").to_string(),
+    "invalid transport config: event_queue must be non-zero"
+  );
+}
