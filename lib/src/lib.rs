@@ -14,7 +14,7 @@ use std::{
 
 use user::RpcUser;
 
-pub mod detection;
+pub use rsrpc_detect::db as detection;
 mod logger;
 pub mod overrides;
 mod server;

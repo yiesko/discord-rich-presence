@@ -1503,6 +1503,7 @@ dependencies = [
  "libc",
  "regex",
  "rmp-serde",
+ "rsrpc-detect",
  "rsrpc-proc-events",
  "rsrpc-protocol",
  "rsrpc-state",
@@ -1552,6 +1553,29 @@ dependencies = [
  "serde_json",
  "sha2",
  "ureq",
+]
+
+[[package]]
+name = "rsrpc-detect"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "arc-swap",
+ "hotpath",
+ "libc",
+ "regex",
+ "rsrpc-proc-events",
+ "rsrpc-protocol",
+ "rsrpc-steam",
+ "rsrpc-telemetry",
+ "rsrpc-types",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sysinfo",
+ "tracing",
+ "ureq",
+ "winapi",
 ]
 
 [[package]]

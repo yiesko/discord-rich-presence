@@ -11,4 +11,4 @@ license = "MIT"
 [dependencies]
 ureq = { version = "3.3", default-features = false, features = ["rustls", "charset"] }
 serde_json = "1"
-rsrpc = { path = "../../lib" }
+rsrpc-detect = { path = "../../crates/rsrpc-detect" }

@@ -127,10 +127,10 @@ Severities, chattiest first: `DEBUG` (per-tick internals, needs `--debug`/`RSRPC
 
 ### Detectable database (offline snapshot & refresh)
 
-* Without flags the CLI uses the bundled snapshot (`lib/resources/detectable.json`, embedded via `detection::BUNDLED_DETECTABLE`), so it works offline.
+* Without flags the CLI uses the bundled snapshot (`crates/rsrpc-detect/resources/detectable.json`, embedded via `rsrpc_detect::db::BUNDLED_DETECTABLE`), so it works offline.
 * `--db-url <URL>` fetches and trims the list at startup (keeps only `id/name/hook/aliases`, `executables{name,is_launcher,os,arguments}` and `third_party_skus{distributor,id}`), with fallback to the bundled snapshot on failure.
 * `--enable-db-update` keeps refreshing that list every hour in the background. Without `--db-url` it defaults to `https://discord.com/api/v9/applications/detectable`.
-* Regenerate the snapshot with: `cargo run --manifest-path tools/updater/Cargo.toml` (writes `lib/resources/detectable.json`).
+* Regenerate the snapshot with: `cargo run --manifest-path tools/updater/Cargo.toml` (writes `crates/rsrpc-detect/resources/detectable.json`).
 
 ### Self-update (OTA)
 
@@ -200,7 +200,7 @@ the existing `socketId = pid` convention.
 2. `cargo build -p rsrpc-cli --release`
 3. Your file will be in `target/release/`
 
-The offline snapshot `lib/resources/detectable.json` is committed, so a
+The offline snapshot `crates/rsrpc-detect/resources/detectable.json` is committed, so a
 fresh clone builds without network access to Discord. To refresh it, run
 `cargo run --manifest-path tools/updater/Cargo.toml`.
 

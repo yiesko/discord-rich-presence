@@ -7,7 +7,7 @@ pub const BUNDLED_DETECTABLE: &str = include_str!("../resources/detectable.json"
 
 /// Content hash for change detection (std-only SipHash: deterministic
 /// within a run, which is the only scope it is ever compared in).
-pub(crate) fn body_hash(body: &str) -> u64 {
+pub fn body_hash(body: &str) -> u64 {
   use std::hash::{DefaultHasher, Hash, Hasher};
   let mut hasher = DefaultHasher::new();
   body.hash(&mut hasher);
@@ -30,7 +30,7 @@ pub fn content_hashes(raw_body: &str, parsed: &[DetectableActivity]) -> (u64, u6
 ///
 /// Shared by the process scanner, the CLI and `tools/updater` so the copies
 /// never drift apart.
-pub fn trim_detectable(body: &str) -> crate::error::Result<String> {
+pub fn trim_detectable(body: &str) -> rsrpc_protocol::error::Result<String> {
   Ok(serde_json::to_string(&trim_detectable_value(body)?)?)
 }
 
@@ -42,7 +42,7 @@ pub fn trim_detectable(body: &str) -> crate::error::Result<String> {
 /// buffer, just the hasher state. Field tags and lengths are mixed in so
 /// adjacent fields can never alias each other (`("ab","c")` vs
 /// `("a","bc")` hash differently).
-pub(crate) fn canonical_content_hash(parsed: &[DetectableActivity]) -> u64 {
+pub fn canonical_content_hash(parsed: &[DetectableActivity]) -> u64 {
   use std::hash::{DefaultHasher, Hash, Hasher};
   let mut hasher = DefaultHasher::new();
   parsed.len().hash(&mut hasher);
@@ -93,7 +93,7 @@ pub(crate) fn canonical_content_hash(parsed: &[DetectableActivity]) -> u64 {
 /// without the final serialization round-trip. Fallback for bodies whose
 /// entries miss required fields (it defaults them) when the direct struct
 /// parse fails; prefer parsing directly whenever possible (zero DOM).
-pub fn trim_detectable_value(body: &str) -> crate::error::Result<serde_json::Value> {
+pub fn trim_detectable_value(body: &str) -> rsrpc_protocol::error::Result<serde_json::Value> {
   let games: Vec<serde_json::Value> = serde_json::from_str(body)?;
   let trimmed: Vec<serde_json::Value> = games
     .into_iter()
