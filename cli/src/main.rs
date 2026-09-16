@@ -230,7 +230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       tracing_subscriber::EnvFilter::new("info")
     }
   });
-  tracing_subscriber::fmt().with_env_filter(filter).with_target(false).init();
+  tracing_subscriber::fmt()
+    .with_env_filter(filter)
+    .with_target(false)
+    .init();
 
   if args.rollback {
     update::cmd_rollback()?;
@@ -326,7 +329,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // daemon is undiagnosable without it (a degenerate fetch used to pass
   // with only benign-looking counts downstream).
   let entries = daemon.database_summary();
-  println!("[rsrpc] Database: {} ({} entries)", db_source, entries.len());
+  println!(
+    "[rsrpc] Database: {} ({} entries)",
+    db_source,
+    entries.len()
+  );
 
   // Load local overrides (overrides.json + overrides.d), a feature originating from rsrpc-wrapper (Polaris).
   // Single file resolution: --overrides-file > $RSRPC_OVERRIDES_FILE > $XDG_CONFIG_HOME/rsrpc/overrides.json > ~/.config/rsrpc/overrides.json
@@ -352,7 +359,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
       overrides
     }
     Ok(_) => {
-      println!("[wrapper] No overrides found in '{}'", overrides_path.display());
+      println!(
+        "[wrapper] No overrides found in '{}'",
+        overrides_path.display()
+      );
       Vec::new()
     }
     Err(err) => {
@@ -396,7 +406,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   if args.list_database {
     let entries = daemon.database_summary();
     let executables: usize = entries.iter().map(|entry| entry.executables).sum();
-    println!("{} database entries, {} executables", entries.len(), executables);
+    println!(
+      "{} database entries, {} executables",
+      entries.len(),
+      executables
+    );
     for entry in entries.iter().take(10) {
       println!("{} ({})", entry.name, entry.id);
     }

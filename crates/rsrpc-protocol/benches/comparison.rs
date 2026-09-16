@@ -3,8 +3,8 @@
 //! Run with: cargo bench
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use rsrpc::cmd::ActivityCmd;
-use rsrpc::commands::{cached_activity, set_activity_response};
+use rsrpc_protocol::commands::{cached_activity, set_activity_response};
+use rsrpc_types::cmd::ActivityCmd;
 use std::hint::black_box;
 
 fn sample_command() -> ActivityCmd {

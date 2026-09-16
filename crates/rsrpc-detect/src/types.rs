@@ -15,6 +15,7 @@ pub struct ProcessScanState {
 
 #[derive(Default)]
 pub struct ProcessEventListeners {
+  /// Optional scan-tick callback, invoked with the post-tick state.
   pub on_process_scan_complete: Option<Arc<Mutex<ProcessCallback>>>,
 }
 

@@ -10,6 +10,9 @@ repository = "https://github.com/yiesko/rsRPC"
 keywords = ["discord", "games", "detection"]
 categories = ["parser-implementations"]
 
+[lints]
+workspace = true
+
 [dependencies]
 rsrpc-types = { path = "../rsrpc-types" }
 rsrpc-protocol = { path = "../rsrpc-protocol" }

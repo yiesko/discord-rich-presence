@@ -11,6 +11,9 @@ repository = "https://github.com/yiesko/rsRPC"
 keywords = ["discord", "rich-presence", "rpc", "bridge", "cli"]
 categories = ["command-line-utilities"]
 
+[lints]
+workspace = true
+
 [dependencies]
 rsrpc-core = { path = "../crates/rsrpc-core" }
 rsrpc-detect = { path = "../crates/rsrpc-detect" }

@@ -10,6 +10,9 @@ repository = "https://github.com/yiesko/rsRPC"
 keywords = ["discord", "rich-presence", "rpc"]
 categories = ["network-programming"]
 
+[lints]
+workspace = true
+
 [dependencies]
 rsrpc-types = { path = "../rsrpc-types" }
 serde = { version = "1.0", features = ["derive", "rc"] }
@@ -22,3 +25,8 @@ ureq = { version = "3", default-features = false, features = ["rustls", "charset
 [dev-dependencies]
 serde_json = "1.0"
 rsrpc-types = { path = "../rsrpc-types" }
+criterion = "0.8.2"
+
+[[bench]]
+name = "comparison"
+harness = false

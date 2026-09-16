@@ -11,8 +11,12 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1.0"
 
-[dependencies.rsrpc]
-path = ".."
+[dependencies.rsrpc-detect]
+path = "../crates/rsrpc-detect"
+[dependencies.rsrpc-types]
+path = "../crates/rsrpc-types"
+[dependencies.rsrpc-protocol]
+path = "../crates/rsrpc-protocol"
 
 [[bin]]
 name = "activity_full"

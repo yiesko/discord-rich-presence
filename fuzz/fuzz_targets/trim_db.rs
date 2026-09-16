@@ -8,5 +8,5 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    let _ = rsrpc::detection::trim_detectable(text);
+    let _ = rsrpc_detect::db::trim_detectable(text);
 });

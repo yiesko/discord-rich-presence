@@ -210,43 +210,46 @@ fresh clone builds without network access to Discord. To refresh it, run
 
 ```toml
 [dependencies]
-rsrpc = { git = "https://www.github.com/yiesko/rsRPC", tag = "VERSION_NUMBER_HERE" }
+rsrpc-core = { git = "https://www.github.com/yiesko/rsRPC", tag = "VERSION_NUMBER_HERE" }
 ```
 
-2. Use the library in your code:
+2. Use the daemon in your code:
 
 ```rust
-use rsrpc::{RPCServer, RPCConfig};
+use rsrpc_core::{Daemon, RPCConfig};
 
-fn main() {
-  let mut server = RPCServer::from_file("./detectable.json", RPCConfig::default())
-    .expect("Failed to create RPCServer");
-  server.start();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let daemon = Daemon::from_file("./detectable.json", RPCConfig::default())?;
+  daemon.run_until(async {
+    let _ = tokio::signal::ctrl_c().await;
+  }).await?;
+  Ok(())
 }
 ```
 
 You can also grab the `detectable.json` programmatically and pass it via string:
 ```rust
-use rsrpc::{RPCServer, RPCConfig};
+use rsrpc_core::{Daemon, RPCConfig};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let detectable = reqwest::blocking::get("https://raw.githubusercontent.com/OpenAsar/arrpc/main/src/process/detectable.json")?.text()?;
-  let mut server = RPCServer::from_json_str(detectable, RPCConfig::default())?;
-
-  server.start();
+async fn run(detectable: String) -> Result<(), Box<dyn std::error::Error>> {
+  let daemon = Daemon::from_json_str(detectable, RPCConfig::default())?;
+  daemon.run_until(async {
+    let _ = tokio::signal::ctrl_c().await;
+  }).await?;
   Ok(())
 }
 ```
 
 Works fully offline with the bundled snapshot (no file/network needed):
 ```rust
-let mut server = RPCServer::from_bundled(RPCConfig::default())
-  .expect("Failed to create RPCServer");
-server.start();
+let daemon = Daemon::from_bundled(RPCConfig::default())
+  .expect("Failed to create daemon");
 ```
 
 If you already parsed the list yourself, skip the second parse with
-`RPCServer::from_parsed(vec, config)` (infallible).
+`Daemon::from_parsed(vec, config)` (infallible). Prefer
+`RPCConfig::builder()` over the struct literal for forward compatibility.
 
 ### `RPCConfig` fields (defaults)
 
@@ -264,24 +267,22 @@ If you already parsed the list yourself, skip the second parse with
 ### Runtime API
 
 ```rust
-use rsrpc::DetectedGame;
+use rsrpc_core::DetectedGame;
 
 // Single scan without threads (staged overrides + ignore-list apply,
 // returns id/name/pid).
-let games: Vec<DetectedGame> = server.detect_once()?;
+let games: Vec<DetectedGame> = daemon.detect_once()?;
 
 // Database summary without threads (entry/executable counts + names).
-let summary: Vec<rsrpc::DetectableSummary> = server.database_summary()?;
+let summary: Vec<rsrpc_core::DetectableSummary> = daemon.database_summary();
 
-// Add/remove entries after start() (bypass the OS filter, win over main DB).
-server.append_detectables(overrides);
-server.remove_detectable_by_name("Game Name".to_string());
+// Stage entries before run() (bypass the OS filter, win over main DB);
+// diagnostics below see exactly what running would publish.
+daemon.append_detectables(overrides);
+daemon.remove_detectable_by_name("Game Name");
 
-// Manual rescan after start().
-server.scan_for_processes();
-
-// OBS/streaming flag callback (must be set before start()).
-server.on_process_scan_complete(|state| {
+// OBS/streaming flag callback (must be set before run()).
+daemon.on_scan_complete(|state| {
   println!("obs open: {}", state.obs_open);
 });
 ```
@@ -317,8 +318,9 @@ Notes:
 * Unit and integration tests: `cargo test`
 * Benchmarks (JSON vs MessagePack): `cargo bench`
 
-Unit tests live in `lib/src/tests/` (one module per area), integration
-tests in `lib/tests/`, benchmarks in `lib/benches/`.
+Unit tests live beside each crate (`crates/*/src/`, `crates/*/tests/`),
+integration tests in `crates/*/tests/`, benchmarks in
+`crates/rsrpc-protocol/benches/`.
 
 ## Credits
 

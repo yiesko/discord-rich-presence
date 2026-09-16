@@ -9,5 +9,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let _ =
-        serde_json::from_str::<Vec<rsrpc::detection::DetectableActivity>>(text);
+        serde_json::from_str::<Vec<rsrpc_detect::db::DetectableActivity>>(text);
 });

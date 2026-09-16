@@ -10,6 +10,9 @@ repository = "https://github.com/yiesko/rsRPC"
 keywords = ["linux", "netlink", "process"]
 categories = ["os", "network-programming"]
 
+[lints]
+workspace = true
+
 [dependencies]
 rsrpc-telemetry = { path = "../rsrpc-telemetry" }
 tracing = "0.1"

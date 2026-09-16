@@ -10,6 +10,9 @@ repository = "https://github.com/yiesko/rsRPC"
 keywords = ["websocket", "server", "async"]
 categories = ["network-programming", "asynchronous"]
 
+[lints]
+workspace = true
+
 [dependencies]
 tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
 tokio-tungstenite = "0.30"

@@ -10,6 +10,9 @@ repository = "https://github.com/yiesko/rsRPC"
 keywords = ["discord", "rich-presence", "rpc"]
 categories = ["network-programming", "asynchronous"]
 
+[lints]
+workspace = true
+
 [dependencies]
 rsrpc-types = { path = "../rsrpc-types" }
 rsrpc-protocol = { path = "../rsrpc-protocol" }
