@@ -760,12 +760,9 @@ impl Shared {
   /// Broadcast an activity payload, updating the replay cache (clears
   /// evict) and marking the snapshot dirty — never persisting inline.
   fn broadcast_activity(&self, payload: Arc<CachedActivity>, socket_id: SocketId) {
-    // Keep the replay cache in sync, pruning cleared activities.
-    let is_clear = serde_json::from_str::<serde_json::Value>(&payload.json)
-      .ok()
-      .and_then(|value| value.get("activity").cloned())
-      .map(|activity| activity.is_null())
-      .unwrap_or(false);
+    // Keep the replay cache in sync, pruning cleared activities. The flag
+    // travels with the build — no re-parse of our own serialization.
+    let is_clear = payload.is_clear;
     {
       let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
       if is_clear {
@@ -993,6 +990,8 @@ fn generic_payload(game: &ScannedGame) -> Arc<CachedActivity> {
       tracing::debug!("[bridge] Generic payload encode failed: {err}");
       Vec::new()
     }),
+    // Always built with `activity: Some` above.
+    is_clear: false,
   })
 }
 

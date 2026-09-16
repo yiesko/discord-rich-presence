@@ -268,3 +268,35 @@ fn cached_builds_share_one_allocation() {
   assert!(payload.json.contains("\"pid\": 42"));
   assert!(!payload.msgpack.is_empty());
 }
+
+#[test]
+fn cached_payload_knows_whether_it_clears() {
+  use rsrpc_protocol::commands::{cached_activity, empty_cached};
+  use rsrpc_types::SocketId;
+  use rsrpc_types::cmd::ActivityCmd;
+
+  // Clear builds always clear, without parsing to find out.
+  assert!(empty_cached(1, SocketId::from("s")).is_clear);
+
+  // Activity builds never clear.
+  let mut cmd: ActivityCmd = serde_json::from_value(serde_json::json!({
+    "cmd": "SET_ACTIVITY",
+    "application_id": "app",
+    "args": {"pid": 7, "activity": {"name": "G", "type": 0}},
+    "nonce": "n",
+  }))
+  .unwrap();
+  let payload = cached_activity(&mut cmd).expect("builds");
+  assert!(!payload.is_clear);
+
+  // Null-activity commands build clears.
+  let mut clear: ActivityCmd = serde_json::from_value(serde_json::json!({
+    "cmd": "SET_ACTIVITY",
+    "application_id": "app",
+    "args": {"pid": 7, "activity": null},
+    "nonce": "n",
+  }))
+  .unwrap();
+  let payload = cached_activity(&mut clear).expect("builds");
+  assert!(payload.is_clear);
+}

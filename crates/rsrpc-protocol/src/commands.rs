@@ -54,6 +54,9 @@ fn empty_activity(pid: u64, socket_id: SocketId) -> String {
 pub struct CachedActivity {
   pub json: String,
   pub msgpack: Vec<u8>,
+  /// Whether this payload clears presence (`activity: null`). Recorded at
+  /// construction so consumers never re-parse the JSON to find out.
+  pub is_clear: bool,
 }
 
 /// Build the empty (clear) payload in both protocols.
@@ -75,6 +78,7 @@ pub fn empty_cached(pid: u64, socket_id: SocketId) -> Arc<CachedActivity> {
   Arc::new(CachedActivity {
     json: empty_activity(pid, socket_id),
     msgpack: rmp_serde::to_vec_named(&payload).unwrap_or_default(),
+    is_clear: true,
   })
 }
 
@@ -105,6 +109,9 @@ pub fn cached_activity(cmd: &mut ActivityCmd) -> Option<Arc<CachedActivity>> {
   Some(Arc::new(CachedActivity {
     json: serde_json::to_string(&payload).ok()?,
     msgpack: rmp_serde::to_vec_named(&payload).ok()?,
+    // Reached only when `args.activity` is `Some`: the serialized body
+    // carries a real activity object, never null.
+    is_clear: false,
   }))
 }
 
