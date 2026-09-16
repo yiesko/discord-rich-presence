@@ -1,5 +1,5 @@
 [workspace]
-members = ["lib", "cli", "crates/rsrpc-ws", "crates/rsrpc-types", "crates/rsrpc-protocol", "crates/rsrpc-transport-ws", "crates/rsrpc-transport-ipc"]
+members = ["lib", "cli", "crates/rsrpc-ws", "crates/rsrpc-types", "crates/rsrpc-protocol", "crates/rsrpc-transport-ws", "crates/rsrpc-transport-ipc", "crates/rsrpc-state"]
 resolver = "2"
 
 [profile.release]

@@ -980,7 +980,7 @@ impl ClientConnector {
         .lock()
         .unwrap_or_else(|e| e.into_inner()),
     );
-    let snapshot = StateSnapshot::new(servers, activities);
+    let snapshot = StateSnapshot::new(env!("CARGO_PKG_VERSION"), servers, activities);
     if let Err(err) = state::write_snapshot(path, &snapshot) {
       debug!("[Client Connector] State snapshot failed: {}", err);
     }

@@ -1504,6 +1504,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "rsrpc-protocol",
+ "rsrpc-state",
  "rsrpc-types",
  "serde",
  "serde_json",
@@ -1542,6 +1543,15 @@ dependencies = [
  "serde_with",
  "thiserror 2.0.20",
  "ureq",
+]
+
+[[package]]
+name = "rsrpc-state"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

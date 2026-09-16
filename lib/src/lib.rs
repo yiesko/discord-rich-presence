@@ -18,11 +18,11 @@ pub mod detection;
 mod logger;
 pub mod overrides;
 mod server;
-pub mod state;
 mod url_params;
 
 pub use rsrpc_protocol::commands;
 pub use rsrpc_protocol::error;
+pub use rsrpc_state as state;
 pub use rsrpc_types::cmd;
 pub use rsrpc_types::user;
 pub use rsrpc_types::{AppId, SocketId};

@@ -56,9 +56,11 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
-  pub fn new(servers: StateServers, activities: Vec<StateActivity>) -> Self {
+  /// Build a snapshot stamped with the *caller* version: `env!` here would
+  /// freeze this crate's version, not the daemon's.
+  pub fn new(app_version: &str, servers: StateServers, activities: Vec<StateActivity>) -> Self {
     Self {
-      app_version: env!("CARGO_PKG_VERSION").to_string(),
+      app_version: app_version.to_string(),
       timestamp: chrono::Utc::now().timestamp_millis(),
       servers,
       activities,
