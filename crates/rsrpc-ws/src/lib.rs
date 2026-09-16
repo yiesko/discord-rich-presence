@@ -6,16 +6,18 @@
 //! terminates all connection tasks deterministically.
 //!
 //! The primary consumption pattern is an async event loop over [`EventHub`].
-//! `hub` and `server` modules land in Task 2; this skeleton ships the
-//! stable foundation types first.
 
 pub mod config;
 pub mod error;
+pub mod hub;
 pub mod message;
+pub mod server;
 
 pub use config::{ServerConfig, ServerConfigBuilder};
 pub use error::{Error, SendError, TrySendError};
+pub use hub::{CloseCode, ConnectionDetails, DisconnectReason, Event, EventHub, Responder};
 pub use message::Message;
+pub use server::Server;
 
 /// Opaque client identifier, unique within the process lifetime.
 ///
