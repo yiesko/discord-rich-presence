@@ -31,7 +31,7 @@ const PROC_CHANNEL_BOUND: usize = 512;
 
 /// The daemon: parsed database plus staged overrides, pre-run.
 pub struct Daemon {
-  detectable: Vec<DetectableActivity>,
+  detectable: Vec<Arc<DetectableActivity>>,
   config: RPCConfig,
   staged_overrides: Vec<DetectableActivity>,
   on_scan_complete: Option<Arc<Mutex<ProcessCallback>>>,
@@ -50,6 +50,7 @@ impl Daemon {
   /// Create from already-parsed activities (infallible).
   #[must_use]
   pub fn from_parsed(detectable: Vec<DetectableActivity>, config: RPCConfig) -> Self {
+    let detectable = detectable.into_iter().map(Arc::new).collect();
     Self {
       detectable,
       config,
@@ -118,7 +119,7 @@ impl Daemon {
   pub fn detect_once(&self) -> Result<Vec<DetectedGame>> {
     let (tx, _rx) = QueueGauge::pair();
     let server = ProcessServer::new_with_custom(
-      self.detectable.iter().cloned().map(Arc::new).collect(),
+      self.detectable.to_vec(),
       self.staged_overrides.clone(),
       tx,
       ProcessEventListeners::default(),
@@ -166,14 +167,24 @@ impl Daemon {
   ///
   /// Bind failures (`IpcBind`, `WsBind`, `BridgeBind`) surface here;
   /// nothing exits the process — the caller (CLI) decides.
-  pub async fn run_until(self, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<()> {
+  pub async fn run_until(
+    mut self,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+  ) -> Result<()> {
     let user = Arc::new(Mutex::new(RpcUser::from_env()));
+
+    // Move (never clone) the database into the scanner build: the fat
+    // structs convert once to the slim form and drop. Cloning here would
+    // pin a second ~25MB generation beside the scanner's, and retaining
+    // it afterwards would pin it for the daemon lifetime.
+    let db = std::mem::take(&mut self.detectable);
+    let staged = std::mem::take(&mut self.staged_overrides);
 
     // Scanner (sync threads, as today): its events cross into async via
     // a pump thread onto a bounded channel. Started first so game STARTs
     // during transport binds are still observed. The handle lives in this
     // frame until shutdown documents the ownership.
-    let (_scanner, proc_rx) = self.start_scanner().await;
+    let (_scanner, proc_rx) = self.start_scanner(db, staged).await;
     let mut ipc_transport = None;
     let mut game_transport = None;
 
@@ -246,7 +257,11 @@ impl Daemon {
   /// The automaton build runs in `spawn_blocking` (seconds of CPU);
   /// the pump thread translates scanner events and exits when the bridge
   /// drops the channel (shutdown).
-  async fn start_scanner(&self) -> (Option<ProcessServer>, mpsc::Receiver<ProcInput>) {
+  async fn start_scanner(
+    &self,
+    db: Vec<Arc<DetectableActivity>>,
+    staged: Vec<DetectableActivity>,
+  ) -> (Option<ProcessServer>, mpsc::Receiver<ProcInput>) {
     let (proc_tx, proc_rx) = mpsc::channel(PROC_CHANNEL_BOUND);
     if !self.config.enable_process_scanner {
       // No scanning: pre-closed stream, the bridge pump exits at once.
@@ -262,8 +277,6 @@ impl Daemon {
       content_hash: self.config.initial_db_content_hash,
       exclusions_url: self.config.exclusions_url.clone(),
     };
-    let db: Vec<Arc<DetectableActivity>> = self.detectable.iter().cloned().map(Arc::new).collect();
-    let staged = self.staged_overrides.clone();
     let listeners = ProcessEventListeners {
       on_process_scan_complete: self.on_scan_complete.clone(),
     };

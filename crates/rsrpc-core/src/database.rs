@@ -5,6 +5,8 @@
 //! Callers that already hold a parsed `Vec` skip both via
 //! [`Daemon::from_parsed`][crate::daemon::Daemon::from_parsed].
 
+use std::sync::Arc;
+
 use rsrpc_detect::db::{self, DetectableActivity};
 use rsrpc_protocol::error::{Result, RsrpcError};
 
@@ -76,7 +78,7 @@ pub fn load_bundled() -> Result<Vec<DetectableActivity>> {
 
 /// Summarize a held database (entry count, executable counts, names).
 #[must_use]
-pub fn summarize(detectable: &[DetectableActivity]) -> Vec<DetectableSummary> {
+pub fn summarize(detectable: &[Arc<DetectableActivity>]) -> Vec<DetectableSummary> {
   detectable
     .iter()
     .map(|entry| DetectableSummary {
