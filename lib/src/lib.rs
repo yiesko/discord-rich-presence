@@ -679,6 +679,7 @@ impl RPCServer {
     if let Err(err) = std::thread::Builder::new()
       .name("rsrpc-stats".to_string())
       .spawn(move || {
+        log!("{}", stats.snapshot("hourly-tick"));
         loop {
           std::thread::sleep(std::time::Duration::from_secs(STATS_INTERVAL_SECS));
           log!("{}", stats.snapshot("hourly"));

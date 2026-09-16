@@ -637,11 +637,29 @@ impl ProcessServer {
         return;
       }
     };
+    let old_count = Arc::strong_count(&self.detectables.lock().unwrap_or_else(|e| e.into_inner()));
+    let rss_before = crate::server::utils::rss_bytes();
     *self.detectables.lock().unwrap_or_else(|e| e.into_inner()) = next;
-    log!("[Process Scanner] Done!");
+    let rss_after = crate::server::utils::rss_bytes();
+    log!(
+      "[Process Scanner] Done! (bundle swap old_refs={} rss_before={} rss_after={})",
+      old_count,
+      rss_before
+        .map(|b| format!("{:.1}MB", b as f64 / 1_048_576.0))
+        .unwrap_or_else(|| "n/a".to_string()),
+      rss_after
+        .map(|b| format!("{:.1}MB", b as f64 / 1_048_576.0))
+        .unwrap_or_else(|| "n/a".to_string())
+    );
     // Fetch string, JSON DOM and trimmed copy are now garbage: hand the
     // hourly spike back (refresh cadence itself is unchanged).
     release_parse_arenas();
+    if let Some(rss) = crate::server::utils::rss_bytes() {
+      log!(
+        "[Process Scanner] post-trim rss={:.1}MB",
+        rss as f64 / 1_048_576.0
+      );
+    }
   }
 
   pub(crate) fn append_detectables(&self, detectable: Vec<DetectableActivity>) {
