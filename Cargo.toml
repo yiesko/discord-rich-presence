@@ -1,5 +1,5 @@
 [workspace]
-members = ["lib", "cli"]
+members = ["lib", "cli", "crates/rsrpc-ws"]
 resolver = "2"
 
 [profile.release]
