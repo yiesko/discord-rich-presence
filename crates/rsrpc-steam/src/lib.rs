@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{debug, log};
+/* logging via tracing (see below) */
 
 /// Override for non-standard installs (and hermetic tests): when set to an
 /// existing directory, only it is used as the Steam root.
@@ -40,7 +40,7 @@ const STEAM_LIBRARIES_ENV: &str = "RSRPC_STEAM_LIBRARIES";
 const CACHE_FILE: &str = "rsrpc/steam-libraries.json";
 
 #[derive(Clone, Debug)]
-pub(crate) enum Vdf {
+pub enum Vdf {
   Str(String),
   Map(HashMap<String, Vdf>),
 }
@@ -169,7 +169,7 @@ fn parse_vdf(tokens: &[String]) -> HashMap<String, Vdf> {
 
 /// Parse a whole VDF document into nested maps.
 #[must_use]
-pub(crate) fn parse_vdf_str(input: &str) -> HashMap<String, Vdf> {
+pub fn parse_vdf_str(input: &str) -> HashMap<String, Vdf> {
   let tokens = tokenize(input);
   // Token-count cap: a 4MB file of quote pairs could otherwise build a
   // million-entry map. Corrupt/oversized input parses to nothing (the
@@ -210,7 +210,7 @@ fn read_limited(path: &Path, limit: u64) -> Result<String, std::io::Error> {
 /// Library paths from a parsed `libraryfolders.vdf`: new format nests them
 /// under `"path"`, legacy format stores the path directly as the value.
 #[must_use]
-pub(crate) fn library_paths(doc: &HashMap<String, Vdf>) -> Vec<String> {
+pub fn library_paths(doc: &HashMap<String, Vdf>) -> Vec<String> {
   let folders = doc
     .get("libraryfolders")
     .or_else(|| doc.get("LibraryFolders"));
@@ -233,7 +233,7 @@ pub(crate) fn library_paths(doc: &HashMap<String, Vdf>) -> Vec<String> {
 }
 
 /// `(appid, installdir)` from a parsed `appmanifest_<id>.acf`.
-pub(crate) fn manifest_ids(doc: &HashMap<String, Vdf>) -> Option<(String, String)> {
+pub fn manifest_ids(doc: &HashMap<String, Vdf>) -> Option<(String, String)> {
   let state = match doc.get("AppState") {
     Some(Vdf::Map(map)) => map,
     _ => return None,
@@ -322,7 +322,7 @@ fn dir_fingerprint(apps_dir: &Path) -> Option<Fingerprint> {
 
 /// Install-dir -> AppId over every known Steam library.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SteamLibraries {
+pub struct SteamLibraries {
   /// `libraryfolders.vdf` files whose mtime gates a refresh.
   watched: Vec<PathBuf>,
   /// Last-seen mtimes of the watched files.
@@ -349,12 +349,10 @@ pub(crate) struct SteamLibraries {
 
 impl SteamLibraries {
   /// Build from one explicit root, parsing unconditionally (custom
-  /// installs, tooling, tests). Empty when the root holds no Steam layout.
-  /// Prefer [`SteamLibraries::discover`] in production: it consults the
-  /// on-disk cache and every discovery source. Test-only for now (hence
-  /// the gate): production has no caller yet.
-  #[cfg(test)]
-  pub(crate) fn from_root(root: &Path) -> Self {
+  /// installs, tooling, hermetic tests). Empty when the root holds no
+  /// Steam layout. Prefer [`SteamLibraries::discover`] in production: it
+  /// consults the on-disk cache and every discovery source.
+  pub fn from_root(root: &Path) -> Self {
     let mut libraries = Self {
       roots: vec![root.to_path_buf()],
       exclusive: true,
@@ -377,21 +375,21 @@ impl SteamLibraries {
   /// `refresh_if_stale`). Lets pruning tests run hermetic, without the
   /// real-machine sweep `collect_roots` performs.
   #[cfg(test)]
-  pub(crate) fn set_roots_for_test(&mut self, roots: Vec<PathBuf>, exclusive: bool) {
+  pub fn set_roots_for_test(&mut self, roots: Vec<PathBuf>, exclusive: bool) {
     self.roots = roots;
     self.exclusive = exclusive;
   }
 
   /// Test probe: watch-marker count (see `watched`).
   #[cfg(test)]
-  pub(crate) fn watched_len_for_test(&self) -> usize {
+  pub fn watched_len_for_test(&self) -> usize {
     self.watched.len()
   }
 
   /// Full discovery: collect roots from every source, resolve them to
   /// libraries, reuse the on-disk cache wherever fingerprints still
   /// match, parse only what is new or changed.
-  pub(crate) fn discover() -> Self {
+  pub fn discover() -> Self {
     let mut libraries = Self::default();
     let cached = load_cache();
     let mut scanned = 0;
@@ -442,7 +440,7 @@ impl SteamLibraries {
         }
       }
     }
-    log!(
+    tracing::info!(
       "[Process Scanner] Steam libraries: {} install dirs ({} parsed, {} from cache)",
       libraries.dirs.len(),
       scanned,
@@ -459,7 +457,7 @@ impl SteamLibraries {
   /// `/proc` exe sweep costs ~5ms, so not every tick — and installs
   /// already trigger re-collection via the folders-file marker.
   #[hotpath::measure]
-  pub(crate) fn refresh_if_stale(&mut self) {
+  pub fn refresh_if_stale(&mut self) {
     self.ticks = self.ticks.saturating_add(1);
     let folders_changed = self.watched.iter().any(|file| {
       std::fs::metadata(file)
@@ -474,7 +472,7 @@ impl SteamLibraries {
     let mut libs: Vec<PathBuf>;
     if folders_changed || self.ticks.is_multiple_of(120) {
       if folders_changed {
-        debug!("[Process Scanner] Steam folders changed, re-resolving libraries");
+        tracing::debug!("[Process Scanner] Steam folders changed, re-resolving libraries");
       }
       // Re-resolve from the SAME source discovery used: an exclusive map
       // (explicit override, injected layouts) re-resolves its stored
@@ -564,7 +562,7 @@ impl SteamLibraries {
             changed = true;
             let before = fresh_dirs.len();
             self.scan_library_into(lib, &mut fresh_dirs);
-            debug!(
+            tracing::debug!(
               "[Process Scanner] Steam library rescanned: {} ({} prefixes)",
               lib.display(),
               fresh_dirs.len().saturating_sub(before)
@@ -583,7 +581,7 @@ impl SteamLibraries {
 
   /// AppId whose install dir is the longest prefix of `normalized_path`
   /// (already lowercased, `/`-separated, leading `/` — the scanner's form).
-  pub(crate) fn match_prefix(&self, normalized_path: &str) -> Option<&str> {
+  pub fn match_prefix(&self, normalized_path: &str) -> Option<&str> {
     let mut best: Option<&str> = None;
     let mut best_len = 0;
     for (prefix, appid) in &self.dirs {
@@ -621,7 +619,7 @@ impl SteamLibraries {
     for entry in entries.flatten() {
       seen += 1;
       if seen > MAX_SCAN_ENTRIES {
-        debug!(
+        tracing::debug!(
           "[Process Scanner] Steam library {} over entry cap, skipping tail",
           library.display()
         );
@@ -655,7 +653,7 @@ impl SteamLibraries {
         manifests += 1;
       }
     }
-    debug!(
+    tracing::debug!(
       "[Process Scanner] Steam library {}: {} manifests",
       library.display(),
       manifests
@@ -701,7 +699,7 @@ fn root_libraries(root: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
         .map(PathBuf::from),
     );
   } else {
-    debug!(
+    tracing::debug!(
       "[Process Scanner] No libraryfolders.vdf under {}",
       root.display()
     );
@@ -808,7 +806,7 @@ fn running_steam_roots() -> Vec<PathBuf> {
       && let Some(root) = walk_up_for_steamapps(parent)
       && !roots.contains(&root)
     {
-      debug!(
+      tracing::debug!(
         "[Process Scanner] Steam root from pid {}: {}",
         entry.file_name().to_string_lossy(),
         root.display()
@@ -853,7 +851,7 @@ fn path_steam_roots() -> Vec<PathBuf> {
 /// `\011` tab, `\134` backslash) in one pass: chained `replace` calls
 /// would corrupt an encoded backslash followed by digits (`\134040` is
 /// a literal `\040`, not a space).
-pub(crate) fn unescape_mount(field: &str) -> String {
+pub fn unescape_mount(field: &str) -> String {
   let mut out = String::with_capacity(field.len());
   let mut chars = field.chars().peekable();
   while let Some(char) = chars.next() {
@@ -896,7 +894,7 @@ pub(crate) fn unescape_mount(field: &str) -> String {
 /// from `/proc/mounts`.
 #[must_use]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn mount_library_roots_for(mounts: &str) -> Vec<PathBuf> {
+pub fn mount_library_roots_for(mounts: &str) -> Vec<PathBuf> {
   const SKIP_TYPES: &[&str] = &[
     "proc",
     "sysfs",
@@ -941,7 +939,7 @@ pub(crate) fn mount_library_roots_for(mounts: &str) -> Vec<PathBuf> {
         PathBuf::from(&mount).join(layout)
       };
       if candidate.join("steamapps").is_dir() && !roots.contains(&candidate) {
-        debug!(
+        tracing::debug!(
           "[Process Scanner] Steam library on mount: {}",
           candidate.display()
         );

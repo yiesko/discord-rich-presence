@@ -16,6 +16,7 @@ rsrpc-types = { path = "../crates/rsrpc-types" }
 rsrpc-protocol = { path = "../crates/rsrpc-protocol" }
 rsrpc-state = { path = "../crates/rsrpc-state" }
 rsrpc-telemetry = { path = "../crates/rsrpc-telemetry" }
+rsrpc-steam = { path = "../crates/rsrpc-steam" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rsrpc-proc-events = { path = "../crates/rsrpc-proc-events" }

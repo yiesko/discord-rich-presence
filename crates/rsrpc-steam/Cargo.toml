@@ -1,0 +1,17 @@
+[package]
+name = "rsrpc-steam"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["spikehd"]
+description = "Steam library provider: VDF parsing, install-dir index, refresh with mtime fingerprints"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["steam", "games", "vdf"]
+categories = ["parser-implementations"]
+
+[dependencies]
+serde_json = "1.0"
+tracing = "0.1"
+# Profiling only: inert unless a `hotpath-*` feature is enabled.
+hotpath = "0.25"

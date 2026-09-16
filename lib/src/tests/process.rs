@@ -1637,23 +1637,8 @@ fn fake_steam_root(tag: &str, manifests: &[(&str, &str)]) -> crate::tests::TempD
   root
 }
 
-#[test]
-fn refresh_prunes_watch_markers_of_vanished_roots() {
-  use crate::server::steam::SteamLibraries;
-
-  // One watched folders file...
-  let root = fake_steam_root("vanish", &[("12345", "Vdf Game")]);
-  let ghost = root.join("gone");
-  let mut libraries = SteamLibraries::from_root(&root);
-  assert_eq!(libraries.watched_len_for_test(), 1);
-  // ...whose disk disappears while discovery moves on: the marker must
-  // go with it instead of accumulating forever (mount churn). Deleting
-  // the dir flips the folders marker itself, which triggers re-resolution.
-  libraries.set_roots_for_test(vec![ghost], true);
-  drop(root);
-  libraries.refresh_if_stale();
-  assert_eq!(libraries.watched_len_for_test(), 0);
-}
+/// Watch-marker pruning moved to `rsrpc-steam/tests/steam.rs`
+/// (`refresh_drops_libraries_of_vanished_roots`, behavioral, no seams).
 
 #[test]
 fn steam_libraries_match_prefix_and_refresh() {

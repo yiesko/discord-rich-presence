@@ -1506,6 +1506,7 @@ dependencies = [
  "rsrpc-proc-events",
  "rsrpc-protocol",
  "rsrpc-state",
+ "rsrpc-steam",
  "rsrpc-telemetry",
  "rsrpc-types",
  "serde",
@@ -1582,6 +1583,15 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rsrpc-steam"
+version = "0.1.0"
+dependencies = [
+ "hotpath",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
