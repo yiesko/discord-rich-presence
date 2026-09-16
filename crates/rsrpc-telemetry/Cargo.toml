@@ -1,0 +1,14 @@
+[package]
+name = "rsrpc-telemetry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["spikehd"]
+description = "rsRPC diagnostics: queue depth gauges, self-RSS, resource census rendering"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["discord", "metrics", "diagnostics"]
+categories = ["network-programming"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
