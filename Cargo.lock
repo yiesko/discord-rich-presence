@@ -1555,6 +1555,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsrpc-core"
+version = "0.1.0"
+dependencies = [
+ "rsrpc-bridge",
+ "rsrpc-detect",
+ "rsrpc-protocol",
+ "rsrpc-telemetry",
+ "rsrpc-transport-ipc",
+ "rsrpc-transport-ws",
+ "rsrpc-types",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "rsrpc-detect"
 version = "0.1.0"
 dependencies = [
