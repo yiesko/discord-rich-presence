@@ -189,6 +189,9 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
         "[ipc] Frame of {data_size} bytes exceeds the {MAX_IPC_PAYLOAD} byte limit, closing"
       );
       send_close(buffer.get_mut(), 1003, "Payload too large");
+      // The connection may have published before misbehaving: clear it
+      // like every other connection loss, or the card sticks forever.
+      send_empty(ipc.sink(), current_pid);
       break;
     }
 
@@ -209,6 +212,8 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
           u32::from_le_bytes(packet_type)
         );
         send_close(buffer.get_mut(), 1003, "Unsupported packet type");
+        // Same as above: a desynced client may hold a live card.
+        send_empty(ipc.sink(), current_pid);
         break;
       }
     };
