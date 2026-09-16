@@ -18,6 +18,7 @@ use std::{
 };
 
 use rsrpc_protocol::error::{Result, RsrpcError};
+use rsrpc_protocol::query::query_params;
 use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
 use rsrpc_ws::{ClientId, CloseCode, Event, EventHub, Message, Responder};
@@ -453,21 +454,6 @@ async fn on_message(
   }
 }
 
-/// Split `?a=1&b=2` without percent-decoding (exact legacy `get_url_params`
-/// semantics: no `?` yields nothing, pairs without `=` are ignored).
-fn query_params(uri: &str) -> HashMap<String, String> {
-  let mut params = HashMap::new();
-  let Some((_, query)) = uri.split_once('?') else {
-    return params;
-  };
-  for pair in query.split('&') {
-    if let Some((key, value)) = pair.split_once('=') {
-      params.insert(key.to_string(), value.to_string());
-    }
-  }
-  params
-}
-
 /// Browser origins must be Discord; absent origin (native clients) passes.
 fn origin_allowed(origin: Option<&str>) -> bool {
   match origin {
@@ -492,12 +478,10 @@ mod tests {
 
   #[test]
   fn query_params_match_legacy_semantics() {
-    let params = query_params("/?v=1&encoding=json&client_id=abc");
+    // Canonical parser lives in rsrpc-protocol (tested there); this pins
+    // the import still resolves to the same behavior here.
+    let params = query_params("/?v=1&client_id=abc");
     assert_eq!(params.get("v").map(String::as_str), Some("1"));
-    assert_eq!(params.get("encoding").map(String::as_str), Some("json"));
     assert_eq!(params.get("client_id").map(String::as_str), Some("abc"));
-    assert!(query_params("/").is_empty());
-    // Pairs without `=` are ignored, like the legacy parser.
-    assert!(query_params("/?flag").is_empty());
   }
 }
