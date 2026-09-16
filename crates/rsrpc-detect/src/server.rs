@@ -5,7 +5,8 @@
 //! Steam roots behind `RwLock`. Only genuinely mutable per-tick state
 //! (caches, pid sets, wake handles) sits behind short `Mutex` sections.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -56,7 +57,7 @@ pub struct ProcessServer {
   /// plus event-driven EXEC hits). Lets the proc-events watcher wake the
   /// scan loop the moment a TRACKED game exits — untracked exits never
   /// cause a scan.
-  pub detected_pids: Arc<Mutex<HashSet<u64>>>,
+  pub detected_pids: Arc<Mutex<FxHashSet<u64>>>,
   /// Memoized SteamAppId per pid: environ never changes after exec, so
   /// one read per process lifetime suffices (environ is kilobytes — the
   /// biggest per-process cost in the profiler). Invalidated by EXEC (the
@@ -65,7 +66,7 @@ pub struct ProcessServer {
   /// Each entry carries a sequence number: a `drop_appid` racing an
   /// in-flight read bumps it, and the stale read is discarded instead of
   /// pinning a pre-exec environ for the pid lifetime.
-  pub(crate) appid_cache: Arc<Mutex<HashMap<u64, AppIdMemo>>>,
+  pub(crate) appid_cache: Arc<Mutex<FxHashMap<u64, AppIdMemo>>>,
   /// Scan thread handle for early wakeups (proc-events EXIT of a tracked
   /// game). Registered by the scan thread itself on startup.
   pub(crate) scan_wake: Arc<Mutex<Option<std::thread::Thread>>>,
@@ -372,8 +373,8 @@ impl ProcessServer {
       enable_proc_events: true,
       exclusions: Arc::new(RwLock::new(Exclusions::default())),
       steam_libraries: Arc::new(RwLock::new(SteamLibraries::discover())),
-      detected_pids: Arc::new(Mutex::new(HashSet::new())),
-      appid_cache: Arc::new(Mutex::new(HashMap::new())),
+      detected_pids: Arc::new(Mutex::new(FxHashSet::default())),
+      appid_cache: Arc::new(Mutex::new(FxHashMap::default())),
       scan_wake: Arc::new(Mutex::new(None)),
       last_scan: Arc::new(Mutex::new(std::time::Instant::now())),
 

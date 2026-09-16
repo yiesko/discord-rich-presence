@@ -8,7 +8,6 @@
 //! `snapshots_under_flood_never_stall`).
 
 use std::{
-  collections::HashMap,
   net::{Ipv4Addr, SocketAddr},
   sync::{
     Arc, Mutex,
@@ -22,6 +21,7 @@ use rsrpc_protocol::query::query_params;
 use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
 use rsrpc_ws::{ClientId, CloseCode, Event, EventHub, Message, Responder};
+use rustc_hash::FxHashMap;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 
@@ -88,7 +88,7 @@ impl Sink {
 /// `Clone + Send + Sync`: hand to telemetry tasks freely.
 #[derive(Debug, Clone)]
 pub struct TransportHandle {
-  clients: Arc<RwLock<HashMap<ClientId, ClientSlot>>>,
+  clients: Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   dropped: Arc<AtomicU64>,
 }
 
@@ -207,7 +207,7 @@ impl WsTransport {
     };
 
     let (tx, rx) = mpsc::channel(config.event_queue);
-    let clients = Arc::new(RwLock::new(HashMap::new()));
+    let clients = Arc::new(RwLock::new(FxHashMap::default()));
     let dropped = Arc::new(AtomicU64::new(0));
     let pump = tokio::spawn(pump_loop(PumpCtx {
       hub,
@@ -280,7 +280,7 @@ impl Drop for WsTransport {
 /// Pump-owned context (moved into the pump task).
 struct PumpCtx {
   hub: EventHub,
-  clients: Arc<RwLock<HashMap<ClientId, ClientSlot>>>,
+  clients: Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   sink: Sink,
   user: Arc<Mutex<RpcUser>>,
   set_activity: bool,
@@ -327,7 +327,7 @@ async fn pump_loop(
 async fn on_connect(
   id: ClientId,
   responder: Responder,
-  clients: &Arc<RwLock<HashMap<ClientId, ClientSlot>>>,
+  clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   user: &Arc<Mutex<RpcUser>>,
 ) {
   // Parse + validate before any reply or insert.
@@ -363,7 +363,7 @@ async fn on_connect(
 /// Remove the slot and emit its clear (shared by Disconnect and prune paths).
 async fn remove_and_clear(
   id: ClientId,
-  clients: &Arc<RwLock<HashMap<ClientId, ClientSlot>>>,
+  clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   sink: &Sink,
 ) {
   let slot = clients.write().await.remove(&id);
@@ -377,7 +377,7 @@ async fn remove_and_clear(
 async fn on_message(
   id: ClientId,
   message: Message,
-  clients: &Arc<RwLock<HashMap<ClientId, ClientSlot>>>,
+  clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   sink: &Sink,
   user: &Arc<Mutex<RpcUser>>,
   set_activity: bool,

@@ -20,6 +20,7 @@ rsrpc-ws = { path = "../rsrpc-ws" }
 tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
 serde_json = "1.0"
 tracing = "0.1"
+rustc-hash = "2.1"
 
 [dev-dependencies]
 tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }

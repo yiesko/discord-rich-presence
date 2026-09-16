@@ -3,7 +3,7 @@
 //! Environ reads are kilobytes and never change after exec: one read per
 //! process lifetime, discarded (never stored) when an EXEC races it.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use crate::scan::read_steam_app_id;
 use crate::server::ProcessServer;
@@ -77,7 +77,7 @@ impl ProcessServer {
   /// Drop memoized AppIds of pids that died since the last tick: pid
   /// reuse must never serve a stale id. One set build + retain per tick.
   pub(crate) fn sweep_dead_appids(&self, processes: &[Exec]) -> rsrpc_protocol::error::Result<()> {
-    let mut live = HashSet::with_capacity(processes.len());
+    let mut live = FxHashSet::with_capacity_and_hasher(processes.len(), Default::default());
     live.extend(processes.iter().map(|process| process.pid));
     self
       .appid_cache

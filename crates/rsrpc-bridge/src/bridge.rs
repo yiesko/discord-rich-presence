@@ -29,6 +29,7 @@ use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
 use rsrpc_types::{AppId, SocketId};
 use rsrpc_ws::{ClientId, Event, EventHub, Message, Responder};
+use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -81,8 +82,8 @@ pub struct BridgeInputs {
 /// Workhorse state shared by every pump (all guards short, never `.await`
 /// while held — verified by the flood integration test).
 struct Shared {
-  json_clients: Mutex<HashMap<ClientId, Responder>>,
-  msgpack_clients: Mutex<HashMap<ClientId, Responder>>,
+  json_clients: Mutex<FxHashMap<ClientId, Responder>>,
+  msgpack_clients: Mutex<FxHashMap<ClientId, Responder>>,
   cache: Mutex<ReplayCache>,
   activity_seq: Mutex<u64>,
   last_process: Mutex<HashMap<AppId, u64>>,
@@ -169,8 +170,8 @@ impl Bridge {
     let token = CancellationToken::new();
     let tasks = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
     let shared = Arc::new(Shared {
-      json_clients: Mutex::new(HashMap::new()),
-      msgpack_clients: Mutex::new(HashMap::new()),
+      json_clients: Mutex::new(FxHashMap::default()),
+      msgpack_clients: Mutex::new(FxHashMap::default()),
       cache: Mutex::new(HashMap::new()),
       activity_seq: Mutex::new(0),
       last_process: Mutex::new(HashMap::new()),
@@ -601,7 +602,7 @@ async fn persist_task(shared: Arc<Shared>, interval: Duration, token: Cancellati
 }
 
 impl Shared {
-  fn clients_for(&self, protocol: BridgeProtocol) -> &Mutex<HashMap<ClientId, Responder>> {
+  fn clients_for(&self, protocol: BridgeProtocol) -> &Mutex<FxHashMap<ClientId, Responder>> {
     match protocol {
       BridgeProtocol::Json => &self.json_clients,
       BridgeProtocol::MsgPack => &self.msgpack_clients,
