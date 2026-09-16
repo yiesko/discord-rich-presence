@@ -25,7 +25,7 @@ fn fresh_slot_is_skipped_stale_slot_is_reused() {
   let now_secs = 1_700_000_000_u64;
 
   // Fresh snapshot in slot 0 (timestamp == now).
-  let snapshot = StateSnapshot::new(StateServers::default(), vec![]);
+  let snapshot = StateSnapshot::new(env!("CARGO_PKG_VERSION"), StateServers::default(), vec![]);
   let slot0 = dir.join(format!("{STATE_FILE_PREFIX}0"));
   // Rewrite with a controlled fresh timestamp.
   let mut body = serde_json::to_value(&snapshot).expect("json");
@@ -56,7 +56,7 @@ fn snapshot_round_trips_through_atomic_write() {
   let _ = std::fs::create_dir_all(&dir);
   let path = dir.join("rsrpc-state-0");
 
-  let snapshot = StateSnapshot::new(StateServers::default(), vec![]);
+  let snapshot = StateSnapshot::new(env!("CARGO_PKG_VERSION"), StateServers::default(), vec![]);
   write_snapshot(&path, &snapshot).expect("writes");
   assert!(path.exists());
   // No temp file leaks beside it.

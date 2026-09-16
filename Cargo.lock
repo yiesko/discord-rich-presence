@@ -1517,6 +1517,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsrpc-bridge"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "rmp-serde",
+ "rsrpc-protocol",
+ "rsrpc-state",
+ "rsrpc-types",
+ "rsrpc-ws",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "tracing",
+ "tungstenite 0.30.0",
+]
+
+[[package]]
 name = "rsrpc-cli"
 version = "0.35.0"
 dependencies = [
