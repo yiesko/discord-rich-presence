@@ -215,28 +215,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .block_on(async_main())
 }
 
-async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
-  // Fail-fast supervision (ADR-1): worker threads dying silently would
-  // leave a zombie daemon (systemd green, detection/bridge dead) that
-  // Restart=on-failure can never catch. Any panic anywhere exits the
-  // process after the default hook logs it, so systemd restarts us into
-  // a clean state (stale sockets/IPC are reclaimed on boot by design).
-  // Binary-only: libraries (and their tests) keep default behavior.
+/// Fail-fast supervision (ADR-1): worker threads dying silently would
+/// leave a zombie daemon (systemd green, detection/bridge dead) that
+/// Restart=on-failure can never catch. Any panic anywhere exits the
+/// process after the default hook logs it, so systemd restarts us into
+/// a clean state (stale sockets/IPC are reclaimed on boot by design).
+/// Binary-only: libraries (and their tests) keep default behavior.
+fn install_panic_hook() {
   let default_hook = std::panic::take_hook();
   std::panic::set_hook(Box::new(move |info| {
     default_hook(info);
     eprintln!("[rsrpc] worker panic, exiting for supervisor restart");
     std::process::exit(1);
   }));
+}
 
-  let args = Args::parse();
-
-  // Structured logs to stderr. `RUST_LOG` wins when set; otherwise
-  // `--debug` selects debug, default is info. (Replaces the bespoke
-  // `RSRPC_LOGS_ENABLED`/`RSRPC_DEBUG` env protocol of the old logger;
-  // `RSRPC_DEBUG=1` still works via clap's env binding on `--debug`.)
+/// Structured logs to stderr. `RUST_LOG` wins when set; otherwise
+/// `--debug` selects debug, default is info. (Replaces the bespoke
+/// `RSRPC_LOGS_ENABLED`/`RSRPC_DEBUG` env protocol of the old logger;
+/// `RSRPC_DEBUG=1` still works via clap's env binding on `--debug`.)
+fn init_logging(debug: bool) {
   let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-    if args.debug {
+    if debug {
       tracing_subscriber::EnvFilter::new("debug")
     } else {
       tracing_subscriber::EnvFilter::new("info")
@@ -246,21 +246,29 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     .with_env_filter(filter)
     .with_target(false)
     .init();
+}
 
+/// Update subcommands: `Some` outcome means async_main returns it without
+/// starting anything; `None` means boot continues into daemon setup.
+fn update_command(args: &Args) -> Option<Result<(), Box<dyn std::error::Error>>> {
   if args.rollback {
-    update::cmd_rollback()?;
-    return Ok(());
+    return Some(update::cmd_rollback());
   }
   // Apply any staged update first: on success this swaps the binary and
   // re-executes (diverging), so everything below runs the new version.
   // Never fails boot — problems discard the staged file and continue.
   update::apply_pending_on_boot();
   if args.check_update {
-    return update::cmd_check();
+    return Some(update::cmd_check());
   }
   if args.update {
-    return update::cmd_stage(args.yes);
+    return Some(update::cmd_stage(args.yes));
   }
+  None
+}
+
+/// Effective daemon configuration from flags/env.
+fn build_daemon_config(args: &Args) -> RPCConfig {
   // Effective db_url for auto-refresh: with --enable-db-update and no --db-url, fall back to DEFAULT_DB_URL
   let effective_db_url = args.db_url.clone().or_else(|| {
     if args.enable_db_update {
@@ -278,7 +286,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
       None
     }
   });
-  let mut config = RPCConfig::builder()
+  RPCConfig::builder()
     .enable_process_scanner(!args.no_process_scan)
     .enable_proc_events(!args.no_proc_events)
     .port(args.bridge_port)
@@ -292,67 +300,63 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     .ignored_ids(parse_ignore_ids(args.ignore_ids.as_deref()))
     .exclusions_url(effective_exclusions_url.filter(|url| !url.trim().is_empty()))
     .app_version(env!("CARGO_PKG_VERSION").to_string())
-    .build();
+    .build()
+}
 
-  if args.debug {
-    println!("[Debug] Resolved configuration: {:#?}", config);
+/// Load the game database from the selected source (flag, URL, or
+/// bundled snapshot), with offline fallbacks. Returns the daemon plus a
+/// short source label for the boot inventory line.
+fn load_daemon(
+  args: &Args,
+  mut config: RPCConfig,
+) -> Result<(Daemon, &'static str), Box<dyn std::error::Error>> {
+  if args.no_process_scan {
+    return Ok((Daemon::from_json_str("[]", config)?, "empty"));
   }
-
-  let (mut daemon, db_source) = if args.no_process_scan {
-    (Daemon::from_json_str("[]", config)?, "empty")
-  } else if let Some(file) = args.detectable_file {
-    (Daemon::from_file(&file, config)?, "file")
-  } else if let Some(url) = args.db_url {
+  if let Some(file) = &args.detectable_file {
+    return Ok((Daemon::from_file(file, config)?, "file"));
+  }
+  if let Some(url) = &args.db_url {
     // A custom database URL was provided; fetch it with offline fallback
-    match fetch_detectable(&url) {
+    return match fetch_detectable(url) {
       Ok((detectable, etag)) => {
         config.initial_db_etag = etag;
-        daemon_from_fetched(detectable, config)?
+        daemon_from_fetched(detectable, config)
       }
       Err(err) => {
         eprintln!(
           "[rsrpc] Failed to fetch DB from '{}': {} - using offline bundled snapshot",
           url, err
         );
-        (Daemon::from_bundled(config)?, "bundled-fallback")
+        Ok((Daemon::from_bundled(config)?, "bundled-fallback"))
       }
-    }
-  } else if args.enable_db_update {
+    };
+  }
+  if args.enable_db_update {
     // Fetch the official DB with trim + offline fallback; keep db_url in config for hourly refresh
-    match fetch_detectable(DEFAULT_DB_URL) {
+    return match fetch_detectable(DEFAULT_DB_URL) {
       Ok((detectable, etag)) => {
         config.initial_db_etag = etag;
-        daemon_from_fetched(detectable, config)?
+        daemon_from_fetched(detectable, config)
       }
       Err(err) => {
         eprintln!(
           "[rsrpc] Failed to fetch official DB '{}': {} - using offline bundled snapshot (background refresh continues)",
           DEFAULT_DB_URL, err
         );
-        (Daemon::from_bundled(config)?, "bundled-fallback")
+        Ok((Daemon::from_bundled(config)?, "bundled-fallback"))
       }
-    }
-  } else {
-    // Fall back to the bundled snapshot (works offline)
-    (Daemon::from_bundled(config)?, "bundled")
-  };
+    };
+  }
+  // Fall back to the bundled snapshot (works offline)
+  Ok((Daemon::from_bundled(config)?, "bundled"))
+}
 
-  // Boot inventory: which database is live and how big it is. A silent
-  // daemon is undiagnosable without it (a degenerate fetch used to pass
-  // with only benign-looking counts downstream).
-  let entries = daemon.database_summary();
-  println!(
-    "[rsrpc] Database: {} ({} entries)",
-    db_source,
-    entries.len()
-  );
-
-  // Load local overrides (overrides.json + overrides.d), a feature originating from rsrpc-wrapper (Polaris).
-  // Single file resolution: --overrides-file > $RSRPC_OVERRIDES_FILE > $XDG_CONFIG_HOME/rsrpc/overrides.json > ~/.config/rsrpc/overrides.json
-  // Directory resolution: --overrides-dir > $RSRPC_OVERRIDES_DIR > $XDG_CONFIG_HOME/rsrpc/overrides.d > ~/.config/rsrpc/overrides.d
-  // Both hold Vec<DetectableActivity> (or single objects), staged BEFORE
-  // any branch below — so --list-detected sees exactly what the daemon
-  // would publish, and running applies them to the live scanner.
+/// Load local overrides (overrides.json + overrides.d), a feature originating from rsrpc-wrapper (Polaris).
+/// Single file resolution: --overrides-file > $RSRPC_OVERRIDES_FILE > $XDG_CONFIG_HOME/rsrpc/overrides.json > ~/.config/rsrpc/overrides.json
+/// Directory resolution: --overrides-dir > $RSRPC_OVERRIDES_DIR > $XDG_CONFIG_HOME/rsrpc/overrides.d > ~/.config/rsrpc/overrides.d
+/// Both hold Vec<DetectableActivity> (or single objects).
+fn load_staged_overrides(args: &Args) -> Vec<DetectableActivity> {
   let overrides_path = args
     .overrides_file
     .clone()
@@ -398,38 +402,82 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
   for o in &staged {
     println!("[wrapper]   -> {} ({})", o.name, o.id);
   }
-  daemon.append_detectables(staged);
+  staged
+}
 
-  if args.list_detected {
-    let found = daemon.detect_once()?;
-    if found.is_empty() {
-      println!("No games detected (overrides and ignore-list apply here too).");
-    } else {
-      for game in &found {
-        match game.pid {
-          Some(pid) => println!("{} (id {}) pid {}", game.name, game.id, pid),
-          None => println!("{} (id {})", game.name, game.id),
-        }
+/// Single-shot diagnostics: print detected games and exit.
+fn cmd_list_detected(daemon: &Daemon) -> Result<(), Box<dyn std::error::Error>> {
+  let found = daemon.detect_once()?;
+  if found.is_empty() {
+    println!("No games detected (overrides and ignore-list apply here too).");
+  } else {
+    for game in &found {
+      match game.pid {
+        Some(pid) => println!("{} (id {}) pid {}", game.name, game.id, pid),
+        None => println!("{} (id {})", game.name, game.id),
       }
     }
-    return Ok(());
+  }
+  Ok(())
+}
+
+/// Single-shot diagnostics: print a database summary and exit.
+fn cmd_list_database(daemon: &Daemon) -> Result<(), Box<dyn std::error::Error>> {
+  let entries = daemon.database_summary();
+  let executables: usize = entries.iter().map(|entry| entry.executables).sum();
+  println!(
+    "{} database entries, {} executables",
+    entries.len(),
+    executables
+  );
+  for entry in entries.iter().take(10) {
+    println!("{} ({})", entry.name, entry.id);
+  }
+  if entries.len() > 10 {
+    println!("... and {} more", entries.len() - 10);
+  }
+  Ok(())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
+  install_panic_hook();
+
+  let args = Args::parse();
+  init_logging(args.debug);
+
+  // Update subcommands diverge before any daemon state exists.
+  if let Some(outcome) = update_command(&args) {
+    return outcome;
+  }
+  let config = build_daemon_config(&args);
+
+  if args.debug {
+    println!("[Debug] Resolved configuration: {:#?}", config);
+  }
+
+  let (mut daemon, db_source) = load_daemon(&args, config)?;
+
+  // Boot inventory: which database is live and how big it is. A silent
+  // daemon is undiagnosable without it (a degenerate fetch used to pass
+  // with only benign-looking counts downstream).
+  let entries = daemon.database_summary();
+  println!(
+    "[rsrpc] Database: {} ({} entries)",
+    db_source,
+    entries.len()
+  );
+
+  // Staged BEFORE any branch below — so --list-detected sees exactly
+  // what the daemon would publish, and running applies them to the
+  // live scanner.
+  daemon.append_detectables(load_staged_overrides(&args));
+
+  if args.list_detected {
+    return cmd_list_detected(&daemon);
   }
 
   if args.list_database {
-    let entries = daemon.database_summary();
-    let executables: usize = entries.iter().map(|entry| entry.executables).sum();
-    println!(
-      "{} database entries, {} executables",
-      entries.len(),
-      executables
-    );
-    for entry in entries.iter().take(10) {
-      println!("{} ({})", entry.name, entry.id);
-    }
-    if entries.len() > 10 {
-      println!("... and {} more", entries.len() - 10);
-    }
-    return Ok(());
+    return cmd_list_database(&daemon);
   }
 
   // Daily background update check: logs availability, and stages when
