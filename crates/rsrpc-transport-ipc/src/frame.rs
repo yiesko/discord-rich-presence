@@ -279,175 +279,21 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
 
     match r_type {
       PacketType::Handshake => {
-        tracing::debug!("[ipc] Recieved handshake");
-        let Ok(data) = serde_json::from_str::<Handshake>(&message) else {
-          tracing::warn!("[ipc] Error parsing handshake");
-          continue;
-        };
-        if data.v != 1 {
-          tracing::warn!("[ipc] Invalid version: {}", data.v);
-          send_close(buffer.get_mut(), 4004, "Invalid version");
+        if on_handshake(ipc, buffer.get_mut(), &message) {
           break;
-        }
-        if data.client_id.is_empty() {
-          tracing::warn!("[ipc] Invalid client_id (empty)");
-          send_close(buffer.get_mut(), 4000, "Invalid client_id");
-          break;
-        }
-        ipc.set_handshake(true);
-        ipc.set_client_id(data.client_id.clone());
-        tracing::info!("[ipc] Client connected: {}", data.client_id);
-        if let Err(err) = buffer
-          .get_mut()
-          .write_all(&encode(PacketType::Frame, &ipc.user_payload()))
-        {
-          tracing::warn!("[ipc] Error sending connection response: {err}");
         }
       }
       PacketType::Frame => {
-        if !ipc.handshake() {
-          tracing::debug!("[ipc] Did not handshake yet, ignoring frame");
-          continue;
-        }
-        let mut activity_cmd = match serde_json::from_str::<ActivityCmd>(&message) {
-          Ok(cmd) => cmd,
-          Err(err) => {
-            tracing::warn!("[ipc] Error parsing activity command: {err}");
-            let resp = encode(
-              PacketType::Frame,
-              &commands::rpc_error("", &Value::Null, 4005, "Invalid encoding"),
-            );
-            if let Err(err) = buffer.get_mut().write_all(&resp) {
-              tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
-            }
-            continue;
-          }
-        };
-        match activity_cmd.cmd.as_str() {
-          // Subscriptions are acknowledged locally (arRPC parity): there is
-          // no voice/guild backend to subscribe to, and forwarding them
-          // would fake-subscribe bridge clients. pid 0 on these frames is
-          // expected — never treat it as a presence clear downstream, so
-          // they never reach the event sink.
-          "SUBSCRIBE" | "UNSUBSCRIBE" => {
-            let resp = encode(PacketType::Frame, &commands::subscribe_ack(&activity_cmd));
-            if let Err(err) = buffer.get_mut().write_all(&resp) {
-              tracing::warn!("[ipc] Error sending subscribe ack: {err}");
-            }
-          }
-          "SET_ACTIVITY" => {
-            handle_set_activity(
-              ipc,
-              buffer.get_mut(),
-              &message,
-              &mut activity_cmd,
-              current_pid,
-            );
-          }
-          "GET_USER" => {
-            // Official response: the user object, or null when the id
-            // names somebody else (we only know our own identity). A
-            // missing id resolves to self (lenient: game SDKs use this
-            // to confirm who they are connected as).
-            let wanted = activity_cmd
-              .args
-              .as_ref()
-              .and_then(|args| args.user_id.as_ref());
-            let user = ipc.current_user();
-            let matched = wanted.is_none_or(|id| *id == user.id);
-            let resp = encode(
-              PacketType::Frame,
-              &commands::user_response(&activity_cmd, matched.then_some(&user)),
-            );
-            if let Err(err) = buffer.get_mut().write_all(&resp) {
-              tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
-            }
-          }
-          "CONNECTIONS_CALLBACK" => {
-            // Explicitly unsupported, like arRPC: answer the error the
-            // client expects instead of dropping it silently.
-            let resp = encode(
-              PacketType::Frame,
-              &commands::rpc_error(
-                &activity_cmd.cmd,
-                &activity_cmd.nonce,
-                1000,
-                "CONNECTIONS_CALLBACK is not supported",
-              ),
-            );
-            if let Err(err) = buffer.get_mut().write_all(&resp) {
-              tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
-            }
-          }
-          "INVITE_BROWSER" | "GUILD_TEMPLATE_BROWSER" | "GIFT_CODE_BROWSER" | "DEEP_LINK" => {
-            // Known secondary commands are forwarded to bridge clients and
-            // acknowledged; the frame never touches presence state.
-            activity_cmd.application_id = Some(ipc.client_id());
-            ipc.send_event(activity_cmd.clone());
-            let resp = encode(PacketType::Frame, &commands::generic_ack(&activity_cmd));
-            if let Err(err) = buffer.get_mut().write_all(&resp) {
-              tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
-            }
-          }
-          other => {
-            // Known-but-unbacked commands (voice, guilds, OAuth...) get
-            // their official error; anything else is genuinely unknown.
-            // Neither is forwarded: both must not disturb presence state.
-            let unsupported = commands::unsupported_command(other);
-            if unsupported.is_none() {
-              tracing::warn!("[ipc] Unknown command: {other}");
-            }
-            let (code, message) = unsupported.unwrap_or((1000, "Unknown command"));
-            let resp = encode(
-              PacketType::Frame,
-              &commands::rpc_error(&activity_cmd.cmd, &activity_cmd.nonce, code, message),
-            );
-            if let Err(err) = buffer.get_mut().write_all(&resp) {
-              tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
-            }
-          }
+        if on_frame(ipc, buffer.get_mut(), &message, current_pid) {
+          break;
         }
       }
       PacketType::Close => {
-        tracing::info!("[ipc] Recieved close");
-        let activity_cmd = ActivityCmd {
-          application_id: Some(ipc.client_id()),
-          cmd: "SET_ACTIVITY".to_string(),
-          data: None,
-          evt: None,
-          args: Some(ActivityCmdArgs {
-            pid: Some(ipc.pid()),
-            activity: None,
-            code: None,
-            user_id: None,
-          }),
-          nonce: Value::String(ipc.nonce()),
-        };
-        ipc.send_event(activity_cmd);
-        // A multiplexing client may hold cards under older pids: clear
-        // those too (app-less, like abrupt closes; the full clear above
-        // already carried this pid with identity).
-        let current = ipc.pid();
-        for pid in ipc.take_published_pids() {
-          if pid != current {
-            send_empty(ipc.sink(), pid);
-          }
-        }
-        // Reset for a potential reuse of this facilitator; the server
-        // listener itself is never rebound (see crate docs).
-        ipc.set_handshake(false);
-        ipc.set_client_id(String::new());
-        ipc.set_pid(0);
+        on_close(ipc);
         break;
       }
       PacketType::Ping => {
-        tracing::debug!("[ipc] Recieved ping");
-        if let Err(err) = buffer
-          .get_mut()
-          .write_all(&encode(PacketType::Pong, &message))
-        {
-          tracing::info!("[ipc] Error sending pong: {err}");
-        }
+        on_ping(buffer.get_mut(), &message);
       }
       PacketType::Pong => {
         tracing::debug!("[ipc] Recieved pong");
@@ -456,6 +302,183 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
   }
 }
 
+/// Pump outcome: `true` stops the connection loop, `false` reads on.
+fn on_handshake(
+  ipc: &mut dyn IpcFacilitator,
+  stream: &mut (impl Read + Write),
+  message: &str,
+) -> bool {
+  tracing::debug!("[ipc] Recieved handshake");
+  let Ok(data) = serde_json::from_str::<Handshake>(message) else {
+    tracing::warn!("[ipc] Error parsing handshake");
+    return false;
+  };
+  if data.v != 1 {
+    tracing::warn!("[ipc] Invalid version: {}", data.v);
+    send_close(stream, 4004, "Invalid version");
+    return true;
+  }
+  if data.client_id.is_empty() {
+    tracing::warn!("[ipc] Invalid client_id (empty)");
+    send_close(stream, 4000, "Invalid client_id");
+    return true;
+  }
+  ipc.set_handshake(true);
+  ipc.set_client_id(data.client_id.clone());
+  tracing::info!("[ipc] Client connected: {}", data.client_id);
+  if let Err(err) = stream.write_all(&encode(PacketType::Frame, &ipc.user_payload())) {
+    tracing::warn!("[ipc] Error sending connection response: {err}");
+  }
+  false
+}
+
+/// Answer a `Close` frame: full clear with identity plus clears for
+/// older multiplexed pids, then reset the facilitator for reuse.
+fn on_close(ipc: &mut dyn IpcFacilitator) {
+  tracing::info!("[ipc] Recieved close");
+  let activity_cmd = ActivityCmd {
+    application_id: Some(ipc.client_id()),
+    cmd: "SET_ACTIVITY".to_string(),
+    data: None,
+    evt: None,
+    args: Some(ActivityCmdArgs {
+      pid: Some(ipc.pid()),
+      activity: None,
+      code: None,
+      user_id: None,
+    }),
+    nonce: Value::String(ipc.nonce()),
+  };
+  ipc.send_event(activity_cmd);
+  // A multiplexing client may hold cards under older pids: clear
+  // those too (app-less, like abrupt closes; the full clear above
+  // already carried this pid with identity).
+  let current = ipc.pid();
+  for pid in ipc.take_published_pids() {
+    if pid != current {
+      send_empty(ipc.sink(), pid);
+    }
+  }
+  // Reset for a potential reuse of this facilitator; the server
+  // listener itself is never rebound (see crate docs).
+  ipc.set_handshake(false);
+  ipc.set_client_id(String::new());
+  ipc.set_pid(0);
+}
+
+/// Answer a `Ping` frame with a `Pong` echo.
+fn on_ping(stream: &mut (impl Read + Write), message: &str) {
+  tracing::debug!("[ipc] Recieved ping");
+  if let Err(err) = stream.write_all(&encode(PacketType::Pong, message)) {
+    tracing::info!("[ipc] Error sending pong: {err}");
+  }
+}
+/// Dispatch one `Frame` packet: sub-command handlers plus presence
+/// forwarding. Returns whether the pump must stop (`true` = break).
+fn on_frame(
+  ipc: &mut dyn IpcFacilitator,
+  stream: &mut (impl Read + Write),
+  message: &str,
+  current_pid: u64,
+) -> bool {
+  if !ipc.handshake() {
+    tracing::debug!("[ipc] Did not handshake yet, ignoring frame");
+    return false;
+  }
+  let mut activity_cmd = match serde_json::from_str::<ActivityCmd>(message) {
+    Ok(cmd) => cmd,
+    Err(err) => {
+      tracing::warn!("[ipc] Error parsing activity command: {err}");
+      let resp = encode(
+        PacketType::Frame,
+        &commands::rpc_error("", &Value::Null, 4005, "Invalid encoding"),
+      );
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
+      }
+      return false;
+    }
+  };
+  match activity_cmd.cmd.as_str() {
+    // Subscriptions are acknowledged locally (arRPC parity): there is
+    // no voice/guild backend to subscribe to, and forwarding them
+    // would fake-subscribe bridge clients. pid 0 on these frames is
+    // expected — never treat it as a presence clear downstream, so
+    // they never reach the event sink.
+    "SUBSCRIBE" | "UNSUBSCRIBE" => {
+      let resp = encode(PacketType::Frame, &commands::subscribe_ack(&activity_cmd));
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::warn!("[ipc] Error sending subscribe ack: {err}");
+      }
+    }
+    "SET_ACTIVITY" => {
+      handle_set_activity(ipc, stream, message, &mut activity_cmd, current_pid);
+    }
+    "GET_USER" => {
+      // Official response: the user object, or null when the id
+      // names somebody else (we only know our own identity). A
+      // missing id resolves to self (lenient: game SDKs use this
+      // to confirm who they are connected as).
+      let wanted = activity_cmd
+        .args
+        .as_ref()
+        .and_then(|args| args.user_id.as_ref());
+      let user = ipc.current_user();
+      let matched = wanted.is_none_or(|id| *id == user.id);
+      let resp = encode(
+        PacketType::Frame,
+        &commands::user_response(&activity_cmd, matched.then_some(&user)),
+      );
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
+      }
+    }
+    "CONNECTIONS_CALLBACK" => {
+      // Explicitly unsupported, like arRPC: answer the error the
+      // client expects instead of dropping it silently.
+      let resp = encode(
+        PacketType::Frame,
+        &commands::rpc_error(
+          &activity_cmd.cmd,
+          &activity_cmd.nonce,
+          1000,
+          "CONNECTIONS_CALLBACK is not supported",
+        ),
+      );
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
+      }
+    }
+    "INVITE_BROWSER" | "GUILD_TEMPLATE_BROWSER" | "GIFT_CODE_BROWSER" | "DEEP_LINK" => {
+      // Known secondary commands are forwarded to bridge clients and
+      // acknowledged; the frame never touches presence state.
+      activity_cmd.application_id = Some(ipc.client_id());
+      ipc.send_event(activity_cmd.clone());
+      let resp = encode(PacketType::Frame, &commands::generic_ack(&activity_cmd));
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
+      }
+    }
+    other => {
+      // Known-but-unbacked commands (voice, guilds, OAuth...) get
+      // their official error; anything else is genuinely unknown.
+      // Neither is forwarded: both must not disturb presence state.
+      let unsupported = commands::unsupported_command(other);
+      if unsupported.is_none() {
+        tracing::warn!("[ipc] Unknown command: {other}");
+      }
+      let (code, message) = unsupported.unwrap_or((1000, "Unknown command"));
+      let resp = encode(
+        PacketType::Frame,
+        &commands::rpc_error(&activity_cmd.cmd, &activity_cmd.nonce, code, message),
+      );
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
+      }
+    }
+  }
+  false
+}
 /// Handle a `SET_ACTIVITY` frame: forward to the event sink and echo the
 /// arRPC-shaped confirmation. `raw` is echoed back when the command has no
 /// usable body, so lock-step clients never hang.
