@@ -90,6 +90,12 @@ impl EventSink {
   pub fn dropped_total(&self) -> u64 {
     self.dropped.load(Ordering::Relaxed)
   }
+
+  /// Shared sender for census queue-depth sampling
+  /// (`max_capacity - capacity` = queued).
+  pub fn sender(&self) -> mpsc::Sender<ActivityCmd> {
+    self.tx.clone()
+  }
 }
 
 #[cfg(test)]

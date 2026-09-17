@@ -17,6 +17,7 @@ workspace = true
 rsrpc-types = { path = "../rsrpc-types" }
 rsrpc-protocol = { path = "../rsrpc-protocol" }
 rsrpc-state = { path = "../rsrpc-state" }
+rsrpc-telemetry = { path = "../rsrpc-telemetry" }
 rsrpc-ws = { path = "../rsrpc-ws" }
 tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
 tokio-util = { version = "0.7", features = ["full"] }
@@ -39,3 +40,4 @@ tokio-tungstenite = "0.30"
 futures-util = "0.3"
 serde_json = "1.0"
 rmp-serde = "1.3"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

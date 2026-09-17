@@ -190,7 +190,7 @@ impl Daemon {
     // a pump thread onto a bounded channel. Started first so game STARTs
     // during transport binds are still observed. The handle lives in this
     // frame until shutdown documents the ownership.
-    let (_scanner, proc_rx) = self.start_scanner(db, staged).await;
+    let (_scanner, proc_rx, proc_tx) = self.start_scanner(db, staged).await;
     let mut ipc_transport = None;
     let mut game_transport = None;
 
@@ -232,6 +232,18 @@ impl Daemon {
         ipc_rx,
         game_rx,
         proc_rx,
+        // Sender clones for census queue-depth sampling; game-client
+        // total for the census consumer count. `None` when the leg is off.
+        ipc_tx: ipc_transport
+          .as_ref()
+          .map(|transport| transport.event_sink().sender()),
+        game_tx: game_transport
+          .as_ref()
+          .map(|transport| transport.sink_sender()),
+        proc_tx,
+        game_clients: game_transport
+          .as_ref()
+          .map(|transport| transport.client_total()),
       },
     )
     .await?;
@@ -258,7 +270,9 @@ impl Daemon {
   }
 
   /// Build and start the sync scanner, returning its handle (held by the
-  /// caller for the daemon lifetime) plus its async event stream.
+  /// caller for the daemon lifetime), its async event stream, and a
+  /// sender clone for census queue-depth sampling (`None` when scanning
+  /// is off).
   ///
   /// The automaton build runs in `spawn_blocking` (seconds of CPU);
   /// the pump thread translates scanner events and exits when the bridge
@@ -267,13 +281,17 @@ impl Daemon {
     &self,
     db: Vec<Arc<DetectableActivity>>,
     staged: Vec<DetectableActivity>,
-  ) -> (Option<ProcessServer>, mpsc::Receiver<ProcInput>) {
+  ) -> (
+    Option<ProcessServer>,
+    mpsc::Receiver<ProcInput>,
+    Option<mpsc::Sender<ProcInput>>,
+  ) {
     let (proc_tx, proc_rx) = mpsc::channel(PROC_CHANNEL_BOUND);
     if !self.config.enable_process_scanner {
       // No scanning: pre-closed stream, the bridge pump exits at once.
       // (The legacy no-scan path never built automata either.)
       drop(proc_tx);
-      return (None, proc_rx);
+      return (None, proc_rx, None);
     }
     let (scan_tx, scan_rx) = QueueGauge::pair();
     let refresh = RefreshConfig {
@@ -306,6 +324,7 @@ impl Daemon {
     // Pump: scanner events into the async world. `blocking_send` parks
     // this thread (not a worker) under backpressure, like the legacy
     // bounded queue; a closed channel means shutdown — exit quietly.
+    let census_tx = proc_tx.clone();
     std::thread::spawn(move || {
       while let Ok(event) = scan_rx.recv() {
         let input = match event.hit {
@@ -322,7 +341,7 @@ impl Daemon {
         }
       }
     });
-    (Some(server), proc_rx)
+    (Some(server), proc_rx, Some(census_tx))
   }
 }
 

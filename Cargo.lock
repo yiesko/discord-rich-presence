@@ -1032,6 +1032,7 @@ dependencies = [
  "rmp-serde",
  "rsrpc-protocol",
  "rsrpc-state",
+ "rsrpc-telemetry",
  "rsrpc-types",
  "rsrpc-ws",
  "rustc-hash",
@@ -1040,6 +1041,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "tungstenite",
  "windows-sys 0.61.2",
 ]

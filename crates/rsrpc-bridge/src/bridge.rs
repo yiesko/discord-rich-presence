@@ -77,6 +77,16 @@ pub struct BridgeInputs {
   pub game_rx: mpsc::Receiver<ActivityCmd>,
   /// Scanner reports (generic presence).
   pub proc_rx: mpsc::Receiver<ProcInput>,
+  /// Sender clones for census queue-depth sampling
+  /// (`max_capacity - capacity` = queued). `None` when the leg is off.
+  pub ipc_tx: Option<mpsc::Sender<ActivityCmd>>,
+  /// Sender clone for the game-transport leg census depth.
+  pub game_tx: Option<mpsc::Sender<ActivityCmd>>,
+  /// Sender clone for the scanner leg census depth.
+  pub proc_tx: Option<mpsc::Sender<ProcInput>>,
+  /// Live game-client total, maintained by the game transport.
+  /// `None` when the game transport is off.
+  pub game_clients: Option<Arc<AtomicU64>>,
 }
 
 /// Workhorse state shared by every pump (all guards short, never `.await`
@@ -101,7 +111,18 @@ struct Shared {
   msgpack_port: u16,
   ws_port: Option<u16>,
   ipc_path: Option<String>,
+  /// Sender clones for census queue-depth sampling (see [`BridgeInputs`]).
+  ipc_tx: Option<mpsc::Sender<ActivityCmd>>,
+  game_tx: Option<mpsc::Sender<ActivityCmd>>,
+  proc_tx: Option<mpsc::Sender<ProcInput>>,
+  /// Live game-client total from the game transport.
+  game_clients: Option<Arc<AtomicU64>>,
 }
+
+/// Hourly resource census cadence: distinguishes a growing queue backlog
+/// (producer outrunning consumer) from allocator retention (flat queues
+/// but climbing RSS) in long sessions.
+const STATS_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// arRPC-compatible activity bridge.
 pub struct Bridge {
@@ -190,6 +211,10 @@ impl Bridge {
       msgpack_port,
       ws_port: config.ws_port,
       ipc_path: config.ipc_path.clone(),
+      ipc_tx: inputs.ipc_tx,
+      game_tx: inputs.game_tx,
+      proc_tx: inputs.proc_tx,
+      game_clients: inputs.game_clients,
     });
 
     {
@@ -229,6 +254,7 @@ impl Bridge {
         config.persist_interval,
         token.clone(),
       ));
+      tasks.spawn(stats_task(Arc::clone(&shared), token.clone()));
     }
 
     // Snapshot the (empty) presence + bound servers immediately, so
@@ -505,17 +531,99 @@ async fn command_pump(
 
 /// Process pump: generic presence from the scanner with IPC-wins handoff.
 /// Ends on token cancel (shutdown) or when the scanner drops its sender.
+/// Session-boundary reason for a process-table event: the table went
+/// from empty to non-empty (`game-start`) or back to empty (`game-end`).
+/// Repeats within a state stay quiet.
+fn table_transition(had_games: bool, input: &ProcInput) -> Option<&'static str> {
+  match input {
+    ProcInput::Detected(_) if !had_games => Some("game-start"),
+    ProcInput::Cleared if had_games => Some("game-end"),
+    _ => None,
+  }
+}
+
+/// Queued depth of a census sender (`max - free`).
+fn channel_depth<T>(tx: Option<&mpsc::Sender<T>>) -> usize {
+  tx.map(|tx| tx.max_capacity().saturating_sub(tx.capacity()))
+    .unwrap_or(0)
+}
+
+impl Shared {
+  /// Assemble the resource census from live state: client counts, input
+  /// queue depths and self-RSS. Short guards only, never `.await`.
+  fn census_snapshot(&self) -> rsrpc_telemetry::StatsSnapshot {
+    let json_clients = self.json_clients.lock().unwrap_or_else(|e| e.into_inner());
+    let msgpack_clients = self
+      .msgpack_clients
+      .lock()
+      .unwrap_or_else(|e| e.into_inner());
+    rsrpc_telemetry::StatsSnapshot {
+      rss_bytes: rsrpc_telemetry::rss_bytes(),
+      bridge_json: json_clients.len(),
+      bridge_msgpack: msgpack_clients.len(),
+      ws: self
+        .game_clients
+        .as_ref()
+        .map(|total| usize::try_from(total.load(Ordering::Relaxed)).unwrap_or(0))
+        .unwrap_or(0),
+      // `watch` is the scanner→bridge leg here (proc-events feed the
+      // scanner internally); `proc`/`ws` are the bridge input queues.
+      watch_depth: channel_depth(self.proc_tx.as_ref()),
+      proc_depth: channel_depth(self.ipc_tx.as_ref()),
+      ws_depth: channel_depth(self.game_tx.as_ref()),
+    }
+  }
+
+  /// Render the census line for `reason` (`hourly`, `game-start`, ...).
+  fn census_line(&self, reason: &str) -> String {
+    rsrpc_telemetry::format_resource_stats(reason, &self.census_snapshot())
+  }
+}
+
+impl Bridge {
+  /// Render the current resource census line (see [`Shared::census_snapshot`]).
+  #[must_use]
+  pub fn census(&self, reason: &str) -> String {
+    self.shared.census_line(reason)
+  }
+}
+
+/// Hourly resource census plus the session-boundary lines emitted by the
+/// process pump. Read-only diagnostics: never changes runtime behavior.
+/// Ends on token cancel (shutdown).
+async fn stats_task(shared: Arc<Shared>, token: CancellationToken) {
+  let mut tick = tokio::time::interval(STATS_INTERVAL);
+  tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+  // Skip the immediate first tick: boot already logs its inventory.
+  tick.tick().await;
+  loop {
+    tokio::select! {
+      biased;
+      () = token.cancelled() => break,
+      _ = tick.tick() => {
+        tracing::info!("{}", shared.census_line("hourly"));
+      }
+    }
+  }
+}
+
 async fn proc_pump(
   mut rx: mpsc::Receiver<ProcInput>,
   shared: Arc<Shared>,
   token: CancellationToken,
 ) {
+  // Process-table occupancy for session-boundary census lines.
+  let mut had_games = false;
   loop {
     tokio::select! {
       biased;
       () = token.cancelled() => break,
       input = rx.recv() => {
         let Some(input) = input else { break };
+        if let Some(reason) = table_transition(had_games, &input) {
+          tracing::info!("{}", shared.census_line(reason));
+        }
+        had_games = matches!(input, ProcInput::Detected(_));
         match input {
       ProcInput::Cleared => {
         shared.handoff.lock().unwrap_or_else(|e| e.into_inner()).note_scan(None);
@@ -1226,5 +1334,32 @@ fn send_cached(responder: &Responder, payload: &CachedActivity, protocol: Bridge
     BridgeProtocol::MsgPack => {
       let _ = responder.try_send(Message::Binary(payload.msgpack.clone()));
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn table_transition_fires_only_on_state_edges() {
+    let game = ScannedGame {
+      id: AppId::from("1"),
+      name: "G".to_string(),
+      pid: 7,
+      start: 0,
+    };
+    // Empty -> game: session start; repeats stay quiet.
+    assert_eq!(
+      table_transition(false, &ProcInput::Detected(game.clone())),
+      Some("game-start")
+    );
+    assert_eq!(table_transition(true, &ProcInput::Detected(game)), None);
+    // Game -> empty: session end; repeats stay quiet.
+    assert_eq!(
+      table_transition(true, &ProcInput::Cleared),
+      Some("game-end")
+    );
+    assert_eq!(table_transition(false, &ProcInput::Cleared), None);
   }
 }

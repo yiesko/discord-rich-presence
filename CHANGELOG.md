@@ -44,10 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus a `StatsSnapshot` census (`rss` via `/proc/self/statm` on Linux,
   `n/a` elsewhere) with bridge `json`/`msgpack` and `ws` client counts and
   all three queue depths
-  (`crates/rsrpc-telemetry/src/lib.rs:206`). Helpers and rendering are
-  covered by `crates/rsrpc-telemetry/tests/telemetry.rs` (gauge sharing,
-  `rss_bytes`, snapshot shape); wiring the hourly/session log emission
-  into the daemon is still pending.
+  (`crates/rsrpc-telemetry/src/lib.rs:206`). Helpers, rendering and the
+  daemon wiring are covered by `crates/rsrpc-telemetry/tests/telemetry.rs`
+  (gauge sharing, `rss_bytes`, snapshot shape) and the bridge census
+  suite (live counts, session-boundary lines): the bridge logs the
+  census hourly plus `game-start`/`game-end` on process-table
+  transitions, with consumer counts and input queue depths sampled live.
 - Tests `crates/rsrpc-ws/tests/integration.rs` and
   `crates/rsrpc-transport-ws/tests/integration.rs` (dead vs live
   `Responder` liveness).

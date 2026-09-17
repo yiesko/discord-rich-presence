@@ -211,6 +211,12 @@ impl IpcTransport {
     self.sink.dropped_total()
   }
 
+  /// Shared event sink for census queue-depth sampling.
+  #[must_use]
+  pub fn event_sink(&self) -> EventSink {
+    self.sink.clone()
+  }
+
   /// Graceful shutdown: stop accepting, unblock connection pumps,
   /// drain connections with a deadline, then remove the socket file and
   /// fan-out links (via [`Drop`]).

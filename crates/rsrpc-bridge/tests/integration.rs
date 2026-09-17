@@ -40,6 +40,10 @@ async fn fixture() -> Fixture {
       ipc_rx,
       game_rx,
       proc_rx,
+      ipc_tx: None,
+      game_tx: None,
+      proc_tx: None,
+      game_clients: None,
     },
   )
   .await
@@ -292,6 +296,10 @@ async fn shutdown_removes_state_file() {
       ipc_rx,
       game_rx,
       proc_rx,
+      ipc_tx: None,
+      game_tx: None,
+      proc_tx: None,
+      game_clients: None,
     },
   )
   .await
@@ -378,6 +386,98 @@ async fn null_scan_keeps_live_pid_cards() {
   let _ = read_json(&mut late).await; // READY
   let replay = read_json(&mut late).await;
   assert_eq!(replay["activity"]["name"], "Live");
+
+  fx.bridge.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn census_line_reports_live_counts() {
+  let fx = fixture().await;
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+
+  // One live JSON consumer, empty queues: the rendered census must say so.
+  let line = fx.bridge.census("test");
+  assert!(line.contains("(test)"), "reason missing: {line}");
+  assert!(
+    line.contains("json:1+msgpack:0"),
+    "consumer counts wrong: {line}"
+  );
+  assert!(line.contains("rss="), "rss missing: {line}");
+
+  fx.bridge.shutdown().await;
+}
+
+/// Global log capture for asserting emitted census lines end to end.
+/// One subscriber per test binary (`Once`); tests checkpoint the buffer
+/// length and poll for their markers (no sleeps, generous deadline).
+static LOGS: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+
+struct Capture;
+
+impl std::io::Write for Capture {
+  fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    LOGS
+      .get_or_init(|| std::sync::Mutex::new(String::new()))
+      .lock()
+      .expect("log buffer")
+      .push_str(&String::from_utf8_lossy(buf));
+    Ok(buf.len())
+  }
+
+  fn flush(&mut self) -> std::io::Result<()> {
+    Ok(())
+  }
+}
+
+fn init_capture() {
+  static ONCE: std::sync::Once = std::sync::Once::new();
+  ONCE.call_once(|| {
+    let _ = tracing_subscriber::fmt()
+      .with_writer(|| Capture)
+      .with_max_level(tracing::Level::INFO)
+      .try_init();
+  });
+}
+
+fn logged_since(checkpoint: usize) -> String {
+  LOGS
+    .get_or_init(|| std::sync::Mutex::new(String::new()))
+    .lock()
+    .expect("log buffer")[checkpoint..]
+    .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_transitions_emit_census_lines() {
+  init_capture();
+  let fx = fixture().await;
+  let checkpoint = logged_since(0).len();
+
+  // Empty -> game -> empty must bracket exactly one start and one end line.
+  fx.proc_tx
+    .send(ProcInput::Detected(ScannedGame {
+      id: "game-7".into(),
+      name: "Session".to_string(),
+      pid: u64::from(std::process::id()),
+      start: 1_700_000_000,
+    }))
+    .await
+    .unwrap();
+  fx.proc_tx.send(ProcInput::Cleared).await.unwrap();
+
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  loop {
+    let fresh = logged_since(checkpoint);
+    if fresh.contains("(game-start)") && fresh.contains("(game-end)") {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "session census lines missing, got: {fresh}"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
 
   fx.bridge.shutdown().await;
 }

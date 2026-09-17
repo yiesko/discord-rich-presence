@@ -175,6 +175,12 @@ impl IpcTransport {
     self.sink.dropped_total()
   }
 
+  /// Shared event sink for census queue-depth sampling.
+  #[must_use]
+  pub fn event_sink(&self) -> EventSink {
+    self.sink.clone()
+  }
+
   /// Graceful shutdown: stop accepting, drain connections with a deadline.
   pub async fn shutdown(mut self) {
     self.token.cancel();

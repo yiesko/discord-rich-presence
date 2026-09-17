@@ -133,6 +133,11 @@ pub struct WsTransport {
   server: Option<rsrpc_ws::Server>,
   pump: Option<JoinHandle<()>>,
   handle: TransportHandle,
+  /// Monotonic live-client total for telemetry census (the clients map
+  /// stays the dispatch source of truth; this counter is O(1) to read).
+  total: Arc<AtomicU64>,
+  /// Retained sink sender for census queue-depth sampling.
+  sink_tx: mpsc::Sender<ActivityCmd>,
   bound_port: u16,
 }
 
@@ -227,11 +232,13 @@ impl WsTransport {
     let (tx, rx) = mpsc::channel(config.event_queue);
     let clients = Arc::new(RwLock::new(FxHashMap::default()));
     let dropped = Arc::new(AtomicU64::new(0));
+    let total = Arc::new(AtomicU64::new(0));
     let pump = tokio::spawn(pump_loop(PumpCtx {
       hub,
       clients: Arc::clone(&clients),
+      total: Arc::clone(&total),
       sink: Sink {
-        tx,
+        tx: tx.clone(),
         dropped: Arc::clone(&dropped),
       },
       user,
@@ -245,6 +252,8 @@ impl WsTransport {
         server: Some(server),
         pump: Some(pump),
         handle: handle.clone(),
+        total: Arc::clone(&total),
+        sink_tx: tx,
         bound_port,
       },
       rx,
@@ -261,6 +270,18 @@ impl WsTransport {
   #[must_use]
   pub fn handle(&self) -> TransportHandle {
     self.handle.clone()
+  }
+
+  /// Live game-client total for the telemetry census (O(1) atomic read).
+  #[must_use]
+  pub fn client_total(&self) -> Arc<AtomicU64> {
+    Arc::clone(&self.total)
+  }
+
+  /// Shared sink sender for census queue-depth sampling.
+  #[must_use]
+  pub fn sink_sender(&self) -> mpsc::Sender<ActivityCmd> {
+    self.sink_tx.clone()
   }
 
   /// Current game-client count (short read lock, never stalls).
@@ -299,6 +320,7 @@ impl Drop for WsTransport {
 struct PumpCtx {
   hub: EventHub,
   clients: Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
+  total: Arc<AtomicU64>,
   sink: Sink,
   user: Arc<Mutex<RpcUser>>,
   set_activity: bool,
@@ -310,6 +332,7 @@ async fn pump_loop(
   PumpCtx {
     mut hub,
     clients,
+    total,
     sink,
     user,
     set_activity,
@@ -319,16 +342,17 @@ async fn pump_loop(
   while let Some(event) = hub.next_event().await {
     match event {
       Event::Connect(id, responder) => {
-        on_connect(id, responder, &clients, &user).await;
+        on_connect(id, responder, &clients, &total, &user).await;
       }
       Event::Disconnect(id, _) => {
-        remove_and_clear(id, &clients, &sink).await;
+        remove_and_clear(id, &clients, &total, &sink).await;
       }
       Event::Message(id, message) => {
         on_message(
           id,
           message,
           &clients,
+          &total,
           &sink,
           &user,
           set_activity,
@@ -346,6 +370,7 @@ async fn on_connect(
   id: ClientId,
   responder: Responder,
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
+  total: &Arc<AtomicU64>,
   user: &Arc<Mutex<RpcUser>>,
 ) {
   // Parse + validate before any reply or insert.
@@ -380,6 +405,7 @@ async fn on_connect(
       query_client_id,
     },
   );
+  total.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Remove the slot and emit one clear per published pid (shared by
@@ -388,10 +414,12 @@ async fn on_connect(
 async fn remove_and_clear(
   id: ClientId,
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
+  total: &Arc<AtomicU64>,
   sink: &Sink,
 ) {
   let slot = clients.write().await.remove(&id);
   let Some(slot) = slot else { return };
+  total.fetch_sub(1, Ordering::Relaxed);
   for published in &slot.published {
     sink.emit(handlers::clear_for_slot(published)).await;
   }
@@ -402,6 +430,7 @@ async fn on_message(
   id: ClientId,
   message: Message,
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
+  total: &Arc<AtomicU64>,
   sink: &Sink,
   user: &Arc<Mutex<RpcUser>>,
   set_activity: bool,
@@ -498,7 +527,7 @@ async fn on_message(
   };
   if !alive {
     tracing::info!("[transport-ws] Client {id} send failed, pruning");
-    remove_and_clear(id, clients, sink).await;
+    remove_and_clear(id, clients, total, sink).await;
   }
 }
 
