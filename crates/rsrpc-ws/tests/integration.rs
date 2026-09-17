@@ -198,6 +198,55 @@ async fn half_open_conn_dies_on_idle_timeout() {
 }
 
 #[tokio::test]
+async fn idle_timeout_fires_independently_of_keepalive() {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  // Keepalive ticks hourly, idle budget 200ms: a silent peer must still
+  // be reaped on the idle deadline, not parked until the next tick.
+  let config = ServerConfig::builder("127.0.0.1:0".parse().unwrap())
+    .keepalive_interval(Duration::from_secs(3600))
+    .idle_timeout(Duration::from_millis(200))
+    .build()
+    .unwrap();
+  let (server, mut hub) = Server::bind(config).await.unwrap();
+  let addr = server.local_addr();
+
+  let mut raw = tokio::net::TcpStream::connect(addr).await.unwrap();
+  let request = format!(
+    "GET / HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+  );
+  raw.write_all(request.as_bytes()).await.unwrap();
+  let mut response = Vec::new();
+  loop {
+    let mut chunk = [0u8; 1024];
+    let n = raw.read(&mut chunk).await.unwrap();
+    assert!(n > 0, "server closed handshake prematurely");
+    response.extend_from_slice(&chunk[..n]);
+    if response.windows(4).any(|w| w == b"\r\n\r\n") {
+      break;
+    }
+  }
+  assert!(response.starts_with(b"HTTP/1.1 101"));
+
+  let id = match next_event(&mut hub).await {
+    Event::Connect(id, _) => id,
+    other => panic!("expected Connect, got {other:?}"),
+  };
+  let _held = raw; // open but silent; hourly pings never arrive.
+  match tokio::time::timeout(TIMEOUT, hub.next_event())
+    .await
+    .unwrap()
+  {
+    Some(Event::Disconnect(got_id, DisconnectReason::IdleTimeout)) => {
+      assert_eq!(got_id, id);
+    }
+    other => panic!("expected Disconnect(IdleTimeout), got {other:?}"),
+  }
+
+  server.shutdown().await;
+}
+
+#[tokio::test]
 async fn shutdown_with_open_conns_completes() {
   let (server, mut hub) = Server::bind(test_config()).await.unwrap();
   let addr = server.local_addr();

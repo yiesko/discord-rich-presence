@@ -193,8 +193,12 @@ impl AcceptCtx {
                 idle_timeout: self.idle_timeout,
                 _permit: permit,
               };
-              // Short critical section: spawn is synchronous, no await inside.
-              self.conns.lock().await.spawn(async move { task.run().await });
+              // Short critical section: reap + spawn are synchronous, no
+              // await inside. Drained every accept: finished tasks would
+              // otherwise pin their entries for the process lifetime.
+              let mut conns = self.conns.lock().await;
+              while conns.try_join_next().is_some() {}
+              conns.spawn(async move { task.run().await });
             }
             Err(_) => {
               tokio::spawn(reject_overloaded(stream, self.ws_config));
@@ -292,6 +296,12 @@ impl ConnTask {
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Consume the immediate first tick; pacing starts from here.
     keepalive.tick().await;
+    // Idle expiry runs on its own deadline, never on the keepalive tick:
+    // a silent peer with idle_timeout far below keepalive_interval must
+    // still be reaped promptly. Reset on every sign of life below.
+    let mut idle = Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
+      last_seen + idle_timeout,
+    )));
     // A dropped responder only retires the outbox; the connection keeps
     // serving incoming messages until the peer leaves or shutdown arrives.
     let mut outbox_open = true;
@@ -323,6 +333,7 @@ impl ConnTask {
           match next {
             Some(Ok(WsMessage::Text(text))) => {
               last_seen = Instant::now();
+              idle.as_mut().reset(tokio::time::Instant::from_std(last_seen + idle_timeout));
               // Moved, not copied: tungstenite already hands us refcounted text.
               let event = Event::Message(id, Message::Text(text));
               if event_tx.send(event).await.is_err() {
@@ -331,6 +342,7 @@ impl ConnTask {
             }
             Some(Ok(WsMessage::Binary(bytes))) => {
               last_seen = Instant::now();
+              idle.as_mut().reset(tokio::time::Instant::from_std(last_seen + idle_timeout));
               let event = Event::Message(id, Message::Binary(bytes));
               if event_tx.send(event).await.is_err() {
                 break DisconnectReason::ServerShutdown;
@@ -339,6 +351,7 @@ impl ConnTask {
             // Ping is auto-Ponged inside tungstenite; Pong needs nothing.
             Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => {
               last_seen = Instant::now();
+              idle.as_mut().reset(tokio::time::Instant::from_std(last_seen + idle_timeout));
             }
             // tungstenite never yields Frame from the read path.
             Some(Ok(WsMessage::Frame(_))) => {}
@@ -349,13 +362,13 @@ impl ConnTask {
           }
         }
         _ = keepalive.tick() => {
-          if last_seen.elapsed() > idle_timeout {
-            send_close(&mut outgoing, CloseCode::InternalError).await;
-            break DisconnectReason::IdleTimeout;
-          }
           if outgoing.send(WsMessage::Ping(Bytes::new())).await.is_err() {
             break DisconnectReason::Error;
           }
+        }
+        () = &mut idle => {
+          send_close(&mut outgoing, CloseCode::InternalError).await;
+          break DisconnectReason::IdleTimeout;
         }
       }
     };

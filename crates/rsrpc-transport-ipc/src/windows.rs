@@ -303,8 +303,12 @@ async fn dispatch_loop(
       stream = stream_rx.recv() => {
         let Some(mut stream) = stream else { break };
         let facil = ConnFacilitator::fresh(user.clone(), sink.clone());
-        // Short critical section: spawn_blocking is synchronous.
-        conns.lock().await.spawn_blocking(move || {
+        // Short critical section: spawn_blocking is synchronous. Exited
+        // tasks are reaped here so connection churn cannot pin JoinSet
+        // entries for the transport lifetime.
+        let mut conns = conns.lock().await;
+        while conns.try_join_next().is_some() {}
+        conns.spawn_blocking(move || {
           let mut facil = facil;
           handle_stream(&mut facil, &mut stream);
         });
