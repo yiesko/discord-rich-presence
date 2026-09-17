@@ -1068,17 +1068,23 @@ fn handle_bridge_control(
     .get("nonce")
     .cloned()
     .unwrap_or(serde_json::Value::Null);
-  let before = user.lock().unwrap_or_else(|e| e.into_inner()).clone();
-  if msg_type == "SET_USER" {
-    // `patch` (arRPC shape) or `data` (defensive alias) carry the patch.
-    if let Some(patch) = body.get("patch").or_else(|| body.get("data")) {
-      user.lock().unwrap_or_else(|e| e.into_inner()).patch(patch);
+  // One critical section for the whole read-modify-read: patch/reset
+  // and both snapshots share a single guard.
+  let (before, after) = {
+    let mut guard = user.lock().unwrap_or_else(|e| e.into_inner());
+    let before = guard.clone();
+    if msg_type == "SET_USER" {
+      // `patch` (arRPC shape) or `data` (defensive alias) carry the patch.
+      if let Some(patch) = body.get("patch").or_else(|| body.get("data")) {
+        guard.patch(patch);
+      }
+    } else {
+      // Reset to the startup identity (defaults + `RSRPC_USER_*`).
+      *guard = RpcUser::from_env();
     }
-  } else {
-    // Reset to the startup identity (defaults + `RSRPC_USER_*`).
-    *user.lock().unwrap_or_else(|e| e.into_inner()) = RpcUser::from_env();
-  }
-  let after = user.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let after = guard.clone();
+    (before, after)
+  };
   let changed = (before != after).then_some(after.clone());
   let user_value = serde_json::to_value(after).unwrap_or(serde_json::Value::Null);
   let ack = serde_json::json!({
