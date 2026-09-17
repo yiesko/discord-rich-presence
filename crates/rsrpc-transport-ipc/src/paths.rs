@@ -41,10 +41,39 @@ pub fn candidate_dirs_from(vars: [(&str, Option<String>); 4]) -> Vec<PathBuf> {
   dirs
 }
 
+/// Whether `link` may be replaced by our live socket: it already points
+/// at it, or it is a stale ours-shaped symlink (`discord-ipc-*`) whose
+/// target is gone (previous crashed run). A symlink owned by a live
+/// foreign service is never ours — stealing it would redirect that
+/// service's clients to us.
+fn link_reclaimable(link: &Path, bound: &Path) -> bool {
+  let target = match std::fs::read_link(link) {
+    Ok(target) => target,
+    Err(_) => return false, // not a symlink: never touch.
+  };
+  // Resolve relative targets against the link's parent for the checks.
+  let resolved = if target.is_absolute() {
+    target.clone()
+  } else {
+    link
+      .parent()
+      .map(|parent| parent.join(&target))
+      .unwrap_or(target.clone())
+  };
+  if resolved == bound {
+    return true;
+  }
+  let ours_shaped = target
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name.starts_with("discord-ipc-"));
+  ours_shaped && std::fs::symlink_metadata(&resolved).is_err()
+}
+
 /// Symlink the bound `discord-ipc-{index}` socket into every other
 /// candidate dir. Stale ours-shaped symlinks (`discord-ipc-*`) are
-/// replaced; anything else (live sockets, foreign files) is left alone;
-/// missing/unwritable dirs are skipped.
+/// replaced; anything else (live sockets, foreign files, live foreign
+/// links) is left alone; missing/unwritable dirs are skipped.
 pub fn fanout_socket_link(dirs: &[PathBuf], bound_path: &str, file_name: &str) {
   let bound = Path::new(bound_path);
   for dir in dirs {
@@ -63,18 +92,8 @@ pub fn fanout_socket_link(dirs: &[PathBuf], bound_path: &str, file_name: &str) {
         if !meta.file_type().is_symlink() {
           continue; // foreign file/socket: never touch.
         }
-        // Ours by shape (or stale): repoint at the live socket.
-        let ours = std::fs::read_link(&link)
-          .ok()
-          .and_then(|target| {
-            target
-              .file_name()
-              .and_then(|name| name.to_str())
-              .map(|name| name.starts_with("discord-ipc-"))
-          })
-          .unwrap_or(false);
-        if !ours {
-          continue;
+        if !link_reclaimable(&link, bound) {
+          continue; // live foreign link: never steal.
         }
         let _ = std::fs::remove_file(&link);
         if let Err(err) = std::os::unix::fs::symlink(bound, &link) {
@@ -86,7 +105,8 @@ pub fn fanout_socket_link(dirs: &[PathBuf], bound_path: &str, file_name: &str) {
 }
 
 /// Remove our fan-out symlinks for `bound_path`: keeps `/tmp` et al. clean
-/// across restarts. Best-effort; foreign files are never touched.
+/// across restarts. Best-effort; only links pointing at our socket (or
+/// stale ours-shaped ones) are removed — foreign files are never touched.
 pub fn remove_socket_links(dirs: &[PathBuf], bound_path: &str) {
   let bound = Path::new(bound_path);
   let file_name = match bound.file_name().and_then(|n| n.to_str()) {
@@ -98,13 +118,7 @@ pub fn remove_socket_links(dirs: &[PathBuf], bound_path: &str) {
     if link == bound {
       continue;
     }
-    let ours = std::fs::read_link(&link).ok().and_then(|target| {
-      target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.starts_with("discord-ipc-"))
-    });
-    if ours.unwrap_or(false) {
+    if link_reclaimable(&link, bound) {
       let _ = std::fs::remove_file(&link);
     }
   }
@@ -118,4 +132,62 @@ pub fn socket_file_name(bound_path: &str) -> String {
     .and_then(|name| name.to_str())
     .unwrap_or("discord-ipc-0")
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rsrpc-paths-test-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+  }
+
+  #[test]
+  fn fanout_never_steals_live_foreign_link() {
+    let ours = scratch("ours");
+    let foreign = scratch("foreign");
+    // A live foreign service owns discord-ipc-0 here (real socket file
+    // behind a symlink): fan-out must leave it alone, never repoint it
+    // at our socket.
+    let foreign_socket = foreign.join("discord-ipc-9");
+    std::fs::write(&foreign_socket, b"socket").expect("foreign socket");
+    let foreign_link = foreign.join("discord-ipc-0");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&foreign_socket, &foreign_link).expect("foreign link");
+
+    let bound = ours.join("discord-ipc-0");
+    std::fs::write(&bound, b"socket").expect("bound socket");
+    fanout_socket_link(&[ours.clone(), foreign.clone()], "unused", "discord-ipc-0");
+
+    assert_eq!(
+      std::fs::read_link(&foreign_link).expect("link still there"),
+      foreign_socket,
+      "live foreign link must not be repointed"
+    );
+    let _ = std::fs::remove_dir_all(&ours);
+    let _ = std::fs::remove_dir_all(&foreign);
+  }
+
+  #[test]
+  fn fanout_reclaims_stale_dangling_link() {
+    let dir = scratch("stale");
+    // Our previous run crashed and left a dangling ours-shaped link:
+    // reclaim it for the live socket.
+    let link = dir.join("discord-ipc-0");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("discord-ipc-7"), &link).expect("stale link");
+    let bound = dir.join("discord-ipc-1");
+    std::fs::write(&bound, b"socket").expect("bound socket");
+
+    fanout_socket_link(
+      std::slice::from_ref(&dir),
+      bound.to_str().expect("utf8"),
+      "discord-ipc-0",
+    );
+    assert_eq!(std::fs::read_link(&link).expect("link still there"), bound);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 }

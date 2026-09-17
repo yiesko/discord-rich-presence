@@ -186,7 +186,7 @@ pub fn send_empty(sink: &EventSink, pid: u64) {
     }),
     ..ActivityCmd::empty()
   };
-  sink.emit(activity);
+  sink.emit_clear(activity);
 }
 
 /// Pump one connection until close, error, or peer loss.
