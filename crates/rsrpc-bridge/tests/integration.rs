@@ -256,6 +256,23 @@ async fn null_scan_clears_live_generic_exactly_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn format_override_consumer_stays_on_resolved_protocol() {
+  let fx = fixture().await;
+  // Consumer overrides the JSON port to MessagePack: READY already
+  // arrives encoded...
+  let mut mp = connect(fx.json_port, "?format=msgpack").await;
+  let _ = read_msgpack(&mut mp).await;
+
+  fx.ipc_tx.send(set_activity(42, "Encoded")).await.unwrap();
+  // ...and every later broadcast must use the resolved encoding, not
+  // the port default: one decoder must suffice for the whole stream.
+  let got = read_msgpack(&mut mp).await;
+  assert_eq!(got["activity"]["name"], "Encoded");
+
+  fx.bridge.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_removes_state_file() {
   let dir = std::env::temp_dir().join(format!("rsrpc-bridge-state-{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&dir);

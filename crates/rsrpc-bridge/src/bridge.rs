@@ -46,7 +46,7 @@ pub(crate) type ReplayCache = HashMap<SocketId, (Arc<CachedActivity>, u64)>;
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Which wire encoding a bridge consumer speaks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum BridgeProtocol {
   /// JSON text frames (port 1337, the arRPC-compatible bridge).
   Json,
@@ -84,6 +84,9 @@ pub struct BridgeInputs {
 struct Shared {
   json_clients: Mutex<FxHashMap<ClientId, Responder>>,
   msgpack_clients: Mutex<FxHashMap<ClientId, Responder>>,
+  /// Resolved encoding per consumer (the `format=` override wins over the
+  /// port default): every later lookup keys off this, never the default.
+  consumer_protocol: Mutex<FxHashMap<ClientId, BridgeProtocol>>,
   cache: Mutex<ReplayCache>,
   activity_seq: Mutex<u64>,
   last_process: Mutex<HashMap<AppId, u64>>,
@@ -172,6 +175,7 @@ impl Bridge {
     let shared = Arc::new(Shared {
       json_clients: Mutex::new(FxHashMap::default()),
       msgpack_clients: Mutex::new(FxHashMap::default()),
+      consumer_protocol: Mutex::new(FxHashMap::default()),
       cache: Mutex::new(HashMap::new()),
       activity_seq: Mutex::new(0),
       last_process: Mutex::new(HashMap::new()),
@@ -371,18 +375,42 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
           send_cached(&responder, payload, protocol);
         }
         shared
-          .clients_for(default_protocol)
+          .consumer_protocol
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .insert(id, protocol);
+        shared
+          .clients_for(protocol)
           .lock()
           .unwrap_or_else(|e| e.into_inner())
           .insert(id, responder);
       }
       Event::Disconnect(id, _) => {
         tracing::info!("[bridge] Consumer {id} disconnected");
-        shared
-          .clients_for(default_protocol)
+        let known = shared
+          .consumer_protocol
           .lock()
           .unwrap_or_else(|e| e.into_inner())
           .remove(&id);
+        match known {
+          Some(protocol) => {
+            shared
+              .clients_for(protocol)
+              .lock()
+              .unwrap_or_else(|e| e.into_inner())
+              .remove(&id);
+          }
+          // Untracked (cannot happen): sweep both maps so no slot leaks.
+          None => {
+            for protocol in [BridgeProtocol::Json, BridgeProtocol::MsgPack] {
+              shared
+                .clients_for(protocol)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+            }
+          }
+        }
       }
       Event::Message(id, message) => {
         // Bridge control messages (JSON text) are answered, everything
@@ -393,31 +421,37 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
         match message {
           Message::Text(text) => match handle_bridge_control(&shared.user, text.as_str()) {
             Some((ack, changed)) => {
-              let clients = shared.clients_for(default_protocol);
-              let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
-              if let Some(responder) = clients.get(&id) {
-                let _ = responder.try_send(Message::Text(ack.into()));
+              let protocol = shared.protocol_for(id, default_protocol);
+              if let Some(responder) = shared
+                .clients_for(protocol)
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+              {
+                send_message(responder, &ack, protocol);
               }
               if let Some(user) = changed {
                 let dispatch = commands::current_user_update(&user);
-                let dead: Vec<ClientId> = clients
-                  .iter()
-                  .filter_map(|(id, responder)| {
-                    responder
-                      .try_send(Message::Text(dispatch.clone().into()))
-                      .err()
-                      .map(|_| *id)
-                  })
-                  .collect();
-                for id in dead {
-                  tracing::warn!("[bridge] Pruning dead consumer {id}");
-                  clients.remove(&id);
+                for protocol in [BridgeProtocol::Json, BridgeProtocol::MsgPack] {
+                  let clients = shared.clients_for(protocol);
+                  let mut clients = clients.lock().unwrap_or_else(|e| e.into_inner());
+                  let dead: Vec<ClientId> = clients
+                    .iter()
+                    .filter_map(|(id, responder)| {
+                      (!send_message(responder, &dispatch, protocol)).then_some(*id)
+                    })
+                    .collect();
+                  for id in dead {
+                    tracing::warn!("[bridge] Pruning dead consumer {id}");
+                    clients.remove(&id);
+                  }
                 }
               }
             }
             None => {
+              let protocol = shared.protocol_for(id, default_protocol);
               if let Some(responder) = shared
-                .clients_for(default_protocol)
+                .clients_for(protocol)
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&id)
@@ -427,8 +461,9 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
             }
           },
           other => {
+            let protocol = shared.protocol_for(id, default_protocol);
             if let Some(responder) = shared
-              .clients_for(default_protocol)
+              .clients_for(protocol)
               .lock()
               .unwrap_or_else(|e| e.into_inner())
               .get(&id)
@@ -629,6 +664,19 @@ impl Shared {
       BridgeProtocol::Json => &self.json_clients,
       BridgeProtocol::MsgPack => &self.msgpack_clients,
     }
+  }
+
+  /// Encoding a consumer speaks: the resolved `format=` override recorded
+  /// at connect, falling back to the port default for unknown ids (which
+  /// cannot happen: every insert is paired with a table entry).
+  fn protocol_for(&self, id: ClientId, default: BridgeProtocol) -> BridgeProtocol {
+    self
+      .consumer_protocol
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .get(&id)
+      .copied()
+      .unwrap_or(default)
   }
 
   /// Handle one `SET_ACTIVITY` command: flood-guard, handoff, change
@@ -1112,17 +1160,21 @@ fn take_process_clear(shared: &Shared) -> Vec<(u64, AppId)> {
 }
 
 /// Send a JSON string, encoding it to MessagePack when the consumer speaks
-/// MessagePack.
-fn send_message(responder: &Responder, data: &str, protocol: BridgeProtocol) {
+/// MessagePack. Returns whether the frame was queued.
+fn send_message(responder: &Responder, data: &str, protocol: BridgeProtocol) -> bool {
   match protocol {
-    BridgeProtocol::Json => {
-      let _ = responder.try_send(Message::Text(data.to_string().into()));
-    }
+    BridgeProtocol::Json => responder
+      .try_send(Message::Text(data.to_string().into()))
+      .is_ok(),
     BridgeProtocol::MsgPack => {
       if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
         && let Ok(bytes) = rmp_serde::to_vec_named(&value)
       {
-        let _ = responder.try_send(Message::Binary(bytes::Bytes::from(bytes)));
+        responder
+          .try_send(Message::Binary(bytes::Bytes::from(bytes)))
+          .is_ok()
+      } else {
+        false
       }
     }
   }
