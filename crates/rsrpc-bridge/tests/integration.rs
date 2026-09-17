@@ -219,6 +219,43 @@ async fn process_scan_publishes_generic_and_null_clears() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn null_scan_clears_live_generic_exactly_once() {
+  let fx = fixture().await;
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+
+  // Generic scanner cards are cached under the numeric application id
+  // with the real (live: our own test pid) pid in the JSON body.
+  let live = u64::from(std::process::id());
+  fx.proc_tx
+    .send(ProcInput::Detected(ScannedGame {
+      id: "123456789".into(),
+      name: "LiveGeneric".to_string(),
+      pid: live,
+      start: 1_700_000_000,
+    }))
+    .await
+    .unwrap();
+  let got = read_json(&mut json).await;
+  assert_eq!(got["activity"]["name"], "LiveGeneric");
+
+  fx.proc_tx.send(ProcInput::Cleared).await.unwrap();
+  // The empty table legitimately clears the slot once...
+  let cleared = read_json(&mut json).await;
+  assert!(cleared["activity"].is_null());
+  // ...and the ghost sweep must not mistake the numeric app id for a
+  // dead pid and clear a second time.
+  assert!(
+    tokio::time::timeout(Duration::from_millis(300), json.next())
+      .await
+      .is_err(),
+    "null sweep must not re-clear after the table clear"
+  );
+
+  fx.bridge.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_removes_state_file() {
   let dir = std::env::temp_dir().join(format!("rsrpc-bridge-state-{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&dir);

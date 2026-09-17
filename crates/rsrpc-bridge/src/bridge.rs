@@ -950,23 +950,27 @@ fn is_genuine_clear(cmd: &ActivityCmd) -> bool {
 }
 
 /// Resolve the owning pid of a replay-cache entry for ghost reaping:
-/// numeric socket ids are pids verbatim, otherwise the pid rides in the
-/// JSON body. Returns `None` when neither yields a usable pid — pid 0
-/// included: unidentifiable publishers can never be proven dead, and
-/// clearing them risks darkening a live-but-broken client (same
-/// convention as the private `is_genuine_clear`).
+/// the pid rides in the JSON body, falling back to numeric socket ids
+/// (SDK connections use the pid verbatim). The body is authoritative
+/// because generic scanner cards are cached under the numeric
+/// application id: resolving the socket id first would mistake the app
+/// id for a dead pid and evict live generic cards on every null sweep.
+/// Returns `None` when neither yields a usable pid — pid 0 included:
+/// unidentifiable publishers can never be proven dead, and clearing
+/// them risks darkening a live-but-broken client (same convention as
+/// the private `is_genuine_clear`).
 pub fn cache_entry_pid(socket_id: &SocketId, payload: &CachedActivity) -> Option<u64> {
+  let body_pid = serde_json::from_str::<serde_json::Value>(&payload.json)
+    .ok()
+    .and_then(|body| body.get("pid").and_then(serde_json::Value::as_u64))
+    .filter(|pid| *pid != 0);
+  if let Some(pid) = body_pid {
+    return Some(pid);
+  }
   if let Ok(pid) = socket_id.as_ref().parse::<u64>() {
     return (pid != 0).then_some(pid);
   }
-  match serde_json::from_str::<serde_json::Value>(&payload.json)
-    .ok()?
-    .get("pid")
-    .and_then(serde_json::Value::as_u64)
-  {
-    Some(0) | None => None,
-    Some(pid) => Some(pid),
-  }
+  None
 }
 
 /// Handle a bridge control message (`SET_USER`/`RESET_USER`, arRPC parity).
