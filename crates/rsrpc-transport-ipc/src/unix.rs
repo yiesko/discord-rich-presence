@@ -7,7 +7,10 @@
 
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+  Arc, Mutex,
+  atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use rsrpc_protocol::error::{Result, RsrpcError};
@@ -105,6 +108,10 @@ pub struct IpcTransport {
   token: CancellationToken,
   accept_task: Option<JoinHandle<()>>,
   conns: Arc<tokio::sync::Mutex<JoinSet<()>>>,
+  /// Live connection sockets (one clone per pump): shutdown closes them
+  /// so pumps parked in blocking reads exit instead of outliving the
+  /// drain deadline (`abort_all` cannot interrupt a running closure).
+  live: Arc<Mutex<Vec<(u64, std::os::unix::net::UnixStream)>>>,
   bound_path: String,
   dirs: Vec<PathBuf>,
   sink: EventSink,
@@ -166,10 +173,14 @@ impl IpcTransport {
     let (sink, rx) = EventSink::bounded(DEFAULT_IPC_QUEUE);
     let token = CancellationToken::new();
     let conns = Arc::new(tokio::sync::Mutex::new(JoinSet::new()));
+    let live = Arc::new(Mutex::new(Vec::new()));
+    let next_conn_id = Arc::new(AtomicU64::new(1));
     let accept_task = tokio::spawn(accept_loop(AcceptCtx {
       listener,
       token: token.clone(),
       conns: Arc::clone(&conns),
+      live: Arc::clone(&live),
+      next_conn_id: Arc::clone(&next_conn_id),
       user,
       sink: sink.clone(),
     }));
@@ -179,6 +190,7 @@ impl IpcTransport {
         token,
         accept_task: Some(accept_task),
         conns,
+        live,
         bound_path,
         dirs,
         sink,
@@ -199,12 +211,24 @@ impl IpcTransport {
     self.sink.dropped_total()
   }
 
-  /// Graceful shutdown: stop accepting, drain connections with a deadline,
-  /// then remove the socket file and fan-out links (via [`Drop`]).
+  /// Graceful shutdown: stop accepting, unblock connection pumps,
+  /// drain connections with a deadline, then remove the socket file and
+  /// fan-out links (via [`Drop`]).
   pub async fn shutdown(mut self) {
     self.token.cancel();
     if let Some(task) = self.accept_task.take() {
       let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    }
+    // Close every live socket first: pumps parked in blocking reads exit
+    // at once instead of holding their tasks past the drain deadline
+    // (`abort_all` cannot interrupt a running closure).
+    for (_, stream) in self
+      .live
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .drain(..)
+    {
+      let _ = stream.shutdown(std::net::Shutdown::Both);
     }
     let mut owned = {
       let mut guard = self.conns.lock().await;
@@ -290,6 +314,8 @@ struct AcceptCtx {
   listener: UnixListener,
   token: CancellationToken,
   conns: Arc<tokio::sync::Mutex<JoinSet<()>>>,
+  live: Arc<Mutex<Vec<(u64, std::os::unix::net::UnixStream)>>>,
+  next_conn_id: Arc<AtomicU64>,
   user: Arc<Mutex<RpcUser>>,
   sink: EventSink,
 }
@@ -299,6 +325,8 @@ async fn accept_loop(
     listener,
     token,
     conns,
+    live,
+    next_conn_id,
     user,
     sink,
   }: AcceptCtx,
@@ -329,6 +357,17 @@ async fn accept_loop(
         };
         tracing::debug!("[ipc] Incoming stream...");
         let facil = ConnFacilitator::fresh(user.clone(), sink.clone());
+        // Track one clone per pump so shutdown can close it (unblocking
+        // the pump's read); the pump unregisters itself on exit, bounding
+        // the list during normal operation.
+        let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
+        if let Ok(probe) = std_stream.try_clone() {
+          live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((conn_id, probe));
+        }
+        let live_exit = Arc::clone(&live);
         // Short critical section: spawn_blocking is synchronous. Exited
         // tasks are reaped here so connection churn cannot pin JoinSet
         // entries for the transport lifetime.
@@ -338,6 +377,10 @@ async fn accept_loop(
           let mut facil = facil;
           let mut stream = std_stream;
           handle_stream(&mut facil, &mut stream);
+          live_exit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(id, _)| *id != conn_id);
         });
       }
     }

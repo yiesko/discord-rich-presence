@@ -150,3 +150,26 @@ async fn full_client_flow_over_real_socket() {
 
   transport.shutdown().await;
 }
+
+/// A connected-but-silent peer parks its pump in a blocking read: shutdown
+/// must still return promptly (closing the socket unblocks the read)
+/// instead of stalling out the full drain deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_with_silent_peer_returns_promptly() {
+  let scratch = Scratch::new("silent-shutdown");
+  let dir = scratch.sub("a");
+
+  let (transport, _rx) = IpcTransport::bind_with_dirs(user(), vec![dir])
+    .await
+    .unwrap();
+  // Connect and say nothing: the pump blocks reading the first header.
+  let _silent = UnixStream::connect(transport.socket_path()).expect("connect");
+  tokio::time::sleep(Duration::from_millis(200)).await;
+
+  let started = std::time::Instant::now();
+  transport.shutdown().await;
+  assert!(
+    started.elapsed() < Duration::from_secs(4),
+    "shutdown must not stall out the 5s drain deadline"
+  );
+}
