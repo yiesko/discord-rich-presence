@@ -36,6 +36,30 @@ fn queue_gauge_ignores_failed_send() {
 }
 
 #[test]
+fn queue_gauge_settles_at_zero_after_concurrent_use() {
+  // Hammering senders racing a drainer must never wrap the depth: at
+  // quiescence (all senders joined, all values received) it reads zero.
+  const SENDERS: usize = 4;
+  const PER_SENDER: u64 = 500;
+  let (tx, rx) = QueueGauge::pair::<u64>();
+  let gauge = tx.gauge();
+  std::thread::scope(|scope| {
+    for _ in 0..SENDERS {
+      let tx = tx.clone();
+      scope.spawn(move || {
+        for value in 0..PER_SENDER {
+          tx.send(value).expect("receiver lives for the whole test");
+        }
+      });
+    }
+    for _ in 0..(SENDERS as u64 * PER_SENDER) {
+      rx.recv().expect("senders outlive the drain");
+    }
+  });
+  assert_eq!(gauge.depth(), 0);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn rss_bytes_reports_live_process() {
   let rss = rss_bytes().expect("rss readable on linux");

@@ -85,17 +85,22 @@ impl<T> std::fmt::Debug for GaugeSender<T> {
 impl<T> GaugeSender<T> {
   /// Send, counting the backlog on success.
   ///
+  /// The gauge increments before the send so a concurrent receiver can
+  /// never observe the value while the counter still reads zero (which
+  /// would wrap the depth to `usize::MAX` on decrement). A failed send
+  /// rolls the increment back: no phantom backlog may stick.
+  ///
   /// # Errors
   ///
-  /// Returns the value back when the receiver is gone (shutdown): no
-  /// phantom backlog may stick.
+  /// Returns the value back when the receiver is gone (shutdown).
   pub fn send(&self, value: T) -> Result<(), mpsc::SendError<T>> {
+    self.gauge.inc();
     match self.inner.send(value) {
-      Ok(()) => {
-        self.gauge.inc();
-        Ok(())
+      Ok(()) => Ok(()),
+      Err(err) => {
+        self.gauge.dec();
+        Err(err)
       }
-      Err(err) => Err(err),
     }
   }
 

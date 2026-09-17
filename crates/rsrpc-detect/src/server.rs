@@ -778,6 +778,7 @@ impl ProcessServer {
         // publishes per app id and dedups repeats, so co-running games
         // each own their card instead of only the first.
         if emit && !detected.is_empty() {
+          let mut send_failed = false;
           for game in &detected {
             if clone
               .event_sender
@@ -787,9 +788,13 @@ impl ProcessServer {
               .is_err()
             {
               tracing::warn!("[Process Scanner] Event receiver gone, retrying scan");
-              wait_scan(wait_time);
-              continue;
+              send_failed = true;
+              break;
             }
+          }
+          if send_failed {
+            wait_scan(wait_time);
+            continue;
           }
         }
 

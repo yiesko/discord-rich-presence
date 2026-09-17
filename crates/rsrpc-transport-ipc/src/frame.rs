@@ -253,6 +253,9 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
       .read_to_string(&mut message)
     {
       tracing::debug!("[ipc] Error reading data: {err}");
+      for pid in clear_pids(ipc, current_pid) {
+        send_empty(ipc.sink(), pid);
+      }
       break;
     }
 

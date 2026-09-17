@@ -151,6 +151,34 @@ pub fn parse_event(buf: &[u8]) -> Option<ProcEvent> {
   found
 }
 
+/// Walk one datagram, recording per-CPU sequence continuity and
+/// forwarding EVERY parsed lifecycle event through `emit` in order (a
+/// datagram routinely carries several). Stops early when `emit` reports
+/// the receiver is gone. Returns the number of events forwarded.
+pub fn forward_proc_events(
+  buf: &[u8],
+  seqs: &mut SeqTracker,
+  emit: &mut impl FnMut(ProcEvent) -> bool,
+) -> usize {
+  let mut forwarded = 0;
+  walk_proc_messages(buf, &mut |cpu, seq, event| {
+    let missed = seqs.note(cpu, seq);
+    if missed > 0 {
+      tracing::debug!(
+        "[Process Scanner] cn_proc sequence gap on cpu {cpu}: missed {missed} event(s)"
+      );
+    }
+    if let Some(event) = event {
+      forwarded += 1;
+      if !emit(event) {
+        return false;
+      }
+    }
+    true
+  });
+  forwarded
+}
+
 /// Parse the `cn_msg` + `proc_event` body of one data message.
 fn parse_proc_event(body: &[u8]) -> Option<ProcEvent> {
   if body.len() < SIZE_CN_MSG + 20 {
@@ -543,23 +571,18 @@ pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
     }
     // One shared walk feeds both continuity tracking and forwarding:
     // every message advances the per-cpu sequence (even unforwarded
-    // types), while forwarding keeps first-event-wins. Walking the whole
-    // (usually single-message) datagram costs nothing measurable.
+    // types) while every parsed event is forwarded at once. Walking the
+    // whole (usually single-message) datagram costs nothing measurable.
     let bytes = &buf[..received as usize];
-    let mut found = None;
-    walk_proc_messages(bytes, &mut |cpu, seq, event| {
-      let missed = seqs.note(cpu, seq);
-      if missed > 0 {
-        tracing::debug!(
-          "[Process Scanner] cn_proc sequence gap on cpu {cpu}: missed {missed} event(s)"
-        );
+    let mut gone = false;
+    forward_proc_events(bytes, &mut seqs, &mut |event| {
+      if events.send(event).is_err() {
+        gone = true;
+        return false;
       }
-      found = found.or(event);
       true
     });
-    if let Some(event) = found
-      && events.send(event).is_err()
-    {
+    if gone {
       // Receiver gone (daemon shutting down): quiet exit.
       unsafe {
         libc::close(fd);

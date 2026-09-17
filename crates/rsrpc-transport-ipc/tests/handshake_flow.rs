@@ -139,6 +139,66 @@ fn handshake_set_activity_close_flow() {
   server.join().expect("server thread");
 }
 
+#[test]
+fn invalid_utf8_body_clears_published_pid() {
+  let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
+  client
+    .set_read_timeout(Some(Duration::from_secs(5)))
+    .expect("timeout");
+  let (sink, mut rx) = EventSink::bounded(16);
+
+  let mut facil = TestFacilitator {
+    handshake: false,
+    client_id: String::new(),
+    pid: 0,
+    nonce: String::new(),
+    sink,
+    published_pids: Vec::new(),
+  };
+  let mut server_stream = server_stream;
+  let server = std::thread::spawn(move || handle_stream(&mut facil, &mut server_stream));
+
+  write_frame(
+    &mut client,
+    PacketType::Handshake,
+    r#"{"v":1,"client_id":"test-app"}"#,
+  );
+  let (_, body) = read_frame(&mut client);
+  assert!(body.contains("READY"), "expected READY, got: {body}");
+
+  // Publish presence first: the connection owns a live card now.
+  write_frame(
+    &mut client,
+    PacketType::Frame,
+    r#"{"cmd":"SET_ACTIVITY","args":{"pid":7,"activity":{"name":"G","type":0}},"nonce":"n1"}"#,
+  );
+  let _ = read_frame(&mut client); // echo
+  let cmd = recv_cmd(&mut rx);
+  assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(7));
+
+  // A frame whose body is not UTF-8 kills the pump: like every other
+  // connection loss, the published pid must be cleared, not ghosted.
+  use std::io::Write as _;
+  let mut header = [0_u8; 8];
+  header[0..4].copy_from_slice(&u32::to_le_bytes(PacketType::Frame as u32));
+  header[4..8].copy_from_slice(&u32::to_le_bytes(16));
+  client.write_all(&header).expect("header");
+  client.write_all(&[0xFF_u8; 16]).expect("garbage body");
+
+  let clear = recv_cmd(&mut rx);
+  assert_eq!(clear.cmd, "SET_ACTIVITY");
+  assert!(
+    clear
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "expected null-activity clear, got: {clear:?}"
+  );
+
+  server.join().expect("server thread");
+}
+
 fn publish_presence(client: &mut UnixStream, rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) {
   write_frame(
     client,

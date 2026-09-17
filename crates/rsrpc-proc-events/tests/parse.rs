@@ -128,3 +128,27 @@ fn walk_observes_every_message_while_parse_takes_first() {
   });
   assert_eq!(seen, vec![(0, 10, true), (1, 20, true)]);
 }
+
+#[test]
+fn forward_proc_events_delivers_every_event_in_one_datagram() {
+  use rsrpc_proc_events::{ProcEvent, SeqTracker, forward_proc_events};
+
+  // Same two-EXEC datagram as above: the watch loop must forward both,
+  // not just the first, or the second EXEC waits out the polling tick.
+  let mut first = proc_buf(0x2, 111);
+  let mut second = proc_buf(0x2, 222);
+  first[24..28].copy_from_slice(&10u32.to_le_bytes());
+  second[24..28].copy_from_slice(&20u32.to_le_bytes());
+  second[40..44].copy_from_slice(&1u32.to_le_bytes());
+  let mut both = first;
+  both.extend_from_slice(&second);
+
+  let mut seqs = SeqTracker::default();
+  let mut got = Vec::new();
+  let forwarded = forward_proc_events(&both, &mut seqs, &mut |event| {
+    got.push(event);
+    true
+  });
+  assert_eq!(forwarded, 2);
+  assert_eq!(got, vec![ProcEvent::Exec(111), ProcEvent::Exec(222)]);
+}
