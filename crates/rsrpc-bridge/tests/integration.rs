@@ -323,6 +323,7 @@ async fn shutdown_removes_state_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(target_os = "linux")]
 async fn null_scan_reaps_dead_pid_cards_from_replay() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;

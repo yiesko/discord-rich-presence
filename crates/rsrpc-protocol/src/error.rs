@@ -40,7 +40,7 @@ pub enum RsrpcError {
 
   /// A scan was requested while another scan is still running
   /// (re-entrant trigger racing the scan thread).
-  #[error("Scanning already in progress")]
+  #[error("scanning already in progress")]
   ScanInProgress,
 
   /// WebSocket server bind failed on every candidate port without a

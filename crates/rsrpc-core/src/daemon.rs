@@ -161,7 +161,13 @@ impl Daemon {
   /// transports and the bridge on the caller's Tokio runtime, torn down
   /// in reverse order afterwards.
   ///
-  /// Must be called within a Tokio runtime.
+  /// Must be called within a Tokio runtime. The scanner threads (scan
+  /// loop, hourly refresh, proc-events watcher) live for the process
+  /// lifetime by design: teardown stops the bridge and both transports,
+  /// and the scan/refresh loops exit once their channels close, but the
+  /// underlying threads are not joined — for the CLI this ends at
+  /// process exit, and library callers should treat one `run_until` per
+  /// process as the supported shape.
   ///
   /// # Errors
   ///

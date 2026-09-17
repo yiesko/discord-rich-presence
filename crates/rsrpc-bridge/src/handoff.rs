@@ -51,8 +51,36 @@ pub fn is_process_alive(pid: u64) -> bool {
     return false;
   }
   if cfg!(target_os = "linux") {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-  } else {
+    return std::path::Path::new(&format!("/proc/{pid}")).exists();
+  }
+  #[cfg(all(unix, not(target_os = "linux")))]
+  {
+    // SAFETY: signal 0 performs no action; only error reporting. A zero
+    // return (or EPERM: exists but unowned) means alive; ESRCH means dead.
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+      || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    return alive;
+  }
+  #[cfg(windows)]
+  {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // Pids beyond u32 cannot exist: narrowing is safe by construction.
+    let Ok(pid_u32) = u32::try_from(pid) else {
+      return false;
+    };
+    // SAFETY: a query-only handle has no side effects on the target and
+    // is always closed before returning; null means no such process.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid_u32) };
+    if handle.is_null() {
+      return false;
+    }
+    unsafe { CloseHandle(handle) };
+    return true;
+  }
+  {
+    // Platforms without a probe: assume alive (ghost reaping stays off
+    // rather than risking live cards).
     true
   }
 }
@@ -165,6 +193,15 @@ pub fn track_process_publication(map: &mut HashMap<AppId, u64>, app_id: AppId, p
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn liveness_spots_own_pid_and_rejects_absurd_ones() {
+    // Contract on every platform: our own pid is alive, pid 0 never is,
+    // and u32::MAX is not a real pid anywhere.
+    assert!(is_process_alive(u64::from(std::process::id())));
+    assert!(!is_process_alive(0));
+    assert!(!is_process_alive(u64::from(u32::MAX)));
+  }
 
   fn game(id: &str) -> ScannedGame {
     ScannedGame {

@@ -9,7 +9,7 @@ use rsrpc_protocol::error::RsrpcError;
 fn scan_in_progress_keeps_historical_text() {
   assert_eq!(
     RsrpcError::ScanInProgress.to_string(),
-    "Scanning already in progress"
+    "scanning already in progress"
   );
 }
 
