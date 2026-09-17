@@ -303,6 +303,14 @@ pub struct Exclusions {
   pub patterns: regex::RegexSet,
 }
 
+impl Exclusions {
+  /// Whether the set carries anything at all.
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.executables.is_empty() && self.patterns.is_empty()
+  }
+}
+
 /// Caps for network-supplied exclusions (see [`Exclusions`]).
 const MAX_EXCLUSION_NAMES: usize = 1024;
 const MAX_EXCLUSION_PATTERNS: usize = 128;

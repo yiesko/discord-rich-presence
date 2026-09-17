@@ -159,6 +159,13 @@ fn finish_fetch(
   })
 }
 
+/// Whether a fetched exclusions set may replace the active one: an empty
+/// fetch over a non-empty active set means a broken upstream (error page
+/// served with HTTP 200 parses to nothing), never a legitimate wipe.
+fn may_replace_exclusions(current: &Exclusions, fetched: &Exclusions) -> bool {
+  !fetched.is_empty() || current.is_empty()
+}
+
 impl ProcessServer {
   /// Refresh the exclusions list once, best-effort: failures keep the
   /// previous set (empty at first boot = current behavior).
@@ -168,6 +175,14 @@ impl ProcessServer {
     };
     match fetch_exclusions(&url) {
       Ok(exclusions) => {
+        let current = self.exclusions.read().unwrap_or_else(|e| e.into_inner());
+        if !may_replace_exclusions(&current, &exclusions) {
+          tracing::warn!(
+            "[Process Scanner] Exclusions fetch came back empty, keeping previous set"
+          );
+          return;
+        }
+        drop(current);
         tracing::info!(
           "[Process Scanner] Exclusions updated: {} names, {} patterns",
           exclusions.executables.len(),
@@ -179,5 +194,45 @@ impl ProcessServer {
         tracing::warn!("[Process Scanner] Error updating exclusions, retrying in 1h: {err}");
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashSet;
+
+  use super::*;
+
+  fn full_exclusions() -> Exclusions {
+    Exclusions {
+      executables: HashSet::from(["setup.exe".to_string()]),
+      patterns: regex::RegexSet::empty(),
+    }
+  }
+
+  fn empty_exclusions() -> Exclusions {
+    Exclusions {
+      executables: HashSet::new(),
+      patterns: regex::RegexSet::empty(),
+    }
+  }
+
+  #[test]
+  fn empty_fetch_never_wipes_active_set() {
+    // A malformed upstream (error page served with HTTP 200) parses to
+    // an empty set: keep serving the previous one instead of unblocking
+    // installers and crash reporters for an hour.
+    assert!(!may_replace_exclusions(
+      &full_exclusions(),
+      &empty_exclusions()
+    ));
+    assert!(may_replace_exclusions(
+      &full_exclusions(),
+      &full_exclusions()
+    ));
+    assert!(may_replace_exclusions(
+      &empty_exclusions(),
+      &empty_exclusions()
+    ));
   }
 }

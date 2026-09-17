@@ -201,4 +201,7 @@ fn mount_escapes_decode_octal() {
   // Truncated/invalid escapes pass through untouched.
   assert_eq!(unescape_mount("/mnt/tail\\"), "/mnt/tail\\");
   assert_eq!(unescape_mount("/mnt/x\\4y"), "/mnt/x\\4y");
+  // Multi-byte UTF-8 arrives as consecutive octal escapes: decode the
+  // bytes first, then the string (é, not Ã©).
+  assert_eq!(unescape_mount("/mnt/caf\\303\\251"), "/mnt/café");
 }

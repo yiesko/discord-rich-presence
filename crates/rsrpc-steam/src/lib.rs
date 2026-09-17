@@ -853,11 +853,15 @@ fn path_steam_roots() -> Vec<PathBuf> {
 /// would corrupt an encoded backslash followed by digits (`\134040` is
 /// a literal `\040`, not a space).
 pub fn unescape_mount(field: &str) -> String {
-  let mut out = String::with_capacity(field.len());
+  // Decode into bytes first, then UTF-8 once: multi-byte characters
+  // arrive as consecutive octal escapes (é = \303\251), and decoding
+  // each byte as a char would mangle them (Ã©).
+  let mut out: Vec<u8> = Vec::with_capacity(field.len());
   let mut chars = field.chars().peekable();
   while let Some(char) = chars.next() {
     if char != '\\' {
-      out.push(char);
+      let mut encoded = [0u8; 4];
+      out.extend_from_slice(char.encode_utf8(&mut encoded).as_bytes());
       continue;
     }
     // Collect up to 3 octal digits without consuming the terminator.
@@ -875,15 +879,15 @@ pub fn unescape_mount(field: &str) -> String {
     if code.len() == 3
       && let Ok(byte) = u8::from_str_radix(&code, 8)
     {
-      out.push(byte as char);
+      out.push(byte);
       continue;
     }
     // Not an escape (short run, non-octal, or >0xFF): emit literally;
     // the peeked terminator is still queued for normal handling.
-    out.push('\\');
-    out.push_str(&code);
+    out.push(b'\\');
+    out.extend_from_slice(code.as_bytes());
   }
-  out
+  String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Partition-aware probing (Linux): every locally-mounted filesystem is
