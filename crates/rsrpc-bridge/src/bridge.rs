@@ -679,6 +679,106 @@ impl Shared {
       .unwrap_or(default)
   }
 
+  /// Flood guard: byte-identical republishes inside the window are
+  /// dropped — before any broadcast, cache write or log line.
+  fn flood_dropped(&self, cmd: &ActivityCmd) -> bool {
+    let args = cmd.args.as_ref();
+    let pid = args.and_then(|args| args.pid).unwrap_or_default();
+    let fingerprint = args
+      .and_then(|args| args.activity.as_ref())
+      .and_then(|activity| serde_json::to_vec(activity).ok());
+    self
+      .recent
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .should_drop(
+        cmd.application_id.as_deref().unwrap_or(""),
+        pid,
+        fingerprint.as_deref(),
+        std::time::Instant::now(),
+      )
+  }
+
+  /// IPC-wins handoff: a live SDK presence takes over this app slot
+  /// from generic detection (last publisher wins across companions).
+  fn note_sdk_publish(&self, cmd: &ActivityCmd) {
+    let args = cmd.args.as_ref();
+    let pid = args.and_then(|args| args.pid).unwrap_or_default();
+    if let Some(app) = args
+      .and_then(|args| args.activity.as_ref())
+      .and_then(|activity| activity.application_id.clone())
+    {
+      self
+        .handoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .note_publish(&app, pid);
+    }
+  }
+
+  /// Compare against the cached activity for this pid, so first
+  /// publishes, real changes and effective clears still log once.
+  fn activity_changed(&self, cmd: &ActivityCmd) -> bool {
+    let args = cmd.args.as_ref();
+    let pid = args.and_then(|args| args.pid).unwrap_or_default();
+    let activity = args.and_then(|args| args.activity.as_ref());
+    let cached = self
+      .cache
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .get(&SocketId::from(pid.to_string()))
+      .and_then(|(cached, _)| serde_json::from_str::<serde_json::Value>(&cached.json).ok())
+      .and_then(|body| body.get("activity").cloned());
+    let current = activity
+      .and_then(|activity| serde_json::to_value(activity).ok())
+      .unwrap_or(serde_json::Value::Null);
+    match cached {
+      None => !current.is_null(),
+      Some(old) => old != current,
+    }
+  }
+
+  /// A genuine clear (null activity) from a real connection means the
+  /// SDK source went away: hand the slot back to generic detection so
+  /// the scanner re-asserts the still-running game. pid == 0 means no
+  /// game was ever identified — ignore those, or every fresh
+  /// connection would flap the display.
+  fn resume_after_clear(&self, cmd: &ActivityCmd, changed: bool) {
+    if !is_genuine_clear(cmd) {
+      return;
+    }
+    let pid = cmd
+      .args
+      .as_ref()
+      .and_then(|args| args.pid)
+      .unwrap_or_default();
+    let resume: Vec<ScannedGame> = {
+      let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+      match cmd.application_id.clone() {
+        Some(app) if handoff.note_clear(&app, pid) => {
+          handoff.resume_for(app.as_ref()).into_iter().collect()
+        }
+        Some(_) => Vec::new(),
+        // No app id: abrupt close (socket died without CLEAR).
+        // Release every slot this pid owned, or their generics stay
+        // suppressed by a dead owner forever.
+        None => handoff
+          .note_clear_pid(pid)
+          .into_iter()
+          .filter_map(|app| handoff.resume_for(app.as_ref()))
+          .collect(),
+      }
+    };
+    for game in resume.into_iter().filter(|game| is_process_alive(game.pid)) {
+      self.resume_generic(&game);
+    }
+    if changed {
+      tracing::info!("[bridge] Source cleared, resuming process detection");
+    } else {
+      tracing::debug!("[bridge] Duplicate clear ignored (pid {pid})");
+    }
+  }
+
   /// Handle one `SET_ACTIVITY` command: flood-guard, handoff, change
   /// detection, genuine-clear resume, conditional fan-out.
   async fn handle_set_activity(&self, mut cmd: ActivityCmd) {
@@ -688,58 +788,18 @@ impl Shared {
     };
     let args = cmd.args.as_ref();
     let pid = args.and_then(|args| args.pid).unwrap_or_default();
-    // Flood guard: byte-identical republishes inside the window are
-    // dropped here — before any broadcast, cache write or log line.
-    let fingerprint = args
-      .and_then(|args| args.activity.as_ref())
-      .and_then(|activity| serde_json::to_vec(activity).ok());
     let app_key = cmd.application_id.as_deref().unwrap_or("");
-    if self
-      .recent
-      .lock()
-      .unwrap_or_else(|e| e.into_inner())
-      .should_drop(
-        app_key,
-        pid,
-        fingerprint.as_deref(),
-        std::time::Instant::now(),
-      )
-    {
+    if self.flood_dropped(&cmd) {
       tracing::debug!("[bridge] Dropping duplicate SET_ACTIVITY (app {app_key}, pid {pid})");
       return;
     }
 
     let activity = args.and_then(|args| args.activity.as_ref());
-    // IPC-wins handoff: a live SDK presence takes over this app slot
-    // from generic detection (last publisher wins across companions).
-    if let Some(app) = activity.and_then(|activity| activity.application_id.clone()) {
-      self
-        .handoff
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .note_publish(&app, pid);
-    }
+    self.note_sdk_publish(&cmd);
     // NOTE: no ignore-list filtering here by design. Forwarded client
     // frames are indistinguishable on this path — filtering would kill
     // the companion this bridge exists to carry.
-    // Compare against the cached activity for this pid, so first
-    // publishes, real changes and effective clears still log once.
-    let changed = {
-      let cached = self
-        .cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&SocketId::from(pid.to_string()))
-        .and_then(|(cached, _)| serde_json::from_str::<serde_json::Value>(&cached.json).ok())
-        .and_then(|body| body.get("activity").cloned());
-      let current = activity
-        .and_then(|activity| serde_json::to_value(activity).ok())
-        .unwrap_or(serde_json::Value::Null);
-      match cached {
-        None => !current.is_null(),
-        Some(old) => old != current,
-      }
-    };
+    let changed = self.activity_changed(&cmd);
     match activity {
       Some(activity) => {
         if changed {
@@ -767,37 +827,8 @@ impl Shared {
       }
     }
     // A genuine clear (null activity) from a real connection means the
-    // SDK source went away: hand the slot back to generic detection so
-    // the scanner re-asserts the still-running game. pid == 0 means no
-    // game was ever identified — ignore those, or every fresh
-    // connection would flap the display.
-    if is_genuine_clear(&cmd) {
-      let resume: Vec<ScannedGame> = {
-        let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
-        match cmd.application_id.clone() {
-          Some(app) if handoff.note_clear(&app, pid) => {
-            handoff.resume_for(app.as_ref()).into_iter().collect()
-          }
-          Some(_) => Vec::new(),
-          // No app id: abrupt close (socket died without CLEAR).
-          // Release every slot this pid owned, or their generics stay
-          // suppressed by a dead owner forever.
-          None => handoff
-            .note_clear_pid(pid)
-            .into_iter()
-            .filter_map(|app| handoff.resume_for(app.as_ref()))
-            .collect(),
-        }
-      };
-      for game in resume.into_iter().filter(|game| is_process_alive(game.pid)) {
-        self.resume_generic(&game);
-      }
-      if changed {
-        tracing::info!("[bridge] Source cleared, resuming process detection");
-      } else {
-        tracing::debug!("[bridge] Duplicate clear ignored (pid {pid})");
-      }
-    }
+    // SDK source went away: hand the slot back to generic detection.
+    self.resume_after_clear(&cmd, changed);
     // Identical republishes change nothing observable: the replay cache
     // already holds these exact bytes (late joiners replay them) and the
     // refresh re-asserts them — so skip the fan-out. First publishes,
