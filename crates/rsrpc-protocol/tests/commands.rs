@@ -353,3 +353,17 @@ fn cached_activity_carries_fingerprint_bytes() {
   assert_eq!(cached.activity_json.as_ref(), fp.as_slice());
   assert!(!cached.is_clear);
 }
+
+#[test]
+fn fingerprint_includes_outer_application_id() {
+  // The stamp (outer application_id -> activity.application_id) must
+  // happen before fingerprinting: two commands differing only in the
+  // outer id must not share a fingerprint, or the second publish would
+  // be misclassified as unchanged and keep the old application.
+  let mut a = set_activity_cmd();
+  let mut b = set_activity_cmd();
+  b.application_id = Some("999".to_string());
+  let fa = activity_fingerprint(&mut a).expect("fingerprint");
+  let fb = activity_fingerprint(&mut b).expect("fingerprint");
+  assert_ne!(fa, fb);
+}

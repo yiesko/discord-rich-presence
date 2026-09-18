@@ -96,13 +96,17 @@ pub fn empty_cached(pid: u64, socket_id: SocketId) -> Arc<CachedActivity> {
 }
 
 /// Serialize the command's activity alone: the flood-guard fingerprint.
-/// Runs `fix()` first so the bytes match what [`cached_activity`] stores.
+/// Runs `fix()` and stamps the outer `application_id` first, so the bytes
+/// match what [`cached_activity`] stores — two commands differing only in
+/// the outer id must not share a fingerprint.
 ///
 /// Returns `None` when there is no activity (a clear).
 #[must_use]
 pub fn activity_fingerprint(cmd: &mut ActivityCmd) -> Option<Vec<u8>> {
   cmd.fix();
-  let activity = cmd.args.as_ref()?.activity.as_ref()?;
+  let application_id = cmd.application_id.clone();
+  let activity = cmd.args.as_mut()?.activity.as_mut()?;
+  activity.application_id = application_id;
   serde_json::to_vec(activity).ok()
 }
 
