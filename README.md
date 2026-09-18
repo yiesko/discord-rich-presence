@@ -22,8 +22,6 @@
 * Bundled offline detectable snapshot with optional automatic database refresh (fetch the detectable list every hour, like pog5-rsrpc)
 * `plugin/rsrpc.js` - optional Vencord plugin / userscript / Node client that receives activity from the bridge (not embedded in the Rust binary)
 * Custom overrides via `overrides.json` and/or `overrides.d/*.json` (arrays or single objects; added on the fly, bypass the OS filter so win32 entries work under Proton/Wine)
-* Adding new processes on the fly
-* Manually triggering scans
 * Single-shot diagnostics via `--list-detected` (staged overrides + ignore-list apply, exactly what running would publish) and `--list-database`
 * IPC-wins handoff: generic process detection shows immediately, yields
   to live game-SDK presence, and resumes when it clears (see below)
@@ -321,7 +319,8 @@ Notes:
 
 Unit tests live beside each crate (`crates/*/src/`, `crates/*/tests/`),
 integration tests in `crates/*/tests/`, benchmarks in
-`crates/rsrpc-protocol/benches/`.
+`crates/rsrpc-detect/benches/` (hash maps) and
+`crates/rsrpc-protocol/benches/` (JSON vs MessagePack).
 
 ## Credits
 
