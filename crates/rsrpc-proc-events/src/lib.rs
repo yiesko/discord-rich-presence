@@ -169,10 +169,10 @@ pub fn forward_proc_events(
       );
     }
     if let Some(event) = event {
-      forwarded += 1;
       if !emit(event) {
         return false;
       }
+      forwarded += 1;
     }
     true
   });

@@ -152,3 +152,22 @@ fn forward_proc_events_delivers_every_event_in_one_datagram() {
   assert_eq!(forwarded, 2);
   assert_eq!(got, vec![ProcEvent::Exec(111), ProcEvent::Exec(222)]);
 }
+
+#[test]
+fn forward_counts_only_delivered_events() {
+  use rsrpc_proc_events::{SeqTracker, forward_proc_events};
+
+  let mut datagram = proc_buf(0x2, 111);
+  datagram[24..28].copy_from_slice(&10u32.to_le_bytes());
+
+  // The receiver is gone on the first event: it must not be counted as
+  // forwarded, and the walk stops.
+  let mut seqs = SeqTracker::default();
+  let mut calls = 0;
+  let forwarded = forward_proc_events(&datagram, &mut seqs, &mut |_event| {
+    calls += 1;
+    false
+  });
+  assert_eq!(forwarded, 0, "rejected event must not count as forwarded");
+  assert_eq!(calls, 1, "a rejected event stops the walk");
+}
