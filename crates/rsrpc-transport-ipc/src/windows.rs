@@ -182,6 +182,15 @@ impl IpcTransport {
   }
 
   /// Graceful shutdown: stop accepting, drain connections with a deadline.
+  ///
+  /// Known limitation: a connection pump is a blocking `handle_stream`
+  /// running in `spawn_blocking`, and `abort_all` cannot interrupt a
+  /// running blocking task. Unlike Unix — where shutdown closes the
+  /// tracked sockets and unblocks every read — interprocess 2.x exposes
+  /// no way to cancel a pending named-pipe read, so a silent peer's pump
+  /// may outlive the drain deadline and exits when the peer disconnects.
+  /// For the CLI this is bounded by process exit; per-connection state is
+  /// already released with the task.
   pub async fn shutdown(mut self) {
     self.token.cancel();
     if let Some(task) = self.accept_task.take() {
