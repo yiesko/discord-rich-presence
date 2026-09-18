@@ -185,7 +185,6 @@ the existing `socketId = pid` convention.
 
 * The `DISPATCH`/`READY` identity defaults to arRPC's (`arRPC/1045800378228281345`); override at startup with `RSRPC_USER_ID`, `RSRPC_USER_USERNAME`, `RSRPC_USER_GLOBAL_NAME`, `RSRPC_USER_DISCRIMINATOR`, `RSRPC_USER_AVATAR`.
 * Bridge clients can patch it at runtime with `SET_USER` (`{"type":"SET_USER","patch":{...}}`, whitelisted keys only) and restore it with `RESET_USER`; both are ACKed (`SET_USER_ACK`/`RESET_USER_ACK`), and identity changes fan out as the official `CURRENT_USER_UPDATE` DISPATCH to bridge clients (IPC/WS game clients learn it on their next handshake).
-* `RSRPC_STATE_FILE=1` writes an arRPC-layout snapshot to `<tmpdir>/rsrpc-state-{0..9}` (`servers` + `activities`): `Bridge::bind` writes the initial snapshot, then writes are dirty-gated to at most one per persistence interval (default 5s), with the 30s refresh also marking it dirty; removed on graceful shutdown (SIGINT), reclaimed by mtime otherwise.
 
 ### Known limitations
 
