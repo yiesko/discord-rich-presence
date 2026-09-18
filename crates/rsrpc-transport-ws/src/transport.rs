@@ -508,18 +508,18 @@ async fn on_message(
         sink,
       )
       .await;
-      if alive {
-        // Record the publication for disconnect clears, applying the same
-        // connect-query client_id fallback the forwarded command carries.
-        // Short write-back, no await inside.
-        let app_id = event
-          .application_id
-          .clone()
-          .or_else(|| slot.query_client_id.clone());
-        let pid = event.args.as_ref().and_then(|a| a.pid).unwrap_or_default();
-        if let Some(entry) = clients.write().await.get_mut(&id) {
-          entry.note_published(app_id, pid, event.nonce.clone());
-        }
+      // Record the publication regardless of the reply outcome: the
+      // command already reached the sink, and a stalled or gone client
+      // is pruned right below — its removal must clear the pid or the
+      // card ghosts. Applies the same connect-query client_id fallback
+      // the forwarded command carries. Short write-back, no await inside.
+      let app_id = event
+        .application_id
+        .clone()
+        .or_else(|| slot.query_client_id.clone());
+      let pid = event.args.as_ref().and_then(|a| a.pid).unwrap_or_default();
+      if let Some(entry) = clients.write().await.get_mut(&id) {
+        entry.note_published(app_id, pid, event.nonce.clone());
       }
       alive
     }

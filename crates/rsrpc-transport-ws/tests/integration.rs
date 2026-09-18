@@ -292,8 +292,18 @@ async fn stalled_reader_does_not_freeze_the_pump() {
   let (transport, mut rx) = WsTransport::bind(config, user()).await.unwrap();
   let port = transport.bound_port();
 
-  // Keep the sink drained so it never applies its own backpressure.
-  let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+  // Keep the sink drained so it never applies its own backpressure, and
+  // record every command for the ghost-clear assertion below.
+  let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ActivityCmd>::new()));
+  let collector = std::sync::Arc::clone(&events);
+  let drain = tokio::spawn(async move {
+    while let Some(cmd) = rx.recv().await {
+      collector
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(cmd);
+    }
+  });
 
   let mut healthy = connect(port, "?v=1&encoding=json&client_id=healthy").await;
   let _ = read_text(&mut healthy).await; // READY
@@ -329,6 +339,82 @@ async fn stalled_reader_does_not_freeze_the_pump() {
   let reply = read_text(&mut healthy).await;
   assert_eq!(reply["cmd"], "GET_USER");
 
+  // The stalled client published pid 42 (the command reached the sink
+  // before the reply timed out): pruning it must clear that pid, or the
+  // card ghosts.
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  loop {
+    let cleared = events
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .iter()
+      .any(|cmd| {
+        cmd.cmd == "SET_ACTIVITY"
+          && cmd.args.as_ref().and_then(|args| args.pid) == Some(42)
+          && cmd
+            .args
+            .as_ref()
+            .and_then(|args| args.activity.as_ref())
+            .is_none()
+      });
+    if cleared {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "pruning the stalled client must clear its published activity"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+
   transport.shutdown().await;
   drain.abort();
+}
+
+#[tokio::test]
+async fn close_while_reply_is_undeliverable_clears_publication() {
+  // Publication must be recorded even when the reply cannot be delivered
+  // (client gone, outbox closed): removal then clears the pid instead of
+  // leaving a ghost.
+  let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut client = connect(port, "?v=1&encoding=json&client_id=gone").await;
+  let _ = read_text(&mut client).await; // READY
+
+  client
+    .send(tungstenite::Message::Text(
+      r#"{"cmd":"SET_ACTIVITY","args":{"pid":42,"activity":{"name":"Ghost","type":0}},"nonce":"1"}"#
+        .into(),
+    ))
+    .await
+    .unwrap();
+  drop(client); // no reply read, connection torn down
+
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  loop {
+    let mut cleared = false;
+    while let Ok(cmd) = rx.try_recv() {
+      if cmd.cmd == "SET_ACTIVITY"
+        && cmd.args.as_ref().and_then(|a| a.pid) == Some(42)
+        && cmd
+          .args
+          .as_ref()
+          .and_then(|a| a.activity.as_ref())
+          .is_none()
+      {
+        cleared = true;
+      }
+    }
+    if cleared {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "undeliverable reply must still clear the publication"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+
+  transport.shutdown().await;
 }
