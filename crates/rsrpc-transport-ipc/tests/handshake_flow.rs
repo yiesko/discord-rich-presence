@@ -414,3 +414,66 @@ fn published_pid_history_is_bounded() {
 
   server.join().expect("server thread");
 }
+
+#[test]
+fn clean_close_clear_survives_a_full_sink() {
+  let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
+  client
+    .set_read_timeout(Some(Duration::from_secs(5)))
+    .expect("timeout");
+  let (sink, mut rx) = EventSink::bounded(1);
+  // Occupy the only slot: a clean-close clear must wait for space (bounded
+  // retry) instead of shedding like an ordinary command, or the bridge
+  // keeps the card until the next scan.
+  let filler = sink.clone();
+  filler.emit(ActivityCmd::empty());
+
+  let mut facil = TestFacilitator {
+    handshake: false,
+    client_id: String::new(),
+    pid: 0,
+    nonce: String::new(),
+    sink,
+    published_pids: Vec::new(),
+  };
+  let mut server_stream = server_stream;
+  let server = std::thread::spawn(move || handle_stream(&mut facil, &mut server_stream));
+
+  write_frame(
+    &mut client,
+    PacketType::Handshake,
+    r#"{"v":1,"client_id":"test-app"}"#,
+  );
+  let (_, body) = read_frame(&mut client);
+  assert!(body.contains("READY"), "expected READY, got: {body}");
+
+  write_frame(&mut client, PacketType::Close, "{}");
+  // Give the pump a bounded moment to attempt the clear while the sink is
+  // full: there is no observable hook for "clear attempted", and the
+  // server thread is parked on this socket read, so it reacts at once.
+  // The retry budget (250ms) far exceeds this settle.
+  std::thread::sleep(Duration::from_millis(50));
+
+  // Filler first, then the close clear (bounded retry survives the full
+  // queue; an ordinary shed would have dropped it already).
+  let first = recv_cmd(&mut rx);
+  assert_eq!(first.cmd, "");
+  let clear = recv_cmd(&mut rx);
+  assert_eq!(clear.cmd, "SET_ACTIVITY");
+  assert_eq!(
+    filler.dropped_total(),
+    0,
+    "the close clear must not be shed"
+  );
+  assert_eq!(clear.application_id.as_deref(), Some("test-app"));
+  assert!(
+    clear
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "expected null-activity clear"
+  );
+
+  server.join().expect("server thread");
+}

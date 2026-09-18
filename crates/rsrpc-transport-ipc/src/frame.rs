@@ -349,7 +349,9 @@ fn on_close(ipc: &mut dyn IpcFacilitator) {
     }),
     nonce: Value::String(ipc.nonce()),
   };
-  ipc.send_event(activity_cmd);
+  // Route through the clear path: a clean close must never be shed when
+  // the queue is momentarily full, or the bridge keeps the card.
+  ipc.sink().emit_clear(activity_cmd);
   // A multiplexing client may hold cards under older pids: clear
   // those too (app-less, like abrupt closes; the full clear above
   // already carried this pid with identity).
