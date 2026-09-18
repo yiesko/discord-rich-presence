@@ -37,6 +37,12 @@ pub struct ProcessServer {
   /// clone share the same generation pointer, so hourly refreshes reach
   /// the scan loop's clone too.
   pub(crate) detectables: Arc<ArcSwap<DetectablesBundle>>,
+  /// Serializes bundle writers (hourly refresh vs override rebuilds):
+  /// both read the current generation, build, then store, so without
+  /// this a refresh landing inside an append's window silently discards
+  /// the override (or the refreshed main list). Readers are unaffected:
+  /// they keep loading the lock-free pointer.
+  pub(crate) writer_lock: Arc<Mutex<()>>,
   pub(crate) scanning: Arc<AtomicBool>,
   /// Double-`start` guard: a second scan generation would orphan the
   /// first loop's wake handle and double-emit EXEC hits.
@@ -326,6 +332,7 @@ impl Clone for ProcessServer {
       // Shared generation pointer: clones (scan loop, refresh thread)
       // must observe each other's swaps.
       detectables: Arc::clone(&self.detectables),
+      writer_lock: Arc::clone(&self.writer_lock),
       scanning: Arc::clone(&self.scanning),
       started: Arc::clone(&self.started),
       scan_dirty: Arc::clone(&self.scan_dirty),
@@ -366,6 +373,7 @@ impl ProcessServer {
       started: Arc::new(AtomicBool::new(false)),
       scan_dirty: Arc::new(AtomicBool::new(false)),
       detectables: Arc::new(ArcSwap::new(bundle)),
+      writer_lock: Arc::new(Mutex::new(())),
       event_sender,
 
       // Event listeners
@@ -394,13 +402,18 @@ impl ProcessServer {
     server
   }
 
-  /// Rebuild the bundle with a new custom list, swapping the pointer in
-  /// one write: no scan can ever observe a half-rebuilt custom automaton.
-  fn rebuild_custom(&self, custom: Vec<Arc<ScannedEntry>>) {
+  /// Apply `edit` to the current custom list and swap the rebuilt bundle
+  /// in one write: the read of the current generation, the edit and the
+  /// store are one critical section under the writer lock, so concurrent
+  /// refreshes and other custom edits can never overwrite each other
+  /// from a stale snapshot. Scan readers stay lock-free (`ArcSwap`).
+  fn edit_custom(&self, edit: impl FnOnce(Vec<Arc<ScannedEntry>>) -> Vec<Arc<ScannedEntry>>) {
+    let _writer = self.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
     tracing::info!(
       "[Process Scanner] Updating Aho-Corasick patterns for custom detectable activities..."
     );
     let current = self.detectables.load_full();
+    let custom = edit(current.custom.clone());
     let next = match build_bundle(current.list.clone(), custom) {
       Ok(next) => Arc::new(next),
       Err(e) => {
@@ -433,6 +446,9 @@ impl ProcessServer {
     tracing::info!(
       "[Process Scanner] Rebuilding Aho-Corasick patterns for main detectable activities..."
     );
+    // Same writer serialization as `rebuild_custom`: appends landing in
+    // this load->store window must not be discarded by the swap.
+    let _writer = self.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
     // Move (not clone) into the slim form, then drop the input before
     // the automata build below (~tens of MB of scratch): the fat structs
     // must not ride along to the end of this function and double the
@@ -484,22 +500,24 @@ impl ProcessServer {
     // Append to the custom list, since that's what is actually scanned.
     // Full public entries convert once to the slim scanner form here,
     // moving (not cloning) their strings.
-    let mut custom = self.detectables.load().custom.clone();
-    custom.extend(
-      detectable
-        .into_iter()
-        .map(|entry| Arc::new(ScannedEntry::from_owned(entry))),
-    );
-    self.rebuild_custom(custom);
+    self.edit_custom(|mut custom| {
+      custom.extend(
+        detectable
+          .into_iter()
+          .map(|entry| Arc::new(ScannedEntry::from_owned(entry))),
+      );
+      custom
+    });
   }
 
   pub fn remove_detectable_by_name(&self, name: &str) {
-    let mut custom = self.detectables.load().custom.clone();
-    custom.retain(|x| {
-      let current: &str = &x.name;
-      current != name
+    self.edit_custom(|mut custom| {
+      custom.retain(|x| {
+        let current: &str = &x.name;
+        current != name
+      });
+      custom
     });
-    self.rebuild_custom(custom);
   }
 
   /// Replace the exclusions set (startup fetch, tests). The hourly refresh
@@ -1025,13 +1043,33 @@ mod tests {
   }
 
   fn custom_entry() -> DetectableActivity {
+    custom_entry_named("777")
+  }
+
+  fn custom_entry_named(id: &str) -> DetectableActivity {
     serde_json::from_value(serde_json::json!({
-      "id": "777",
-      "name": "Shared Generation",
+      "id": id,
+      "name": format!("Shared Generation {id}"),
       "hook": true,
-      "executables": [{"name": "shared.exe", "is_launcher": false, "os": "win32"}],
+      "executables": [{"name": format!("shared-{id}.exe"), "is_launcher": false, "os": "win32"}],
     }))
     .expect("fixture parses")
+  }
+
+  /// A wide main database: widens the refresh's load->store window so a
+  /// concurrent append is actually likely to land inside it.
+  fn main_entries(count: usize) -> Vec<DetectableActivity> {
+    (0..count)
+      .map(|i| {
+        serde_json::from_value(serde_json::json!({
+          "id": format!("main-{i}"),
+          "name": format!("Main {i}"),
+          "hook": true,
+          "executables": [{"name": format!("main-{i}.exe"), "is_launcher": false, "os": "win32"}],
+        }))
+        .expect("fixture parses")
+      })
+      .collect()
   }
 
   #[test]
@@ -1055,5 +1093,43 @@ mod tests {
     scan_clone.append_detectables(vec![custom_entry()]);
     assert_eq!(reverse.bundle().custom.len(), server.bundle().custom.len());
     assert_eq!(reverse.bundle().custom.len(), 2);
+  }
+
+  #[test]
+  fn concurrent_writers_preserve_both_sides() {
+    // Refresh (`update_main_detectables`) and override rebuilds
+    // (`rebuild_custom`) both load -> build -> store: with a shared
+    // generation and no serialization, one store can silently discard
+    // the other's input. Every append must survive the concurrent
+    // refreshes (the writer lock serializes them).
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 8;
+    const REFRESHES: usize = 20;
+    let server = fixture_server();
+    std::thread::scope(|scope| {
+      for t in 0..THREADS {
+        let writer = server.clone();
+        scope.spawn(move || {
+          for i in 0..PER_THREAD {
+            writer.append_detectables(vec![custom_entry_named(&format!("{t}-{i}"))]);
+            // Spread appends over the refresh window so the writers
+            // actually overlap (a stress test, not a timing benchmark).
+            std::thread::sleep(std::time::Duration::from_micros(250));
+          }
+        });
+      }
+      let refresher = server.clone();
+      scope.spawn(move || {
+        for _ in 0..REFRESHES {
+          refresher.update_main_detectables(main_entries(300));
+        }
+      });
+    });
+    assert_eq!(
+      server.bundle().custom.len(),
+      THREADS * PER_THREAD,
+      "no override may be lost to a concurrent refresh"
+    );
+    assert_eq!(server.bundle().list.len(), 300, "refresh result must stick");
   }
 }
