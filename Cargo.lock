@@ -1076,7 +1076,6 @@ dependencies = [
  "rsrpc-types",
  "serde_json",
  "tokio",
- "tokio-util",
  "tracing",
  "ureq",
 ]
