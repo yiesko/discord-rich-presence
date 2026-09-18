@@ -123,7 +123,7 @@ Every option also has a corresponding environment variable (e.g. `RSRPC_BRIDGE_P
 
 ### Logging
 
-Severities, chattiest first: `DEBUG` (per-tick internals, needs `--debug`/`RSRPC_DEBUG=1`), `INFO` (one line per state change: detects, clears, connects, hourly DB checks), `WARN` (degraded but continuing: fallbacks, retries, pruned clients), `ERROR` (failed operations). `RSRPC_LOGS_ENABLED=1` (set by the binary) gates everything; `RSRPC_LOG_LEVEL=debug|info|warn|error` (default `info`) sets the floor. `INFO` keeps the historical untagged shape; other levels print `[DEBUG]`/`[WARN]`/`[ERROR]` tags.
+Logs go to stderr through `tracing` (`tracing_subscriber`). `RUST_LOG` takes precedence when set; otherwise `--debug` / `RSRPC_DEBUG=1` selects `debug`, and the default is `info`. Severities, chattiest first: `DEBUG` (per-tick internals), `INFO` (one line per state change: detects, clears, connects, hourly DB checks), `WARN` (degraded but continuing: fallbacks, retries, pruned clients), `ERROR` (failed operations). Module targets are omitted from the output.
 
 ### Detectable database (offline snapshot & refresh)
 
@@ -153,7 +153,7 @@ Severities, chattiest first: `DEBUG` (per-tick internals, needs `--debug`/`RSRPC
 
 ### Custom overrides (`overrides.json`, `overrides.d/`)
 
-Files contain a JSON array (or a single object) of `DetectableActivity` objects. File resolution order: `--overrides-file` > `$RSRPC_OVERRIDES_FILE` > `$XDG_CONFIG_HOME/rsrpc/overrides.json` > `~/.config/rsrpc/overrides.json`; directory resolution: `--overrides-dir` > `$RSRPC_OVERRIDES_DIR` > `$XDG_CONFIG_HOME/rsrpc/overrides.d` > `~/.config/rsrpc/overrides.d`. Missing paths mean no overrides; corrupt directory files are skipped with a warning. Loaded before any branch (staged pre-start, applied to the live scanner on `start()` and to `--list-detected`).
+Files contain a JSON array (or a single object) of `DetectableActivity` objects. File resolution order: `--overrides-file` > `$RSRPC_OVERRIDES_FILE` > `$XDG_CONFIG_HOME/rsrpc/overrides.json` > `~/.config/rsrpc/overrides.json`; directory resolution: `--overrides-dir` > `$RSRPC_OVERRIDES_DIR` > `$XDG_CONFIG_HOME/rsrpc/overrides.d` > `~/.config/rsrpc/overrides.d`. Missing paths mean no overrides; corrupt directory files are skipped with a warning. Staged in the daemon before any branch: `--list-detected` sees them, and `run_until` applies them when the scanner starts.
 
 ### Diagnostics
 
@@ -187,12 +187,12 @@ the existing `socketId = pid` convention.
 
 * The `DISPATCH`/`READY` identity defaults to arRPC's (`arRPC/1045800378228281345`); override at startup with `RSRPC_USER_ID`, `RSRPC_USER_USERNAME`, `RSRPC_USER_GLOBAL_NAME`, `RSRPC_USER_DISCRIMINATOR`, `RSRPC_USER_AVATAR`.
 * Bridge clients can patch it at runtime with `SET_USER` (`{"type":"SET_USER","patch":{...}}`, whitelisted keys only) and restore it with `RESET_USER`; both are ACKed (`SET_USER_ACK`/`RESET_USER_ACK`), and identity changes fan out as the official `CURRENT_USER_UPDATE` DISPATCH to bridge clients (IPC/WS game clients learn it on their next handshake).
-* `RSRPC_STATE_FILE=1` writes an arRPC-layout snapshot to `<tmpdir>/rsrpc-state-{0..9}` (`servers` + `activities`), rewritten on every broadcast and every 30s refresh tick; removed on graceful shutdown (SIGINT), reclaimed by mtime otherwise.
+* `RSRPC_STATE_FILE=1` writes an arRPC-layout snapshot to `<tmpdir>/rsrpc-state-{0..9}` (`servers` + `activities`): `Bridge::bind` writes the initial snapshot, then writes are dirty-gated to at most one per persistence interval (default 5s), with the 30s refresh also marking it dirty; removed on graceful shutdown (SIGINT), reclaimed by mtime otherwise.
 
 ### Known limitations
 
 * **No OAuth/`AUTHORIZE` flow**: the bridge forwards `SET_ACTIVITY` (and a few browser/deeplink commands) but cannot complete authorization — that needs a route game → real Discord client plus the app's `client_secret`, which only the game developer has. Games that log in via RPC need direct access to the Discord client socket (stop rsRPC while playing them).
-* **`detect_once` on a started server** returns nothing: `start()` moves the database to the scanner (single ownership, no duplicated generations). One-shot users (CLI `--list-detected`, per-tick scanners that never start) are unaffected.
+* **`run_until` consumes the daemon**: it moves the database into the scanner (single ownership, no duplicated generations), so run `detect_once`/`database_summary` before it — the CLI's `--list-detected`/`--list-database` do exactly that. One-shot use never needs `run_until`.
 
 ## Building the binary
 
