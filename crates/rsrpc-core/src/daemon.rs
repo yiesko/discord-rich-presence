@@ -25,8 +25,8 @@ use tokio::sync::mpsc;
 use crate::config::RPCConfig;
 use crate::database::{DetectableSummary, DetectedGame, summarize};
 
-/// Scanner event channel bound (matches the legacy 64: backpressure per
-/// producer, never unbounded growth).
+/// Scanner event channel bound: per-producer backpressure, never
+/// unbounded growth. Raised from the legacy 64 to absorb scan bursts.
 const PROC_CHANNEL_BOUND: usize = 512;
 
 /// The daemon: parsed database plus staged overrides, pre-run.
