@@ -790,12 +790,11 @@ impl Shared {
 
   /// Flood guard: byte-identical republishes inside the window are
   /// dropped — before any broadcast, cache write or log line.
-  fn flood_dropped(&self, cmd: &ActivityCmd) -> bool {
+  /// Takes the precomputed fingerprint so dropped publishes never pay
+  /// for the envelope build.
+  fn flood_dropped(&self, cmd: &ActivityCmd, fingerprint: Option<&[u8]>) -> bool {
     let args = cmd.args.as_ref();
     let pid = args.and_then(|args| args.pid).unwrap_or_default();
-    let fingerprint = args
-      .and_then(|args| args.activity.as_ref())
-      .and_then(|activity| serde_json::to_vec(activity).ok());
     self
       .recent
       .lock()
@@ -803,7 +802,7 @@ impl Shared {
       .should_drop(
         cmd.application_id.as_deref().unwrap_or(""),
         pid,
-        fingerprint.as_deref(),
+        fingerprint,
         std::time::Instant::now(),
       )
   }
@@ -825,25 +824,24 @@ impl Shared {
     }
   }
 
-  /// Compare against the cached activity for this pid, so first
+  /// Compare the current fingerprint against the cached entry, so first
   /// publishes, real changes and effective clears still log once.
-  fn activity_changed(&self, cmd: &ActivityCmd) -> bool {
-    let args = cmd.args.as_ref();
-    let pid = args.and_then(|args| args.pid).unwrap_or_default();
-    let activity = args.and_then(|args| args.activity.as_ref());
+  /// Byte compare: both sides come from the same serializer and the
+  /// stored bytes travel with the build — no re-serialize, no re-parse.
+  fn activity_changed(&self, pid: u64, fingerprint: Option<&[u8]>) -> bool {
+    // Clone the two small shape facts we need (flag + bytes) and let the
+    // guard drop at the semicolon: nothing below holds the map lock.
     let cached = self
       .cache
       .lock()
       .unwrap_or_else(|e| e.into_inner())
       .get(&SocketId::from(pid.to_string()))
-      .and_then(|(cached, _)| serde_json::from_str::<serde_json::Value>(&cached.json).ok())
-      .and_then(|body| body.get("activity").cloned());
-    let current = activity
-      .and_then(|activity| serde_json::to_value(activity).ok())
-      .unwrap_or(serde_json::Value::Null);
-    match cached {
-      None => !current.is_null(),
-      Some(old) => old != current,
+      .map(|(entry, _)| (entry.is_clear, entry.activity_json.clone()));
+    match (cached, fingerprint) {
+      (None, None) => false,
+      (None, Some(_)) => true,
+      (Some((is_clear, _)), None) => !is_clear,
+      (Some((is_clear, stored)), Some(fp)) => is_clear || stored.as_ref() != fp,
     }
   }
 
@@ -888,27 +886,34 @@ impl Shared {
     }
   }
 
-  /// Handle one `SET_ACTIVITY` command: flood-guard, handoff, change
-  /// detection, genuine-clear resume, conditional fan-out.
+  /// Handle one `SET_ACTIVITY` command: fingerprint, flood-guard,
+  /// envelope build, handoff, change detection, genuine-clear resume,
+  /// conditional fan-out.
   async fn handle_set_activity(&self, mut cmd: ActivityCmd) {
-    let Some(payload) = commands::cached_activity(&mut cmd) else {
-      tracing::warn!("[bridge] Invalid activity command, skipping");
-      return;
-    };
-    let args = cmd.args.as_ref();
-    let pid = args.and_then(|args| args.pid).unwrap_or_default();
-    let app_key = cmd.application_id.as_deref().unwrap_or("");
-    if self.flood_dropped(&cmd) {
+    // Fingerprint first (runs `fix()`): flood-dropped publishes return
+    // before the envelope (JSON + MessagePack) is ever built.
+    let fingerprint = commands::activity_fingerprint(&mut cmd);
+    let pid = cmd
+      .args
+      .as_ref()
+      .and_then(|args| args.pid)
+      .unwrap_or_default();
+    if self.flood_dropped(&cmd, fingerprint.as_deref()) {
+      let app_key = cmd.application_id.as_deref().unwrap_or("");
       tracing::debug!("[bridge] Dropping duplicate SET_ACTIVITY (app {app_key}, pid {pid})");
       return;
     }
-
-    let activity = args.and_then(|args| args.activity.as_ref());
+    let Some(payload) = commands::cached_activity(&mut cmd, fingerprint.clone()) else {
+      tracing::warn!("[bridge] Invalid activity command, skipping");
+      return;
+    };
+    let app_key = cmd.application_id.as_deref().unwrap_or("");
+    let activity = cmd.args.as_ref().and_then(|args| args.activity.as_ref());
     self.note_sdk_publish(&cmd);
     // NOTE: no ignore-list filtering here by design. Forwarded client
     // frames are indistinguishable on this path — filtering would kill
     // the companion this bridge exists to carry.
-    let changed = self.activity_changed(&cmd);
+    let changed = self.activity_changed(pid, fingerprint.as_deref());
     match activity {
       Some(activity) => {
         if changed {
@@ -1222,6 +1227,7 @@ fn generic_payload(game: &ScannedGame) -> Arc<CachedActivity> {
   // Same fixed-shape guarantee as `empty_cached` (String/int only):
   // encode failure is a future-field bug — degrade loudly in diagnostics,
   // never panic the broadcast path.
+  let activity_json = serde_json::to_vec(&payload_struct.activity).unwrap_or_default();
   Arc::new(commands::CachedActivity {
     json: serde_json::to_string(&payload_struct)
       .map(tungstenite::Utf8Bytes::from)
@@ -1237,6 +1243,7 @@ fn generic_payload(game: &ScannedGame) -> Arc<CachedActivity> {
       }),
     // Always built with `activity: Some` above.
     is_clear: false,
+    activity_json: bytes::Bytes::from(activity_json),
   })
 }
 

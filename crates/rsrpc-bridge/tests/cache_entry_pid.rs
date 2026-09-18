@@ -13,6 +13,7 @@ fn cached_with(pid_json: &str) -> CachedActivity {
     json: tungstenite::Utf8Bytes::from(format!(r#"{{"activity":null,"pid":{pid_json}}}"#)),
     msgpack: bytes::Bytes::new(),
     is_clear: true,
+    activity_json: bytes::Bytes::new(),
   }
 }
 
@@ -30,6 +31,7 @@ fn numeric_socket_id_used_when_body_unusable() {
     json: tungstenite::Utf8Bytes::from_static("not json"),
     msgpack: bytes::Bytes::new(),
     is_clear: true,
+    activity_json: bytes::Bytes::new(),
   };
   assert_eq!(
     cache_entry_pid(&SocketId::from("4242"), &broken),
@@ -58,6 +60,7 @@ fn rejects_zero_and_garbage() {
     json: tungstenite::Utf8Bytes::from_static("not json"),
     msgpack: bytes::Bytes::new(),
     is_clear: true,
+    activity_json: bytes::Bytes::new(),
   };
   assert_eq!(cache_entry_pid(&SocketId::from("app"), &broken), None);
 }

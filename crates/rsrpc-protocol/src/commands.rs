@@ -63,6 +63,10 @@ pub struct CachedActivity {
   /// Whether this payload clears presence (`activity: null`). Recorded at
   /// construction so consumers never re-parse the JSON to find out.
   pub is_clear: bool,
+  /// The serialized activity alone (flood-guard fingerprint source).
+  /// Recorded at construction so change detection compares bytes instead
+  /// of re-serializing and re-parsing; empty for clears.
+  pub activity_json: Bytes,
 }
 
 /// Build the empty (clear) payload in both protocols.
@@ -87,15 +91,36 @@ pub fn empty_cached(pid: u64, socket_id: SocketId) -> Arc<CachedActivity> {
       .map(Bytes::from)
       .unwrap_or_default(),
     is_clear: true,
+    activity_json: Bytes::new(),
   })
+}
+
+/// Serialize the command's activity alone: the flood-guard fingerprint.
+/// Runs `fix()` first so the bytes match what [`cached_activity`] stores.
+///
+/// Returns `None` when there is no activity (a clear).
+#[must_use]
+pub fn activity_fingerprint(cmd: &mut ActivityCmd) -> Option<Vec<u8>> {
+  cmd.fix();
+  let activity = cmd.args.as_ref()?.activity.as_ref()?;
+  serde_json::to_vec(activity).ok()
 }
 
 /// Turn a `SET_ACTIVITY` command into the bridge payload in both protocols.
 ///
+/// `fingerprint` should be the [`activity_fingerprint`] output for `cmd`
+/// (computed once, up front, so flood-dropped publishes never pay for the
+/// envelope build); it is stored on the payload for byte-compare change
+/// detection. A missing fingerprint degrades to always-changed, never to
+/// a dropped broadcast.
+///
 /// Returns `None` when the command cannot be converted into a valid payload
 /// (e.g. it is missing its arguments entirely).
 #[must_use]
-pub fn cached_activity(cmd: &mut ActivityCmd) -> Option<Arc<CachedActivity>> {
+pub fn cached_activity(
+  cmd: &mut ActivityCmd,
+  fingerprint: Option<Vec<u8>>,
+) -> Option<Arc<CachedActivity>> {
   cmd.fix();
 
   let args = cmd.args.as_mut()?;
@@ -120,6 +145,7 @@ pub fn cached_activity(cmd: &mut ActivityCmd) -> Option<Arc<CachedActivity>> {
     // Reached only when `args.activity` is `Some`: the serialized body
     // carries a real activity object, never null.
     is_clear: false,
+    activity_json: fingerprint.map(Bytes::from).unwrap_or_default(),
   }))
 }
 

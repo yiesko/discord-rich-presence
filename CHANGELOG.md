@@ -54,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/rsrpc-transport-ws/tests/integration.rs` (dead vs live
   `Responder` liveness).
 
+### Changed
+- Cheaper `SET_ACTIVITY` pipeline: the activity fingerprint is computed
+  first and flood-dropped publishes return before the JSON + MessagePack
+  envelope is ever built (~0.76µs vs ~2.5µs per dropped publish); accepted
+  publishes compare stored fingerprint bytes instead of re-serializing and
+  re-parsing (`CachedActivity.activity_json`, same pattern as `is_clear`).
+  No behavior change (covered by the flood/change/replay suites plus a
+  `publish_flood_drop` bench).
+
 ## [0.35.0] - 2026-09-15
 
 ### Breaking

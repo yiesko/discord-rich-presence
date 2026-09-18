@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use rsrpc_protocol::commands::{
-  RecentActivities, cached_activity, current_user_update, generic_ack, rpc_error,
-  set_activity_response, subscribe_ack, unsupported_command, user_response,
+  RecentActivities, activity_fingerprint, cached_activity, current_user_update, generic_ack,
+  rpc_error, set_activity_response, subscribe_ack, unsupported_command, user_response,
 };
 use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
@@ -130,7 +130,8 @@ fn rich_activity_roundtrips_every_field_through_cached_activity() {
       "emoji":{"name":" 잠수","id":"123","animated":false},
       "mystery_field_xyz":"must-survive"}}}"#,
   );
-  let payload = cached_activity(&mut cmd).expect("rich activity encodes");
+  let fp = activity_fingerprint(&mut cmd);
+  let payload = cached_activity(&mut cmd, fp).expect("rich activity encodes");
   let body: Value = serde_json::from_str(&payload.json).expect("valid json");
   let activity = &body["activity"];
   assert_eq!(activity["details"], "Battle Creek");
@@ -292,7 +293,8 @@ fn cached_payload_knows_whether_it_clears() {
     "nonce": "n",
   }))
   .unwrap();
-  let payload = cached_activity(&mut cmd).expect("builds");
+  let fp = activity_fingerprint(&mut cmd);
+  let payload = cached_activity(&mut cmd, fp).expect("builds");
   assert!(!payload.is_clear);
 
   // Null-activity commands build clears.
@@ -303,6 +305,51 @@ fn cached_payload_knows_whether_it_clears() {
     "nonce": "n",
   }))
   .unwrap();
-  let payload = cached_activity(&mut clear).expect("builds");
+  let payload = cached_activity(&mut clear, None).expect("builds");
   assert!(payload.is_clear);
+}
+
+fn set_activity_cmd() -> ActivityCmd {
+  parse_cmd(
+    r#"{
+      "cmd": "SET_ACTIVITY",
+      "application_id": "123",
+      "args": {"pid": 42, "activity": {"name": "Game", "type": 0}},
+      "nonce": "n1"
+    }"#,
+  )
+}
+
+#[test]
+fn activity_fingerprint_matches_standalone_serialization() {
+  use rsrpc_protocol::commands::activity_fingerprint;
+
+  let mut cmd = set_activity_cmd();
+  let fp = activity_fingerprint(&mut cmd).expect("fingerprint");
+  // fix() runs inside; the stored activity must serialize identically.
+  let activity = cmd
+    .args
+    .as_ref()
+    .and_then(|args| args.activity.as_ref())
+    .expect("activity");
+  assert_eq!(fp, serde_json::to_vec(activity).expect("serializable"));
+}
+
+#[test]
+fn activity_fingerprint_is_none_for_clears() {
+  use rsrpc_protocol::commands::activity_fingerprint;
+
+  let mut cmd = parse_cmd(r#"{"cmd":"SET_ACTIVITY","args":{"pid":42},"nonce":"n1"}"#);
+  assert!(activity_fingerprint(&mut cmd).is_none());
+}
+
+#[test]
+fn cached_activity_carries_fingerprint_bytes() {
+  use rsrpc_protocol::commands::activity_fingerprint;
+
+  let mut cmd = set_activity_cmd();
+  let fp = activity_fingerprint(&mut cmd).expect("fingerprint");
+  let cached = cached_activity(&mut cmd, Some(fp.clone())).expect("payload");
+  assert_eq!(cached.activity_json.as_ref(), fp.as_slice());
+  assert!(!cached.is_clear);
 }
