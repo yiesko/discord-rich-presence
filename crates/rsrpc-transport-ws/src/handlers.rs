@@ -222,7 +222,8 @@ pub(crate) struct PublishedSlot {
 
 /// Cap on tracked pids per connection: bounds memory against pathological
 /// publishers while covering every realistic multiplexer. Beyond the cap
-/// the oldest entry drops (same as today's single-slot behavior for it).
+/// the oldest entry is evicted and cleared at once (see `note_published`),
+/// so no forwarded card can ghost.
 pub(crate) const MAX_TRACKED_PIDS: usize = 16;
 
 /// Build the clear command emitted when a published pid dies.

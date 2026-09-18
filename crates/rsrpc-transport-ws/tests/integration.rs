@@ -258,8 +258,11 @@ async fn published_pid_history_is_bounded() {
 
   let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
   let _ready = read_text(&mut ws).await;
-  // 20 distinct pids on one connection: only the 16 most recent may
-  // produce clears (MAX_TRACKED_PIDS); the rest are dropped history.
+  // 20 distinct pids on one connection: the bounded history (16) evicts
+  // the oldest as it goes, and every eviction is cleared at once — so all
+  // 20 pids must produce clears, none may ghost. The echo per message
+  // proves the pump processed it; sink commands are collected below
+  // tolerating any publish/clear interleave.
   for pid in 1u64..=20 {
     ws.send(tungstenite::Message::Text(
       activity_cmd(pid, "app", "G").into(),
@@ -267,17 +270,31 @@ async fn published_pid_history_is_bounded() {
     .await
     .unwrap();
     let _echo = read_text(&mut ws).await;
-    let _ = next_cmd(&mut rx).await;
   }
   drop(ws);
 
-  let mut pids = Vec::new();
-  for _ in 0..16 {
-    let (_, pid) = recv_clear(&mut rx).await;
-    pids.push(pid.expect("clear carries pid"));
+  let mut pids = std::collections::HashSet::new();
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  while pids.len() < 20 {
+    let cmd = next_cmd(&mut rx).await;
+    if cmd.cmd == "SET_ACTIVITY"
+      && cmd
+        .args
+        .as_ref()
+        .and_then(|a| a.activity.as_ref())
+        .is_none()
+      && let Some(pid) = cmd.args.as_ref().and_then(|a| a.pid)
+    {
+      pids.insert(pid);
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "every forwarded pid must be cleared, got {pids:?}"
+    );
   }
+  let mut pids: Vec<u64> = pids.into_iter().collect();
   pids.sort_unstable();
-  assert_eq!(pids, (5u64..=20).collect::<Vec<_>>());
+  assert_eq!(pids, (1u64..=20).collect::<Vec<_>>());
 
   transport.shutdown().await;
 }

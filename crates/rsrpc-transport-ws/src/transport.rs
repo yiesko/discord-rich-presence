@@ -55,17 +55,30 @@ struct ClientSlot {
 }
 
 impl ClientSlot {
-  /// Record a publication, refreshing a re-published pid as most recent
-  /// and dropping the oldest beyond [`handlers::MAX_TRACKED_PIDS`].
-  fn note_published(&mut self, app_id: Option<String>, pid: u64, nonce: Value) {
+  /// Record a publication, refreshing a re-published pid as most recent.
+  /// Returns the oldest entry when it is evicted past
+  /// [`handlers::MAX_TRACKED_PIDS`]: the caller must clear it at once,
+  /// or the evicted card ghosts (disconnect cleanup only sees tracked
+  /// pids).
+  fn note_published(
+    &mut self,
+    app_id: Option<String>,
+    pid: u64,
+    nonce: Value,
+  ) -> Option<handlers::PublishedSlot> {
     if let Some(pos) = self.published.iter().position(|entry| entry.pid == pid) {
       self.published.remove(pos);
     } else if self.published.len() >= handlers::MAX_TRACKED_PIDS {
-      self.published.remove(0);
+      let evicted = self.published.remove(0);
+      self
+        .published
+        .push(handlers::PublishedSlot { app_id, pid, nonce });
+      return Some(evicted);
     }
     self
       .published
       .push(handlers::PublishedSlot { app_id, pid, nonce });
+    None
   }
 }
 
@@ -518,8 +531,15 @@ async fn on_message(
         .clone()
         .or_else(|| slot.query_client_id.clone());
       let pid = event.args.as_ref().and_then(|a| a.pid).unwrap_or_default();
-      if let Some(entry) = clients.write().await.get_mut(&id) {
-        entry.note_published(app_id, pid, event.nonce.clone());
+      let evicted = if let Some(entry) = clients.write().await.get_mut(&id) {
+        entry.note_published(app_id, pid, event.nonce.clone())
+      } else {
+        None
+      };
+      if let Some(old) = evicted {
+        // Bounded history evicted a live card: clear it at once, or it
+        // ghosts (disconnect cleanup only ever sees tracked pids).
+        sink.emit(handlers::clear_for_slot(&old)).await;
       }
       alive
     }
