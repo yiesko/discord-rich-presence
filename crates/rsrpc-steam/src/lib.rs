@@ -371,21 +371,6 @@ impl SteamLibraries {
     libraries
   }
 
-  /// Test seam: point re-resolution at these roots (see
-  /// `refresh_if_stale`). Lets pruning tests run hermetic, without the
-  /// real-machine sweep `collect_roots` performs.
-  #[cfg(test)]
-  pub fn set_roots_for_test(&mut self, roots: Vec<PathBuf>, exclusive: bool) {
-    self.roots = roots;
-    self.exclusive = exclusive;
-  }
-
-  /// Test probe: watch-marker count (see `watched`).
-  #[cfg(test)]
-  pub fn watched_len_for_test(&self) -> usize {
-    self.watched.len()
-  }
-
   /// Full discovery: collect roots from every source, resolve them to
   /// libraries, reuse the on-disk cache wherever fingerprints still
   /// match, parse only what is new or changed.
