@@ -211,6 +211,7 @@ fresh clone builds without network access to Discord. To refresh it, run
 ```toml
 [dependencies]
 rsrpc-core = { git = "https://www.github.com/yiesko/rsRPC", tag = "VERSION_NUMBER_HERE" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
 ```
 
 2. Use the daemon in your code:
@@ -220,7 +221,7 @@ use rsrpc_core::{Daemon, RPCConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let daemon = Daemon::from_file("./detectable.json", RPCConfig::default())?;
+  let daemon = Daemon::from_file(std::path::Path::new("./detectable.json"), RPCConfig::default())?;
   daemon.run_until(async {
     let _ = tokio::signal::ctrl_c().await;
   }).await?;
