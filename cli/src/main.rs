@@ -355,7 +355,7 @@ fn load_daemon(
 /// Load local overrides (overrides.json + overrides.d), a feature originating from rsrpc-wrapper (Polaris).
 /// Single file resolution: --overrides-file > $RSRPC_OVERRIDES_FILE > $XDG_CONFIG_HOME/rsrpc/overrides.json > ~/.config/rsrpc/overrides.json
 /// Directory resolution: --overrides-dir > $RSRPC_OVERRIDES_DIR > $XDG_CONFIG_HOME/rsrpc/overrides.d > ~/.config/rsrpc/overrides.d
-/// Both hold Vec<DetectableActivity> (or single objects).
+/// Both hold `Vec<DetectableActivity>` (or single objects).
 fn load_staged_overrides(args: &Args) -> Vec<DetectableActivity> {
   let overrides_path = args
     .overrides_file

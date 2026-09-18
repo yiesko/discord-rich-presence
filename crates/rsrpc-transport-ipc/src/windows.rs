@@ -131,7 +131,7 @@ impl IpcTransport {
         .await
         .map_err(|_| RsrpcError::IpcBind {
           attempts: 10,
-          source: std::io::Error::new(std::io::ErrorKind::Other, "bind task panicked"),
+          source: std::io::Error::other("bind task panicked"),
         })??;
 
     let (sink, rx) = EventSink::bounded(DEFAULT_IPC_QUEUE);
@@ -245,7 +245,7 @@ fn create_pipe() -> Result<(Listener, String)> {
   }
   Err(RsrpcError::IpcBind {
     attempts: 10,
-    source: std::io::Error::new(std::io::ErrorKind::Other, "no pipe bound"),
+    source: std::io::Error::other("no pipe bound"),
   })
 }
 

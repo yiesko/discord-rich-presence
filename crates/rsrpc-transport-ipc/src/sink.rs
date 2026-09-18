@@ -58,9 +58,10 @@ impl EventSink {
     }
   }
 
-  /// Queue a presence-clear command, retrying until [`CLEAR_SEND_TIMEOUT`]
-  /// when the queue is momentarily full. Falls back to shed-and-count
-  /// past the bound or when closed, exactly like [`emit`](Self::emit).
+  /// Queue a presence-clear command, retrying until the clear send
+  /// timeout when the queue is momentarily full. Falls back to
+  /// shed-and-count past the bound or when closed, exactly like
+  /// [`emit`](Self::emit).
   pub fn emit_clear(&self, cmd: ActivityCmd) {
     let mut pending = Some(cmd);
     let deadline = std::time::Instant::now() + CLEAR_SEND_TIMEOUT;

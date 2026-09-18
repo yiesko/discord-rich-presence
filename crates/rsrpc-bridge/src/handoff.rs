@@ -50,16 +50,17 @@ pub fn is_process_alive(pid: u64) -> bool {
   if pid == 0 {
     return false;
   }
-  if cfg!(target_os = "linux") {
-    return std::path::Path::new(&format!("/proc/{pid}")).exists();
+  #[cfg(target_os = "linux")]
+  {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
   }
   #[cfg(all(unix, not(target_os = "linux")))]
   {
     // SAFETY: signal 0 performs no action; only error reporting. A zero
     // return (or EPERM: exists but unowned) means alive; ESRCH means dead.
-    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+    let alive = (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
       || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-    return alive;
+    alive
   }
   #[cfg(windows)]
   {
@@ -76,8 +77,9 @@ pub fn is_process_alive(pid: u64) -> bool {
       return false;
     }
     unsafe { CloseHandle(handle) };
-    return true;
+    true
   }
+  #[cfg(not(any(unix, windows)))]
   {
     // Platforms without a probe: assume alive (ghost reaping stays off
     // rather than risking live cards).

@@ -289,8 +289,10 @@ fn release_platform_arenas() {
 fn release_platform_arenas() {
   // Declared locally: libc 0.2 exposes only the zone-struct field, not
   // this stable Darwin function (malloc/malloc.h, present since 10.6).
+  // `core::ffi` types keep this branch dependency-free (`libc` is only a
+  // Linux dependency of this crate).
   unsafe extern "C" {
-    fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
+    fn malloc_zone_pressure_relief(zone: *mut core::ffi::c_void, goal: usize) -> usize;
   }
   // SAFETY: (NULL, 0) means "all zones, no goal" and is advisory-only;
   // it cannot invalidate live allocations.
@@ -577,7 +579,9 @@ impl ProcessServer {
   pub fn start(
     &self,
     scan_interval: Duration,
-    watch_slot: &Arc<Mutex<rsrpc_telemetry::QueueGauge>>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] watch_slot: &Arc<
+      Mutex<rsrpc_telemetry::QueueGauge>,
+    >,
   ) {
     // Double-start is a caller bug: ignore fail-safe instead of leaking
     // a second scan/dispatch/watch generation.

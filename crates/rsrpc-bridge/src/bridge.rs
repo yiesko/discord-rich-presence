@@ -581,7 +581,8 @@ impl Shared {
 }
 
 impl Bridge {
-  /// Render the current resource census line (see [`Shared::census_snapshot`]).
+  /// Render the current resource census line: bridge/ws consumer counts,
+  /// input queue depths and self-RSS (see the telemetry crate).
   #[must_use]
   pub fn census(&self, reason: &str) -> String {
     self.shared.census_line(reason)

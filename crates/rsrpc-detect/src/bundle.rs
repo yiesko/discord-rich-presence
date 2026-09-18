@@ -10,7 +10,7 @@ use aho_corasick::AhoCorasick;
 
 use crate::db::DetectableActivity;
 use crate::scan::{name_matchable, normalize_name, os_matches};
-use crate::types::{OsName, ScannedEntry};
+use crate::types::ScannedEntry;
 
 /// Sorted key→index table replacing a `HashMap` for the aux lookups: no
 /// buckets (~33B each in SwissTable), no hashing, no per-key `String`
@@ -365,6 +365,8 @@ fn build_proton_ac_patterns(
   }
   #[cfg(target_os = "linux")]
   {
+    use crate::types::OsName;
+
     let mut exe_patterns: Vec<String> = Vec::new();
     let mut exe_indexes: Vec<[usize; 2]> = Vec::new();
 

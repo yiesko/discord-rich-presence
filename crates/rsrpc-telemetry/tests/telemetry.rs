@@ -1,4 +1,6 @@
-use rsrpc_telemetry::{QueueGauge, StatsSnapshot, format_resource_stats, rss_bytes};
+#[cfg(target_os = "linux")]
+use rsrpc_telemetry::rss_bytes;
+use rsrpc_telemetry::{QueueGauge, StatsSnapshot, format_resource_stats};
 
 #[test]
 fn queue_gauge_tracks_depth() {
