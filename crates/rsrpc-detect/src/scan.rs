@@ -714,8 +714,10 @@ impl ProcessServer {
   /// Shared lookup half of the scan: direct-path and cwd-joined probes
   /// match identically through here.
   ///
-  /// Probe seam (also used by tests): production classifies through `probe_variants`
-  /// (see below), which probes every path variant against main before
+  /// Probe seam (also used by tests): production classifies through
+  /// `probe_variants` (see below), which probes every path variant
+  /// against the main database before any variant reaches the custom
+  /// overrides.
   pub fn ac_probe(
     &self,
     reversed_path: &str,
