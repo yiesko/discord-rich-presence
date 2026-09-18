@@ -58,9 +58,8 @@ pub fn is_process_alive(pid: u64) -> bool {
   {
     // SAFETY: signal 0 performs no action; only error reporting. A zero
     // return (or EPERM: exists but unowned) means alive; ESRCH means dead.
-    let alive = (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
-      || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-    alive
+    (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
+      || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
   }
   #[cfg(windows)]
   {
