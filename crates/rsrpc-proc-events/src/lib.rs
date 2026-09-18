@@ -37,19 +37,23 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
+#[cfg(target_os = "linux")]
 use rsrpc_telemetry::GaugeSender;
 
 /// Netlink family for the kernel connector multiplexer.
+#[cfg(target_os = "linux")]
 const NETLINK_CONNECTOR: i32 = 11;
 /// `nlmsghdr` size: len + type + flags (u32/u16/u16) + seq + pid (u32/u32).
 const SIZE_NLMSGHDR: usize = 16;
 /// Application message type for the subscription request.
+#[cfg(target_os = "linux")]
 const NLMSG_MIN_TYPE: u16 = 16;
 /// Control message types the kernel may interleave.
 const NLMSG_NOOP: u16 = 1;
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_OVERRUN: u16 = 4;
 /// Request flag for the subscription message.
+#[cfg(target_os = "linux")]
 const NLM_F_REQUEST: u16 = 1;
 /// `cn_proc` identifiers (`linux/connector.h`: `CN_IDX_PROC`/`CN_VAL_PROC`).
 const CN_IDX_PROC: u32 = 0x1;
@@ -57,6 +61,7 @@ const CN_VAL_PROC: u32 = 0x1;
 /// `struct cn_msg` header size: idx + val + seq + ack (u32) + len + flags (u16).
 const SIZE_CN_MSG: usize = 20;
 /// Multicast ops (`linux/cn_proc.h`).
+#[cfg(target_os = "linux")]
 const PROC_CN_MCAST_LISTEN: u32 = 0x1;
 /// `proc_event.what` bitmask values (`linux/cn_proc.h` — NOT sequential).
 const PROC_EVENT_EXEC: u32 = 0x0000_0002;
