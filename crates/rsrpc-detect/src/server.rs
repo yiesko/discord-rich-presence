@@ -33,8 +33,10 @@ pub struct ProcessServer {
   /// Current detection generation (see [`DetectablesBundle`]): lock-free
   /// reads via [`ArcSwap`], whole-generation swaps by writers. Custom
   /// overrides live in the same bundle, so user appends can never tear
-  /// against the main patterns either.
-  pub(crate) detectables: ArcSwap<DetectablesBundle>,
+  /// against the main patterns either. The `Arc` wrapper makes every
+  /// clone share the same generation pointer, so hourly refreshes reach
+  /// the scan loop's clone too.
+  pub(crate) detectables: Arc<ArcSwap<DetectablesBundle>>,
   pub(crate) scanning: Arc<AtomicBool>,
   /// Double-`start` guard: a second scan generation would orphan the
   /// first loop's wake handle and double-emit EXEC hits.
@@ -321,9 +323,9 @@ fn release_platform_arenas() {}
 impl Clone for ProcessServer {
   fn clone(&self) -> Self {
     Self {
-      // Fresh ArcSwap generation pointer: the clone classifies against
-      // the same generation until the next swap lands in both.
-      detectables: ArcSwap::new(self.detectables.load_full()),
+      // Shared generation pointer: clones (scan loop, refresh thread)
+      // must observe each other's swaps.
+      detectables: Arc::clone(&self.detectables),
       scanning: Arc::clone(&self.scanning),
       started: Arc::clone(&self.started),
       scan_dirty: Arc::clone(&self.scan_dirty),
@@ -363,7 +365,7 @@ impl ProcessServer {
       scanning: Arc::new(AtomicBool::new(false)),
       started: Arc::new(AtomicBool::new(false)),
       scan_dirty: Arc::new(AtomicBool::new(false)),
-      detectables: ArcSwap::new(bundle),
+      detectables: Arc::new(ArcSwap::new(bundle)),
       event_sender,
 
       // Event listeners
@@ -1003,5 +1005,55 @@ impl ProcessServer {
     tracing::debug!("[Process Scanner] Process scan complete");
 
     Ok(detected_list)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn fixture_server() -> ProcessServer {
+    let (tx, _rx) = rsrpc_telemetry::QueueGauge::pair();
+    ProcessServer::new_with_custom(
+      vec![],
+      vec![],
+      tx,
+      ProcessEventListeners::default(),
+      RefreshConfig::default(),
+      vec![],
+    )
+  }
+
+  fn custom_entry() -> DetectableActivity {
+    serde_json::from_value(serde_json::json!({
+      "id": "777",
+      "name": "Shared Generation",
+      "hook": true,
+      "executables": [{"name": "shared.exe", "is_launcher": false, "os": "win32"}],
+    }))
+    .expect("fixture parses")
+  }
+
+  #[test]
+  fn clones_share_one_detection_generation() {
+    // The scan loop runs on a clone made in `start()`, while the hourly
+    // refresh swaps through its own clone: both must observe the same
+    // generation pointer, or refreshed databases never reach the scan.
+    let server = fixture_server();
+    let scan_clone = server.clone();
+    server.append_detectables(vec![custom_entry()]);
+    assert_eq!(
+      scan_clone.bundle().custom.len(),
+      server.bundle().custom.len(),
+      "clone must observe overrides appended after cloning"
+    );
+    assert_eq!(scan_clone.bundle().custom.len(), 1);
+
+    // The reverse direction holds too: a swap through the clone is
+    // visible to the original.
+    let reverse = scan_clone.clone();
+    scan_clone.append_detectables(vec![custom_entry()]);
+    assert_eq!(reverse.bundle().custom.len(), server.bundle().custom.len());
+    assert_eq!(reverse.bundle().custom.len(), 2);
   }
 }
