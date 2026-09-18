@@ -11,6 +11,7 @@ use std::{
   pin::Pin,
   sync::Arc,
   task::{Context, Poll},
+  time::Duration,
 };
 
 use futures_util::Stream;
@@ -134,6 +135,23 @@ impl Responder {
       .send(Cmd::Message(message))
       .await
       .map_err(|_| SendError)
+  }
+
+  /// Enqueue, waiting at most `timeout` for outbox capacity.
+  ///
+  /// Bounded variant of [`send_async`](Self::send_async): a shared pump
+  /// replying to many clients must never park behind one reader that
+  /// stopped draining its outbox.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`SendError`] when the connection task has exited or the
+  /// timeout elapsed first.
+  pub async fn send_timeout(&self, message: Message, timeout: Duration) -> Result<(), SendError> {
+    match tokio::time::timeout(timeout, self.tx.send(Cmd::Message(message))).await {
+      Ok(Ok(())) => Ok(()),
+      Ok(Err(_)) | Err(_) => Err(SendError),
+    }
   }
 
   /// Ask the connection task to close with `code`.
@@ -264,6 +282,26 @@ mod tests {
     let (r, _rx) = responder_with(8);
     r.send_async(Message::from("hi")).await.unwrap();
     r.close(CloseCode::Normal).await;
+  }
+
+  #[tokio::test]
+  async fn send_timeout_gives_up_on_a_full_outbox() {
+    let (r, mut rx) = responder_with(1);
+    r.try_send(Message::from("filler")).unwrap();
+    let started = std::time::Instant::now();
+    let result = r
+      .send_timeout(Message::from("reply"), Duration::from_millis(50))
+      .await;
+    assert!(result.is_err(), "full outbox must fail the bounded wait");
+    assert!(
+      started.elapsed() < Duration::from_secs(2),
+      "must not wait for capacity"
+    );
+    // Draining frees the slot: the next bounded send succeeds.
+    assert!(rx.try_recv().is_ok());
+    r.send_timeout(Message::from("reply"), Duration::from_millis(50))
+      .await
+      .unwrap();
   }
 
   #[tokio::test]

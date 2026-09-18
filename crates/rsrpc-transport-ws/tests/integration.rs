@@ -281,3 +281,54 @@ async fn published_pid_history_is_bounded() {
 
   transport.shutdown().await;
 }
+
+#[tokio::test]
+async fn stalled_reader_does_not_freeze_the_pump() {
+  // One client that stops reading must not park the shared pump: replies
+  // use a bounded wait and the stalled client is pruned. Big replies fill
+  // the socket buffers quickly so the outbox (capacity 1) actually backs
+  // up instead of draining into TCP.
+  let config = WsTransportConfig::new(0, 0).per_client_queue(1);
+  let (transport, mut rx) = WsTransport::bind(config, user()).await.unwrap();
+  let port = transport.bound_port();
+
+  // Keep the sink drained so it never applies its own backpressure.
+  let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+  let mut healthy = connect(port, "?v=1&encoding=json&client_id=healthy").await;
+  let _ = read_text(&mut healthy).await; // READY
+
+  let mut stalled = connect(port, "?v=1&encoding=json&client_id=stalled").await;
+  let _ = read_text(&mut stalled).await; // READY
+
+  let big = format!(
+    r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":42,"activity":{{"name":"{}","type":0}}}},"nonce":"1"}}"#,
+    "x".repeat(16 * 1024)
+  );
+  // Flood without ever reading: either the pump has already given up on
+  // this client (replies bounded, client pruned) or socket backpressure
+  // ends the loop.
+  for _ in 0..5000 {
+    let sent = tokio::time::timeout(
+      Duration::from_millis(50),
+      stalled.send(tungstenite::Message::Text(big.clone().into())),
+    )
+    .await;
+    if !matches!(sent, Ok(Ok(()))) {
+      break;
+    }
+  }
+
+  // The healthy client must still be served despite the stalled one.
+  healthy
+    .send(tungstenite::Message::Text(
+      r#"{"cmd":"GET_USER","nonce":"u1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+  let reply = read_text(&mut healthy).await;
+  assert_eq!(reply["cmd"], "GET_USER");
+
+  transport.shutdown().await;
+  drain.abort();
+}

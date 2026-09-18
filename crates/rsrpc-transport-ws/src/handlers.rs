@@ -2,10 +2,12 @@
 //!
 //! Every handler returns whether the client is still alive; `false` prunes
 //! the slot immediately instead of waiting for a `Disconnect` that may lag
-//! behind under flood. Bodies are ported from the legacy dispatch with the
-//! sync `Responder::send` replaced by `send_async`.
+//! behind under flood. Replies go through the private `reply` helper, a
+//! bounded wait: the shared pump must never park behind one reader that
+//! stopped draining.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use rsrpc_protocol::commands;
 use rsrpc_types::cmd::{ActivityCmd, ActivityCmdArgs};
@@ -14,6 +16,19 @@ use rsrpc_ws::{Message, Responder};
 use serde_json::Value;
 
 use crate::transport::Sink;
+
+/// Upper bound a handler waits for outbox space before treating the client
+/// as stalled (pruned, freeing the pump for everyone else).
+const REPLY_SEND_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Queue one reply with a bounded wait. `false` means the client is gone
+/// or stalled past the budget: the caller prunes it.
+async fn reply(responder: &Responder, message: Message) -> bool {
+  responder
+    .send_timeout(message, REPLY_SEND_TIMEOUT)
+    .await
+    .is_ok()
+}
 
 /// Serialize command args to a string map, preserving value types.
 /// Borrows: `to_value` already produces an owned `Value`, so cloning the
@@ -50,12 +65,11 @@ pub(crate) async fn handle_browser_command(
     .is_some_and(|code| !code.trim().is_empty());
   if !has_code {
     tracing::warn!("[transport-ws] {} without code", event.cmd);
-    return responder
-      .send_async(Message::Text(
-        commands::rpc_error(&event.cmd, &event.nonce, code, message).into(),
-      ))
-      .await
-      .is_ok();
+    return reply(
+      responder,
+      Message::Text(commands::rpc_error(&event.cmd, &event.nonce, code, message).into()),
+    )
+    .await;
   }
 
   // Optimistic forward; the outcome lives downstream.
@@ -79,10 +93,7 @@ pub(crate) async fn handle_browser_command(
     );
     return true;
   };
-  responder
-    .send_async(Message::Text(response.into()))
-    .await
-    .is_ok()
+  reply(responder, Message::Text(response.into())).await
 }
 
 /// Acknowledge a deep link (forwarded downstream).
@@ -99,10 +110,7 @@ pub(crate) async fn handle_deep_link(event: &ActivityCmd, responder: &Responder)
     tracing::warn!("[transport-ws] Dropping unserializable deep-link response");
     return true;
   };
-  responder
-    .send_async(Message::Text(response.into()))
-    .await
-    .is_ok()
+  reply(responder, Message::Text(response.into())).await
 }
 
 /// Answer `CONNECTIONS_CALLBACK` with the official-shaped error.
@@ -126,19 +134,17 @@ pub(crate) async fn handle_connections_callback(
     tracing::warn!("[transport-ws] Dropping unserializable connections response");
     return true;
   };
-  responder
-    .send_async(Message::Text(response.into()))
-    .await
-    .is_ok()
+  reply(responder, Message::Text(response.into())).await
 }
 
 /// Blind-ACK a subscription (no voice/guild backend exists; clients wait
 /// for the lock-step reply).
 pub(crate) async fn handle_subscribe(event: &ActivityCmd, responder: &Responder) -> bool {
-  responder
-    .send_async(Message::Text(commands::subscribe_ack(event).into()))
-    .await
-    .is_ok()
+  reply(
+    responder,
+    Message::Text(commands::subscribe_ack(event).into()),
+  )
+  .await
 }
 
 /// Answer `GET_USER` with the current identity, or null for strangers.
@@ -149,12 +155,11 @@ pub(crate) async fn handle_get_user(
 ) -> bool {
   let wanted = event.args.as_ref().and_then(|args| args.user_id.as_ref());
   let matched = wanted.is_none_or(|id| *id == user.id);
-  responder
-    .send_async(Message::Text(
-      commands::user_response(event, matched.then_some(user)).into(),
-    ))
-    .await
-    .is_ok()
+  reply(
+    responder,
+    Message::Text(commands::user_response(event, matched.then_some(user)).into()),
+  )
+  .await
 }
 
 /// Answer unknown commands from the shared unbacked-command table.
@@ -164,12 +169,11 @@ pub(crate) async fn handle_unknown(cmd: &str, event: &ActivityCmd, responder: &R
     tracing::warn!("[transport-ws] Unknown command: {cmd}");
   }
   let (code, message) = unsupported.unwrap_or((1000, "Unknown command"));
-  responder
-    .send_async(Message::Text(
-      commands::rpc_error(&event.cmd, &event.nonce, code, message).into(),
-    ))
-    .await
-    .is_ok()
+  reply(
+    responder,
+    Message::Text(commands::rpc_error(&event.cmd, &event.nonce, code, message).into()),
+  )
+  .await
 }
 
 /// Forward `SET_ACTIVITY` and confirm with the arRPC-shaped reply.
@@ -200,10 +204,7 @@ pub(crate) async fn handle_set_activity(
   // considering the presence set. No confirm to send means the client is
   // still considered alive.
   match commands::set_activity_response(&event) {
-    Some(response) => responder
-      .send_async(Message::Text(response.into()))
-      .await
-      .is_ok(),
+    Some(response) => reply(responder, Message::Text(response.into())).await,
     None => true,
   }
 }
