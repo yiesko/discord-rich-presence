@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use rsrpc_protocol::error::RsrpcError;
+
 use crate::db::{DetectableActivity, Exclusions, body_hash, parse_exclusions};
 use crate::server::ProcessServer;
 
@@ -55,11 +57,13 @@ pub enum FetchOutcome {
 pub fn fetch_exclusions(url: &str) -> rsrpc_protocol::error::Result<Exclusions> {
   let body = http_agent(std::time::Duration::from_secs(30))
     .get(url)
-    .call()?
+    .call()
+    .map_err(RsrpcError::http)?
     .into_body()
     .with_config()
     .limit(1024 * 1024)
-    .read_to_string()?;
+    .read_to_string()
+    .map_err(RsrpcError::http)?;
   Ok(parse_exclusions(&body))
 }
 
@@ -77,7 +81,7 @@ pub fn fetch_detectable_etag(
   if let Some(tag) = etag {
     request = request.header("If-None-Match", tag);
   }
-  let response = request.call()?;
+  let response = request.call().map_err(RsrpcError::http)?;
   if response.status().as_u16() == 304 {
     return Ok(FetchOutcome::Unchanged);
   }
@@ -90,7 +94,8 @@ pub fn fetch_detectable_etag(
     .into_body()
     .with_config()
     .limit(64 * 1024 * 1024)
-    .read_to_string()?;
+    .read_to_string()
+    .map_err(RsrpcError::http)?;
 
   // Same bytes under a new tag (CDN etag flaps): skip everything below —
   // no parse, no rebuild. This is where the retained memory comes from,

@@ -64,9 +64,11 @@ pub enum RsrpcError {
   #[error(transparent)]
   Json(#[from] serde_json::Error),
 
-  /// HTTP fetch failures (database, exclusions).
-  #[error(transparent)]
-  Http(#[from] ureq::Error),
+  /// HTTP fetch failures (database, exclusions). The client error stays
+  /// opaque — this crate owns no HTTP dependency — while the source
+  /// chain and message remain available for diagnostics.
+  #[error("http request failed: {0}")]
+  Http(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 
   /// IPC socket/pipe bind failed on every candidate index (Discord,
   /// arRPC or another rsRPC already holds them all).
@@ -87,4 +89,12 @@ pub enum RsrpcError {
     #[source]
     source: std::io::Error,
   },
+}
+
+impl RsrpcError {
+  /// Wrap an HTTP client error opaquely, preserving its source chain.
+  #[must_use]
+  pub fn http(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+    Self::Http(Box::new(source))
+  }
 }

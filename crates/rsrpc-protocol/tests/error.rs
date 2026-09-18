@@ -41,3 +41,16 @@ fn invalid_config_names_the_field() {
     "invalid transport config: event_queue must be non-zero"
   );
 }
+
+#[test]
+fn http_errors_keep_their_source_chain() {
+  // The protocol crate owns no HTTP client: callers wrap their client
+  // error opaquely, and the cause stays reachable for diagnostics.
+  let err = RsrpcError::http(std::io::Error::other("connection refused"));
+  assert!(
+    err.to_string().contains("connection refused"),
+    "display must carry the cause: {err}"
+  );
+  let source = std::error::Error::source(&err).expect("source chain preserved");
+  assert_eq!(source.to_string(), "connection refused");
+}
