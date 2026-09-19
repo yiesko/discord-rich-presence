@@ -21,6 +21,19 @@ fn config() -> WsTransportConfig {
   WsTransportConfig::new(0, 0)
 }
 
+/// Wait until the server processed a disconnect (client map empty), so
+/// later traffic orders strictly after it.
+async fn wait_client_gone(transport: &WsTransport) {
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  while transport.client_count().await != 0 {
+    assert!(
+      std::time::Instant::now() < deadline,
+      "disconnect must be processed"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+}
+
 /// Next sink event, failing (not hanging) after the timeout.
 async fn next_cmd(rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) -> ActivityCmd {
   tokio::time::timeout(TIMEOUT, rx.recv())
@@ -541,6 +554,318 @@ async fn shed_republish_keeps_prior_tracking() {
       .as_ref()
       .and_then(|a| a.activity.as_ref())
       .is_none()
+  );
+
+  transport.shutdown().await;
+}
+
+/// A disconnect clear shed by a full sink is staged, then flushed ahead
+/// of the next message: the wedged-disconnect card still clears.
+#[tokio::test]
+async fn staged_disconnect_clear_flushes_on_next_message() {
+  // Cap-2 sink, test-held: every queue transition below is exact.
+  let (transport, mut rx) = WsTransport::bind(config().event_queue(2), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  // Connection A publishes pid 7 (lands [p7], tracked); consume it.
+  let mut ws_a = connect(port, "?v=1&encoding=json&client_id=a").await;
+  let _ready = read_text(&mut ws_a).await;
+  ws_a
+    .send(tungstenite::Message::Text(
+      activity_cmd(7, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+  let _echo = read_text(&mut ws_a).await;
+  let published = next_cmd(&mut rx).await;
+  assert_eq!(published.args.as_ref().and_then(|a| a.pid), Some(7));
+
+  // Re-publish twice to fill the sink ([p7', p7'']), then disconnect:
+  // the clear finds a full sink and stages instead of shedding.
+  for _ in 0..2 {
+    ws_a
+      .send(tungstenite::Message::Text(
+        activity_cmd(7, "app", "G").into(),
+      ))
+      .await
+      .unwrap();
+    let _echo = read_text(&mut ws_a).await;
+  }
+  drop(ws_a);
+  // The disconnect stages the clear (sink still full: nothing drained
+  // yet); only then drain.
+  wait_client_gone(&transport).await;
+  // Drain both re-publishes (activity present: a staged clear must never
+  // land in a publish slot); the staged clear stays queued server-side.
+  for _ in 0..2 {
+    let republished = next_cmd(&mut rx).await;
+    assert_eq!(republished.args.as_ref().and_then(|a| a.pid), Some(7));
+    assert!(
+      republished
+        .args
+        .as_ref()
+        .and_then(|a| a.activity.as_ref())
+        .is_some(),
+      "drains must be publishes, got: {republished:?}"
+    );
+  }
+
+  // Connection B's message flushes A's staged clear first (hub FIFO:
+  // A's Disconnect precedes B's traffic, and old clears win), then B's
+  // own publish follows.
+  let mut ws_b = connect(port, "?v=1&encoding=json&client_id=b").await;
+  let _ready = read_text(&mut ws_b).await;
+  ws_b
+    .send(tungstenite::Message::Text(
+      activity_cmd(8, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+  let _echo = read_text(&mut ws_b).await;
+
+  let first = next_cmd(&mut rx).await;
+  assert_eq!(first.args.as_ref().and_then(|a| a.pid), Some(7));
+  assert!(
+    first
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "staged disconnect clear must lead, got: {first:?}"
+  );
+  let second = next_cmd(&mut rx).await;
+  assert_eq!(second.args.as_ref().and_then(|a| a.pid), Some(8));
+
+  transport.shutdown().await;
+}
+
+/// A staged disconnect clear also lands with no further traffic: a
+/// bounded retry keeps flushing until empty, closed, or budget lapse.
+#[tokio::test]
+async fn staged_disconnect_clear_lands_without_further_traffic() {
+  // Cap-2 sink, test-held: every queue transition below is exact.
+  let (transport, mut rx) = WsTransport::bind(config().event_queue(2), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  // Publish pid 7 three times: the first two fill the sink ([p7, p7']),
+  // the third sheds (and rolls back to the prior slot). Then disconnect:
+  // the clear finds a full sink and stages instead of shedding.
+  let mut ws_a = connect(port, "?v=1&encoding=json&client_id=a").await;
+  let _ready = read_text(&mut ws_a).await;
+  for _ in 0..3 {
+    ws_a
+      .send(tungstenite::Message::Text(
+        activity_cmd(7, "app", "G").into(),
+      ))
+      .await
+      .unwrap();
+    let _echo = read_text(&mut ws_a).await;
+  }
+  drop(ws_a);
+  // The disconnect stages the clear (sink still full: nothing drained
+  // yet); only then drain.
+  wait_client_gone(&transport).await;
+  // Drain the two landed publishes (activity present); the staged clear
+  // stays server-side.
+  for _ in 0..2 {
+    let queued = next_cmd(&mut rx).await;
+    assert_eq!(queued.args.as_ref().and_then(|a| a.pid), Some(7));
+    assert!(
+      queued
+        .args
+        .as_ref()
+        .and_then(|a| a.activity.as_ref())
+        .is_some(),
+      "drains must be publishes, got: {queued:?}"
+    );
+  }
+
+  // No further traffic at all: the retry still delivers the clear.
+  let clear = next_cmd(&mut rx).await;
+  assert_eq!(clear.args.as_ref().and_then(|a| a.pid), Some(7));
+  assert!(
+    clear
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "staged disconnect clear must arrive, got: {clear:?}"
+  );
+
+  transport.shutdown().await;
+}
+
+/// Staged clears serialize before newer publishes even when the sink is
+/// full: connection B's publish waits behind A's staged clear instead of
+/// overtaking it.
+#[tokio::test]
+async fn staged_clears_serialize_before_newer_publishes() {
+  // Cap-4 sink, test-held: every queue transition below is exact.
+  let (transport, mut rx) = WsTransport::bind(config().event_queue(4), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  // Connection A fills the sink ([p7 x4]), then disconnects into the full
+  // sink: its clear stages.
+  let mut ws_a = connect(port, "?v=1&encoding=json&client_id=a").await;
+  let _ready = read_text(&mut ws_a).await;
+  for _ in 0..4 {
+    ws_a
+      .send(tungstenite::Message::Text(
+        activity_cmd(7, "app", "G").into(),
+      ))
+      .await
+      .unwrap();
+    let _echo = read_text(&mut ws_a).await;
+  }
+  drop(ws_a);
+
+  // Connection B publishes while the sink is still full: the publish
+  // stages behind A's clear instead of jumping ahead (or shedding).
+  let mut ws_b = connect(port, "?v=1&encoding=json&client_id=b").await;
+  let _ready = read_text(&mut ws_b).await;
+  ws_b
+    .send(tungstenite::Message::Text(
+      activity_cmd(8, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+  let _echo = read_text(&mut ws_b).await;
+
+  // Drain A's publishes; staged items stay queued server-side.
+  for _ in 0..4 {
+    let queued = next_cmd(&mut rx).await;
+    assert_eq!(queued.args.as_ref().and_then(|a| a.pid), Some(7));
+  }
+
+  // Connection C's message flushes staged [clear7, publish8] in order,
+  // then its own publish follows directly.
+  let mut ws_c = connect(port, "?v=1&encoding=json&client_id=c").await;
+  let _ready = read_text(&mut ws_c).await;
+  ws_c
+    .send(tungstenite::Message::Text(
+      activity_cmd(9, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+  let _echo = read_text(&mut ws_c).await;
+
+  let first = next_cmd(&mut rx).await;
+  assert_eq!(first.args.as_ref().and_then(|a| a.pid), Some(7));
+  assert!(
+    first
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "staged clear must lead, got: {first:?}"
+  );
+  let second = next_cmd(&mut rx).await;
+  assert_eq!(second.args.as_ref().and_then(|a| a.pid), Some(8));
+  assert!(
+    second
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_some(),
+    "staged publish must follow the clear, got: {second:?}"
+  );
+  let third = next_cmd(&mut rx).await;
+  assert_eq!(third.args.as_ref().and_then(|a| a.pid), Some(9));
+
+  transport.shutdown().await;
+}
+
+/// A genuine clear behind a still-full staged queue waits its turn: it
+/// lands after the staged publish of the same pid, never jumping ahead
+/// (clear-then-show would flash a stale card downstream).
+#[tokio::test]
+async fn staged_clear_waits_behind_staged_publish() {
+  // Cap-2 sink, test-held: every queue transition below is exact.
+  let (transport, mut rx) = WsTransport::bind(config().event_queue(2), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  // Connection A fills the sink ([p7, p7']), then disconnects into it:
+  // its clear stages (hub FIFO: all of A's publishes precede Disconnect).
+  let mut ws_a = connect(port, "?v=1&encoding=json&client_id=a").await;
+  let _ready = read_text(&mut ws_a).await;
+  for _ in 0..2 {
+    ws_a
+      .send(tungstenite::Message::Text(
+        activity_cmd(7, "app", "G").into(),
+      ))
+      .await
+      .unwrap();
+    let _echo = read_text(&mut ws_a).await;
+  }
+  drop(ws_a);
+  // Wait until A's removal landed: hub FIFO then orders B's traffic after
+  // A's disconnect (and the staging it performs).
+  wait_client_gone(&transport).await;
+
+  // Connection B publishes while A's clear is still staged (sink full):
+  // the publish stages behind it. B then genuinely clears the same pid,
+  // which stages behind its own publish.
+  let mut ws_b = connect(port, "?v=1&encoding=json&client_id=b").await;
+  let _ready = read_text(&mut ws_b).await;
+  ws_b
+    .send(tungstenite::Message::Text(
+      activity_cmd(8, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+  let _echo = read_text(&mut ws_b).await;
+  ws_b
+    .send(tungstenite::Message::Text(
+      r#"{"cmd":"SET_ACTIVITY","application_id":"app","args":{"pid":8,"activity":null},"nonce":"c8"}"#.into(),
+    ))
+    .await
+    .unwrap();
+  let _echo = read_text(&mut ws_b).await;
+
+  // Drain A's publishes; the staged triple stays queued server-side.
+  for _ in 0..2 {
+    let queued = next_cmd(&mut rx).await;
+    assert_eq!(queued.args.as_ref().and_then(|a| a.pid), Some(7));
+  }
+
+  // Flush order is clear7, publish8, clear8 (never clear-then-show for 8).
+  let cleared_a = next_cmd(&mut rx).await;
+  assert_eq!(cleared_a.args.as_ref().and_then(|a| a.pid), Some(7));
+  assert!(
+    cleared_a
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "A's disconnect clear must lead, got: {cleared_a:?}"
+  );
+  let shown = next_cmd(&mut rx).await;
+  assert_eq!(shown.args.as_ref().and_then(|a| a.pid), Some(8));
+  assert!(
+    shown
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_some(),
+    "staged publish must lead its clear, got: {shown:?}"
+  );
+  let cleared = next_cmd(&mut rx).await;
+  assert_eq!(cleared.args.as_ref().and_then(|a| a.pid), Some(8));
+  assert!(
+    cleared
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none(),
+    "staged clear must follow its publish, got: {cleared:?}"
   );
 
   transport.shutdown().await;

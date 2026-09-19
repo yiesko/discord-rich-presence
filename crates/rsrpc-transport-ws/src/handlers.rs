@@ -7,6 +7,7 @@
 //! stopped draining.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rsrpc_protocol::commands;
@@ -15,7 +16,7 @@ use rsrpc_types::user::RpcUser;
 use rsrpc_ws::{Message, Responder};
 use serde_json::Value;
 
-use crate::transport::Sink;
+use crate::transport::{PendingClear, Sink};
 
 /// Upper bound a handler waits for outbox space before treating the client
 /// as stalled (pruned, freeing the pump for everyone else).
@@ -176,25 +177,36 @@ pub(crate) async fn handle_unknown(cmd: &str, event: &ActivityCmd, responder: &R
   .await
 }
 
-/// Forward `SET_ACTIVITY` (unless refused) and confirm with the
-/// arRPC-shaped reply.
+/// How a `SET_ACTIVITY` command reaches the sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Forward {
+  /// Normal path: bounded-wait enqueue straight into the sink.
+  Direct,
+  /// Wedge recovery: queue behind older staged clears (never waits, never
+  /// overtakes them). Used when the staged queue is still non-empty after
+  /// the per-message flush, i.e. the sink is still full.
+  Staged,
+  /// Refused: reply only, never forwarded (over the tracking bound, or a
+  /// pruned slot). Lock-step clients must receive *some* reply or hang.
+  Refused,
+}
+
+/// Forward `SET_ACTIVITY` and confirm with the arRPC-shaped reply.
 ///
-/// `forward` is `false` when the connection already tracks
-/// [`MAX_TRACKED_PIDS`] distinct pids: the command is acknowledged (lock-step
-/// clients must receive *some* reply or they hang) but never forwarded, so
-/// every forwarded pid stays tracked and disconnect cleanup stays complete.
 /// Returns `(alive, delivered)`: `alive` prunes the slot when `false`;
-/// `delivered` tells the caller whether the card actually reached the sink,
-/// so shed publishes stay untracked (nothing shown, nothing to clear).
-/// The fixed command (with the connect-query `client_id` fallback applied)
-/// goes to the sink; the caller records the slim [`PublishedSlot`] itself,
-/// so no second deep clone happens here.
+/// `delivered` tells the caller whether the card reached (or is queued
+/// behind older clears toward) the sink, so shed publishes stay untracked
+/// (nothing shown, nothing to clear). The fixed command (with the
+/// connect-query `client_id` fallback applied) goes to the sink; the
+/// caller records the slim [`PublishedSlot`] itself, so no second deep
+/// clone happens here.
 pub(crate) async fn handle_set_activity(
   event: &ActivityCmd,
   query_client_id: Option<&str>,
   responder: &Responder,
   sink: &Sink,
-  forward: bool,
+  pending_clears: &Mutex<Vec<PendingClear>>,
+  forward: Forward,
 ) -> (bool, bool) {
   // Fall back to the client_id provided on connect (query param) when the
   // command itself does not carry an application_id.
@@ -206,10 +218,17 @@ pub(crate) async fn handle_set_activity(
   // Apply field fixes so the confirmation reply carries labels/urls (fix is
   // idempotent, so a downstream fix pass is harmless).
   event.fix();
-  let delivered = if forward {
-    sink.emit(event.clone()).await
-  } else {
-    false
+  let delivered = match forward {
+    Forward::Direct => sink.emit(event.clone()).await,
+    // Staged publishes stay tracked: the disconnect path flushes them
+    // before its own clears, so a never-delivered publish degrades to a
+    // harmless clear of an unshown card (ignored downstream).
+    Forward::Staged => {
+      sink.stage_clear(pending_clears, event.clone());
+      sink.flush_pending(pending_clears);
+      true
+    }
+    Forward::Refused => false,
   };
 
   // Confirm to the game client; some RPC libraries wait for this before

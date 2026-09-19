@@ -38,6 +38,24 @@ const SINK_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 /// disconnect no matter how many pids were tracked.
 const DISCONNECT_CLEAR_BUDGET: Duration = Duration::from_secs(1);
 
+/// Cap on staged disconnect clears transport-wide: ~16 fully-wedged
+/// disconnects. Past it clears shed counted (visible via `dropped_total`).
+/// Unbounded retention would let connection churn grow memory forever while
+/// the bridge is wedged; every handoff/publish table in this workspace
+/// sheds oldest the same way.
+const MAX_PENDING_CLEARS: usize = 256;
+
+/// A staged disconnect clear with its own expiry: an older retry task
+/// lapsing must never shed a newer entry, so each clear carries the
+/// deadline it was staged with (see `stage_clear`).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingClear {
+  /// The clear command, oldest staged first in the queue.
+  cmd: ActivityCmd,
+  /// Lapses independently per entry (see `expire_pending`).
+  deadline: std::time::Instant,
+}
+
 /// Discord origins allowed to drive game commands. Absent `origin`
 /// (non-browser clients) passes: only a mismatched origin is refused.
 const ALLOWED_ORIGINS: [&str; 3] = [
@@ -120,6 +138,19 @@ impl ClientSlot {
   }
 }
 
+/// Outcome of a non-blocking sink enqueue: the refused command rides
+/// along on `Full` so callers can stage it instead of dropping it.
+#[derive(Debug)]
+pub(crate) enum TryEmit {
+  /// Accepted by the sink.
+  Sent,
+  /// Queue full; command returned (boxed: the 1KB body would dwarf the
+  /// enum) for staging.
+  Full(Box<ActivityCmd>),
+  /// Receiver gone; no receiver will ever return.
+  Closed,
+}
+
 /// Cheap per-message snapshot: `responder` is an `Arc` bump and the id is
 /// a short string. Publication history is never cloned here — it is only
 /// read on disconnect and appended on `SET_ACTIVITY`, both under short
@@ -156,12 +187,95 @@ impl Sink {
     }
   }
 
+  /// Count `n` shed clears (shared by staging overflow and drains).
+  fn count_shed(&self, n: u64) {
+    self.dropped.fetch_add(n, Ordering::Relaxed);
+  }
+
+  /// Non-blocking enqueue for the staged-clear flush below: reports the
+  /// outcome instead of waiting, so the pump never stalls on a wedge.
+  /// A dedicated enum (not `Result`): returning the refused command back
+  /// for re-staging would trip `result_large_err` on the 1KB command.
+  pub(crate) fn try_emit(&self, cmd: ActivityCmd) -> TryEmit {
+    match self.tx.try_send(cmd) {
+      Ok(()) => TryEmit::Sent,
+      Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => TryEmit::Full(Box::new(cmd)),
+      Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => TryEmit::Closed,
+    }
+  }
+
+  /// Stage a disconnect clear for opportunistic flush, stamped with its
+  /// own expiry. Bounded: past `MAX_PENDING_CLEARS` the oldest sheds
+  /// counted instead of growing memory without limit.
+  pub(crate) fn stage_clear(&self, pending: &Mutex<Vec<PendingClear>>, cmd: ActivityCmd) {
+    let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
+    if pending.len() >= MAX_PENDING_CLEARS {
+      self.count_shed(1);
+      tracing::warn!("[transport-ws] Pending clears full, shedding oldest");
+      pending.remove(0);
+    }
+    pending.push(PendingClear {
+      cmd,
+      deadline: std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET,
+    });
+  }
+
+  /// Flush staged clears oldest-first, stopping at the first full queue
+  /// (order preserved for the next flush). Delivery never expires: an
+  /// unexpired clear always deserves its chance, whenever capacity
+  /// returns. A closed sink drops the whole queue counted — no receiver
+  /// will ever return. Never waits: safe on every pump path.
+  pub(crate) fn flush_pending(&self, pending: &Mutex<Vec<PendingClear>>) {
+    let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
+    while let Some(first) = pending.first().cloned() {
+      match self.try_emit(first.cmd) {
+        TryEmit::Sent => {
+          pending.remove(0);
+        }
+        TryEmit::Full(_) => break,
+        TryEmit::Closed => {
+          self
+            .dropped
+            .fetch_add(pending.len() as u64, Ordering::Relaxed);
+          tracing::warn!(
+            "[transport-ws] Event sink closed, dropping {} staged clear(s)",
+            pending.len()
+          );
+          pending.clear();
+          break;
+        }
+      }
+    }
+  }
+
+  /// Shed only entries whose own deadline elapsed, counting each. An older
+  /// retry task lapsing must never discard a newer entry that still owns
+  /// a retry window.
+  fn expire_pending(&self, pending: &Mutex<Vec<PendingClear>>) {
+    let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    let mut expired = 0u64;
+    pending.retain(|entry| {
+      if now >= entry.deadline {
+        expired += 1;
+        false
+      } else {
+        true
+      }
+    });
+    if expired > 0 {
+      self.count_shed(expired);
+      tracing::warn!(
+        "[transport-ws] Clear-retry budget lapsed, dropping {expired} staged clear(s)"
+      );
+    }
+  }
+
   /// Queue one disconnect clear, retrying while `deadline` holds.
-  /// Disconnect cleanup must survive a transiently full sink: an accepted
-  /// publication delivered earlier would otherwise ghost when the bridge
-  /// resumes without a later clear. Past the budget the clear sheds
-  /// (counted) like any other — full reliability would need an unbounded
-  /// control path, which trades a bounded stall for unbounded memory.
+  ///
+  /// Survives a transiently full sink where a single attempt would shed.
+  /// Used by the shutdown drain, where waiting (bounded) is acceptable;
+  /// the live pump stages instead and never waits.
   pub(crate) async fn emit_clear_retry(
     &self,
     cmd: ActivityCmd,
@@ -229,6 +343,9 @@ pub struct WsTransport {
   total: Arc<AtomicU64>,
   /// Retained sink sender for census queue-depth sampling.
   sink_tx: mpsc::Sender<ActivityCmd>,
+  /// Staged disconnect clears (see `MAX_PENDING_CLEARS`): flushed
+  /// opportunistically on every pump event and drained on shutdown.
+  pending_clears: Arc<Mutex<Vec<PendingClear>>>,
   bound_port: u16,
 }
 
@@ -325,6 +442,7 @@ impl WsTransport {
     let clients = Arc::new(RwLock::new(FxHashMap::default()));
     let dropped = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(0));
+    let pending_clears = Arc::new(Mutex::new(Vec::new()));
     let pump = tokio::spawn(pump_loop(PumpCtx {
       hub,
       clients: Arc::clone(&clients),
@@ -333,6 +451,7 @@ impl WsTransport {
         tx: tx.clone(),
         dropped: Arc::clone(&dropped),
       },
+      pending_clears: Arc::clone(&pending_clears),
       user,
       set_activity: config.set_activity,
       secondary_events: config.secondary_events,
@@ -346,6 +465,7 @@ impl WsTransport {
         handle: handle.clone(),
         total: Arc::clone(&total),
         sink_tx: tx,
+        pending_clears,
         bound_port,
       },
       rx,
@@ -403,33 +523,39 @@ impl WsTransport {
     }
     // Belt and braces: connection tasks aborted without `Disconnect` (or
     // prunes the pump never processed) leave tracked pids with no one left
-    // to clear them. The pump is gone, so drain the map here with the same
-    // bounded retry policy. Normally empty: `Disconnect` already cleared
+    // to clear them. The pump is gone, so stage them into the shared queue
+    // and drain it here. Normally empty: `Disconnect` already cleared
     // everything on the way down.
-    let stale: Vec<handlers::PublishedSlot> = {
+    let sink = Sink {
+      tx: self.sink_tx.clone(),
+      dropped: Arc::clone(&self.handle.dropped),
+    };
+    {
       let mut clients = self.handle.clients.write().await;
-      let mut stale = Vec::new();
       for (_, slot) in clients.drain() {
         self.total.fetch_sub(1, Ordering::Relaxed);
-        stale.extend(slot.published);
+        for published in &slot.published {
+          sink.stage_clear(&self.pending_clears, handlers::clear_for_slot(published));
+        }
       }
-      stale
-    };
-    if !stale.is_empty() {
-      tracing::warn!(
-        "[transport-ws] Shutdown draining {} uncleared publication(s)",
-        stale.len()
-      );
-      let sink = Sink {
-        tx: self.sink_tx.clone(),
-        dropped: Arc::clone(&self.handle.dropped),
+    }
+    // Opportunistic flush first (instant when healthy), then bounded retry
+    // per entry: each clear carries its own deadline, so this loop is
+    // bounded by the youngest entry instead of stalling shutdown on a
+    // wedged bridge. Past-budget leftovers shed counted.
+    sink.flush_pending(&self.pending_clears);
+    loop {
+      let next = {
+        let mut pending = self
+          .pending_clears
+          .lock()
+          .unwrap_or_else(|e| e.into_inner());
+        if pending.is_empty() {
+          break;
+        }
+        pending.remove(0)
       };
-      let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
-      for published in &stale {
-        sink
-          .emit_clear_retry(handlers::clear_for_slot(published), deadline)
-          .await;
-      }
+      sink.emit_clear_retry(next.cmd, next.deadline).await;
     }
   }
 }
@@ -451,6 +577,8 @@ struct PumpCtx {
   clients: Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   total: Arc<AtomicU64>,
   sink: Sink,
+  /// Staged disconnect clears (see `MAX_PENDING_CLEARS`).
+  pending_clears: Arc<Mutex<Vec<PendingClear>>>,
   user: Arc<Mutex<RpcUser>>,
   set_activity: bool,
   secondary_events: bool,
@@ -463,6 +591,7 @@ async fn pump_loop(
     clients,
     total,
     sink,
+    pending_clears,
     user,
     set_activity,
     secondary_events,
@@ -474,7 +603,7 @@ async fn pump_loop(
         on_connect(id, responder, &clients, &total, &user).await;
       }
       Event::Disconnect(id, _) => {
-        remove_and_clear(id, &clients, &total, &sink).await;
+        remove_and_clear(id, &clients, &total, &sink, &pending_clears).await;
       }
       Event::Message(id, message) => {
         on_message(
@@ -483,6 +612,7 @@ async fn pump_loop(
           &clients,
           &total,
           &sink,
+          &pending_clears,
           &user,
           set_activity,
           secondary_events,
@@ -566,16 +696,59 @@ async fn remove_and_clear(
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   total: &Arc<AtomicU64>,
   sink: &Sink,
+  pending_clears: &Arc<Mutex<Vec<PendingClear>>>,
 ) {
   let slot = clients.write().await.remove(&id);
   let Some(slot) = slot else { return };
   total.fetch_sub(1, Ordering::Relaxed);
-  let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
+  // Older staged clears first (causality), then this slot's own clears.
+  // Each stages instead of shedding on a full sink: the next pump event,
+  // the retry below, or the shutdown drain retries them until delivered
+  // or closed.
+  sink.flush_pending(pending_clears);
+  let mut staged_any = false;
   for published in &slot.published {
-    sink
-      .emit_clear_retry(handlers::clear_for_slot(published), deadline)
-      .await;
+    let cmd = handlers::clear_for_slot(published);
+    match sink.try_emit(cmd) {
+      TryEmit::Sent => {}
+      TryEmit::Full(cmd) => {
+        sink.stage_clear(pending_clears, *cmd);
+        staged_any = true;
+      }
+      TryEmit::Closed => {
+        sink.count_shed(1);
+        tracing::warn!("[transport-ws] Event sink closed, dropping clear");
+      }
+    }
   }
+  // No further traffic may ever come: keep flushing in the background
+  // until empty, closed, or budget lapse (see `spawn_clear_retry`).
+  if staged_any {
+    spawn_clear_retry(sink.clone(), Arc::clone(pending_clears));
+  }
+}
+
+/// Retry staged clears without further traffic: polled flush until empty
+/// (a closed sink drains counted inside the flush). Expiry is per entry
+/// (see `expire_pending`), so overlapping tasks never shed each other's
+/// clears, and every task ends on its own — no traffic pattern leaks
+/// tasks. Complements the message-path and shutdown-drain flushes, which
+/// cover traffic and exit.
+fn spawn_clear_retry(sink: Sink, pending_clears: Arc<Mutex<Vec<PendingClear>>>) {
+  tokio::spawn(async move {
+    loop {
+      sink.flush_pending(&pending_clears);
+      sink.expire_pending(&pending_clears);
+      if pending_clears
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty()
+      {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -587,10 +760,15 @@ async fn on_message(
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
   total: &Arc<AtomicU64>,
   sink: &Sink,
+  pending_clears: &Arc<Mutex<Vec<PendingClear>>>,
   user: &Arc<Mutex<RpcUser>>,
   set_activity: bool,
   secondary_events: bool,
 ) {
+  // Staged disconnect clears ride first (causality: older clears before
+  // new publishes). Never waits: a still-full sink simply keeps them
+  // staged for the next event.
+  sink.flush_pending(pending_clears);
   // Snapshot the cheap fields; the read guard drops before any await
   // below (and the deep `last_cmd` is never cloned here).
   let slot = match clients.read().await.get(&id) {
@@ -674,14 +852,34 @@ async fn on_message(
       // Refusals still earn their lock-step reply (clients hang without
       // one) but never reach the sink — recording the publication
       // regardless also keeps the reply-fails prune below clearing the
-      // pid instead of ghosting it.
+      // pid instead of ghosting it. Publications behind a still-full
+      // staged queue wait their turn instead of overtaking older clears.
+      let backlog = !pending_clears
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty();
+      // A still-full staged queue serializes everything behind it —
+      // including genuine clears, so a clear for a staged pid lands after
+      // its publish instead of jumping ahead (same-pid inversion would
+      // show-then-clear out of order downstream).
+      let forward = if is_clear && !backlog {
+        handlers::Forward::Direct
+      } else if is_clear {
+        handlers::Forward::Staged
+      } else {
+        match admission {
+          Some(Admission::Admitted { .. }) if backlog => handlers::Forward::Staged,
+          Some(Admission::Admitted { .. }) => handlers::Forward::Direct,
+          _ => handlers::Forward::Refused,
+        }
+      };
       let (alive, delivered) = handlers::handle_set_activity(
         &event,
         slot.query_client_id.as_deref(),
         &slot.responder,
         sink,
-        // Clears always forward; publications only when admitted.
-        is_clear || matches!(admission, Some(Admission::Admitted { .. })),
+        pending_clears,
+        forward,
       )
       .await;
       if delivered {
@@ -713,7 +911,7 @@ async fn on_message(
   };
   if !alive {
     tracing::info!("[transport-ws] Client {id} send failed, pruning");
-    remove_and_clear(id, clients, total, sink).await;
+    remove_and_clear(id, clients, total, sink, pending_clears).await;
   }
 }
 
@@ -782,6 +980,103 @@ mod tests {
     });
     let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
     assert!(!sink.emit_clear_retry(cmd, deadline).await);
+    assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
+  }
+
+  #[test]
+  fn staged_clears_stay_bounded_and_counted() {
+    let (tx, _rx) = mpsc::channel::<ActivityCmd>(1);
+    let sink = Sink {
+      tx,
+      dropped: Arc::new(AtomicU64::new(0)),
+    };
+    let pending = Mutex::new(Vec::new());
+    for pid in 0..(MAX_PENDING_CLEARS + 5) as u64 {
+      sink.stage_clear(
+        &pending,
+        handlers::clear_for_slot(&handlers::PublishedSlot {
+          app_id: None,
+          pid,
+          nonce: Value::Null,
+        }),
+      );
+    }
+    // Bounded history, and every shed clear counted (never silent).
+    assert!(pending.lock().unwrap().len() <= MAX_PENDING_CLEARS);
+    assert_eq!(sink.dropped.load(Ordering::Relaxed), 5);
+  }
+
+  #[tokio::test]
+  async fn flush_preserves_order_and_stops_when_full() {
+    // Cap-1 sink held full by a filler: flush delivers nothing, staged intact.
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.send_timeout(
+      handlers::clear_for_slot(&handlers::PublishedSlot {
+        app_id: None,
+        pid: 1,
+        nonce: Value::Null,
+      }),
+      SINK_SEND_TIMEOUT,
+    )
+    .await
+    .expect("filler");
+    let sink = Sink {
+      tx,
+      dropped: Arc::new(AtomicU64::new(0)),
+    };
+    let pending = Mutex::new(Vec::new());
+    for pid in [7u64, 8, 9] {
+      sink.stage_clear(
+        &pending,
+        handlers::clear_for_slot(&handlers::PublishedSlot {
+          app_id: None,
+          pid,
+          nonce: Value::Null,
+        }),
+      );
+    }
+    sink.flush_pending(&pending);
+    assert_eq!(pending.lock().unwrap().len(), 3);
+    // Free slots one by one: staged clears land oldest-first.
+    for pid in [1u64, 7, 8] {
+      let cmd = rx.try_recv().expect("slot frees in order");
+      assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(pid));
+      sink.flush_pending(&pending);
+    }
+    assert!(pending.lock().unwrap().is_empty());
+    let last = rx.try_recv().expect("final staged clear");
+    assert_eq!(last.args.as_ref().and_then(|a| a.pid), Some(9));
+    assert_eq!(sink.dropped.load(Ordering::Relaxed), 0);
+  }
+
+  #[test]
+  fn expiry_sheds_only_lapsed_entries() {
+    let (tx, _rx) = mpsc::channel::<ActivityCmd>(1);
+    let sink = Sink {
+      tx,
+      dropped: Arc::new(AtomicU64::new(0)),
+    };
+    let pending = Mutex::new(Vec::new());
+    // One long-lapsed entry and one fresh entry, built directly (staging
+    // always stamps `now + budget`, which no deterministic test can outwait).
+    let past = std::time::Instant::now() - Duration::from_secs(1);
+    let future = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
+    for (pid, deadline) in [(1u64, past), (2u64, future)] {
+      pending.lock().unwrap().push(PendingClear {
+        cmd: handlers::clear_for_slot(&handlers::PublishedSlot {
+          app_id: None,
+          pid,
+          nonce: Value::Null,
+        }),
+        deadline,
+      });
+    }
+    sink.expire_pending(&pending);
+    // Only the lapsed entry shed (counted); the fresh one survives with
+    // its own retry window intact.
+    let pending = pending.lock().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].cmd.args.as_ref().and_then(|a| a.pid), Some(2));
     assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
   }
 
