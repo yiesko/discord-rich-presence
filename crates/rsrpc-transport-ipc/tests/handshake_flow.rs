@@ -267,11 +267,21 @@ fn malformed_activity_disturbs_no_presence() {
   let (mut client, mut rx, server) = spawn_server();
   publish_presence(&mut client, &mut rx);
 
-  // No `args` at all: warn-and-skip, exactly like an invalid WS message.
+  // No `args` at all: official-shaped error reply, exactly like an
+  // undecodable frame — and nothing downstream (no clear for any pid).
   write_frame(
     &mut client,
     PacketType::Frame,
     r#"{"cmd":"SET_ACTIVITY","nonce":"n-bad"}"#,
+  );
+  let (_, err_reply) = read_frame(&mut client);
+  assert!(
+    err_reply.contains("\"code\":4005"),
+    "expected 4005, got: {err_reply}"
+  );
+  assert!(
+    err_reply.contains("\"nonce\":\"n-bad\""),
+    "nonce must echo, got: {err_reply}"
   );
   // Drain window: nothing may arrive (no clear for any pid).
   let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);

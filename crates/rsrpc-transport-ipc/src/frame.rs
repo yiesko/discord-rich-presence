@@ -489,11 +489,24 @@ fn handle_set_activity(
     Some(ref args) => args,
     // No `args` at all is malformed input, not a clear: a genuine clear
     // carries `args: {pid, activity: null}` through the normal path below.
-    // Like the WS invalid-message path, warn and change nothing — clearing
-    // tracked pids for garbage would kill live cards on a connection that
-    // stays open (Discord/arRPC never mutate presence on invalid input).
+    // Answer the official-shaped error (lock-step clients hang without a
+    // reply) and change nothing — clearing tracked pids for garbage would
+    // kill live cards on a connection that stays open (Discord/arRPC never
+    // mutate presence on invalid input).
     None => {
       tracing::warn!("[ipc] Invalid activity command, skipping");
+      let resp = encode(
+        PacketType::Frame,
+        &commands::rpc_error(
+          &activity_cmd.cmd,
+          &activity_cmd.nonce,
+          4005,
+          "Missing activity args",
+        ),
+      );
+      if let Err(err) = stream.write_all(&resp) {
+        tracing::debug!("[ipc] Peer gone, dropping reply: {err}");
+      }
       return;
     }
   };
