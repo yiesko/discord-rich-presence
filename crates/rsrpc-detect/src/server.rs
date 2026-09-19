@@ -152,6 +152,9 @@ fn wait_scan(wait_time: Duration) {
 /// [`apply_ignore_list`]). One `HashSet` lookup; empty set early-outs via
 /// the caller's check below (`contains` on empty is already cheap, but the
 /// intent reads explicitly at the call site).
+/// Linux-only caller (`spawn_proc_watcher`): allow dead code elsewhere,
+/// same as [`ProcessServer::should_wake_on_exit`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn exec_hit_ignored(ignored_ids: &HashSet<String>, hit: &ScannedHit) -> bool {
   ignored_ids.contains(hit.entry.id.as_ref())
 }
