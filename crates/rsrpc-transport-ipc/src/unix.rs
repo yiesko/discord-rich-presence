@@ -294,13 +294,26 @@ impl IpcTransport {
 }
 
 impl Drop for IpcTransport {
-  /// Abort a still-running accept task so drops never leak it.
+  /// Best-effort shutdown without awaiting: cancel first so token-aware
+  /// loops observe it, close every live socket (unblocking pumps parked in
+  /// blocking reads, which then emit their disconnect clears), abort the
+  /// accept task, and clean our socket files. Connection tasks are *not*
+  /// aborted here — closing their sockets ends them on their own, with
+  /// clears intact. Best-effort filesystem cleanup (mirrors the legacy
+  /// Drop): never touch foreign files (same shape check inside).
   fn drop(&mut self) {
+    self.token.cancel();
     if let Some(task) = &self.accept_task {
       task.abort();
     }
-    // Best-effort filesystem cleanup (mirrors the legacy Drop): never
-    // touch foreign files (same shape check inside).
+    for (_, stream) in self
+      .live
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .drain(..)
+    {
+      let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
     tracing::info!("[ipc] Cleaning up socket: {}", self.bound_path);
     remove_socket_links(&self.dirs, &self.bound_path);
     let _ = std::fs::remove_file(&self.bound_path);

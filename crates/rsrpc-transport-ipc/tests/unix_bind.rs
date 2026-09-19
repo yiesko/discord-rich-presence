@@ -74,6 +74,58 @@ async fn unusable_primary_dir_falls_through_to_next_candidate() {
   transport.shutdown().await;
 }
 
+/// Dropping without `shutdown()` still clears presence: the drop closes
+/// live sockets (unblocking pumps parked in blocking reads), which then emit their
+/// disconnect clears. The pump threads end on their own; the file cleanup
+/// stays identical to `shutdown()`. Multi-thread runtime: blocking client
+/// I/O must not starve the server tasks on the test thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drop_without_shutdown_still_clears_presence() {
+  let scratch = Scratch::new("drop-clear");
+  let dir = scratch.sub("a");
+
+  let (transport, mut rx) = IpcTransport::bind_with_dirs(user(), vec![dir])
+    .await
+    .unwrap();
+  let mut client = UnixStream::connect(transport.socket_path()).expect("connect");
+  client
+    .set_read_timeout(Some(Duration::from_secs(5)))
+    .expect("timeout");
+  write_frame(
+    &mut client,
+    PacketType::Handshake,
+    r#"{"v":1,"client_id":"game-1"}"#,
+  );
+  let (packet_type, body) = read_frame(&mut client);
+  eprintln!("MARK ready read");
+  assert_eq!(packet_type, 1);
+  assert!(body.contains("READY"), "expected READY, got: {body}");
+
+  write_frame(
+    &mut client,
+    PacketType::Frame,
+    r#"{"cmd":"SET_ACTIVITY","args":{"pid":9,"activity":{"name":"G","type":0}},"nonce":"n9"}"#,
+  );
+  let (_, echo) = read_frame(&mut client);
+  assert!(echo.contains("SET_ACTIVITY"));
+  let cmd = recv_cmd(&mut rx);
+  assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(9));
+
+  // No shutdown: dropping must still unblock the pump and clear pid 9
+  // (the pump stays parked in its read otherwise, holding the card).
+  drop(transport);
+  let clear = recv_cmd(&mut rx);
+  assert_eq!(clear.cmd, "SET_ACTIVITY");
+  assert_eq!(clear.args.as_ref().and_then(|a| a.pid), Some(9));
+  assert!(
+    clear
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none()
+  );
+}
+
 #[tokio::test]
 async fn stale_regular_file_is_reclaimed() {
   let scratch = Scratch::new("stale");

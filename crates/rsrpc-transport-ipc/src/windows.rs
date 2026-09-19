@@ -234,8 +234,13 @@ impl IpcTransport {
 }
 
 impl Drop for IpcTransport {
-  /// Abort a still-running dispatch task so drops never leak it.
+  /// Best-effort shutdown without awaiting: cancel first so token-aware
+  /// loops (dispatch) observe it, then abort the tasks. A pending
+  /// named-pipe read cannot be unblocked from here (no handle for it),
+  /// so its pump still ends on peer disconnect — same as before, but
+  /// everything else now exits through cancellation instead of abort.
   fn drop(&mut self) {
+    self.token.cancel();
     if let Some(task) = &self.accept_task {
       task.abort();
     }
