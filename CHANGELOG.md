@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously a bridge client that died without a clean disconnect (killed
   process, closed browser tab) and only received `INVITE_BROWSER` /
   `DEEP_LINK` events would keep its `Responder` and queued frames pinned in
-  memory forever (`crates/rsrpc-bridge/src/bridge.rs:841`).
+  memory forever (`Shared::broadcast_raw` in `crates/rsrpc-bridge/src/bridge.rs`).
 - WebSocket game-client handlers (`handle_browser_command`,
   `handle_deep_link`, `handle_connections_callback`, `handle_set_activity`)
   now report whether their reply was delivered and the pump

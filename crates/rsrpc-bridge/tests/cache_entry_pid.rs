@@ -1,8 +1,9 @@
 //! Unit tests for replay-cache pid resolution (`cache_entry_pid`).
 //!
-//! Pure function, no runtime: numeric socket ids resolve verbatim,
-//! otherwise the pid rides in the JSON body, pid 0 and garbage resolve
-//! to `None` (never proven dead, never reaped).
+//! Pure function, no runtime. Precedence: the JSON body pid is
+//! authoritative; the numeric socket id is only a fallback when the body
+//! pid is unusable; pid 0 and garbage resolve to `None` (never proven
+//! dead, never reaped).
 
 use rsrpc_bridge::cache_entry_pid;
 use rsrpc_protocol::commands::CachedActivity;
