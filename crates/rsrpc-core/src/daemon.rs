@@ -200,8 +200,11 @@ impl Daemon {
       tracing::info!("[daemon] IPC transport on {}", transport.socket_path());
       ipc_transport = Some((transport, rx));
     }
+    // Each flag disables only its own command class (mapped below); the
+    // transport binds while either class is wanted, and stays down only
+    // when both are off.
     if self.config.enable_websocket_connector || self.config.enable_secondary_events {
-      let ws_config = WsTransportConfig::new(self.config.ws_port_start, self.config.ws_port_end);
+      let ws_config = ws_transport_config(&self.config);
       let (transport, rx) = WsTransport::bind(ws_config, Arc::clone(&user)).await?;
       tracing::info!("[daemon] Game transport on port {}", transport.bound_port());
       game_transport = Some((transport, rx));
@@ -349,6 +352,15 @@ impl Daemon {
   }
 }
 
+/// Map daemon connector flags onto the game transport config: each flag
+/// gates only its own command class (`SET_ACTIVITY` vs secondary
+/// browser/deep-link/callback commands).
+fn ws_transport_config(config: &RPCConfig) -> WsTransportConfig {
+  WsTransportConfig::new(config.ws_port_start, config.ws_port_end)
+    .set_activity(config.enable_websocket_connector)
+    .secondary_events(config.enable_secondary_events)
+}
+
 /// Split an optional bound transport into handle + receiver, or a
 /// pre-closed receiver when the leg is disabled (its pump exits at once).
 fn split_option<T>(
@@ -360,5 +372,35 @@ fn split_option<T>(
       let (_, rx) = mpsc::channel(1);
       (None, rx)
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Each daemon flag disables only its own command class; disabling both
+  /// is expressed by not binding at all (see `start_scanner`).
+  #[test]
+  fn ws_config_maps_each_connector_flag_to_its_class() {
+    let cfg = ws_transport_config(&RPCConfig::default());
+    assert!(cfg.set_activity);
+    assert!(cfg.secondary_events);
+
+    let no_secondary = RPCConfig {
+      enable_secondary_events: false,
+      ..RPCConfig::default()
+    };
+    let cfg = ws_transport_config(&no_secondary);
+    assert!(cfg.set_activity);
+    assert!(!cfg.secondary_events);
+
+    let no_ws = RPCConfig {
+      enable_websocket_connector: false,
+      ..RPCConfig::default()
+    };
+    let cfg = ws_transport_config(&no_ws);
+    assert!(!cfg.set_activity);
+    assert!(cfg.secondary_events);
   }
 }
