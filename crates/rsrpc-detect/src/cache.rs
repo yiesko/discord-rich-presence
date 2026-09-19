@@ -76,15 +76,16 @@ impl ProcessServer {
 
   /// Drop memoized AppIds of pids that died since the last tick: pid
   /// reuse must never serve a stale id. One set build + retain per tick.
-  pub(crate) fn sweep_dead_appids(&self, processes: &[Exec]) -> rsrpc_protocol::error::Result<()> {
+  /// Recovers from a poisoned lock like every other cache access (a dead
+  /// pid set is still better than no sweep at all).
+  pub(crate) fn sweep_dead_appids(&self, processes: &[Exec]) {
     let mut live = FxHashSet::with_capacity_and_hasher(processes.len(), Default::default());
     live.extend(processes.iter().map(|process| process.pid));
     self
       .appid_cache
       .lock()
-      .map_err(|e| rsrpc_protocol::error::RsrpcError::Poisoned("appid_cache", e.to_string()))?
+      .unwrap_or_else(|e| e.into_inner())
       .retain(|pid, _| live.contains(pid));
-    Ok(())
   }
 
   /// Drop one pid's memoized AppId (EXEC: same pid, new image, possibly

@@ -105,14 +105,18 @@ fn benchmark_flood_drop_pipeline(c: &mut Criterion) {
   let mut cmd = sample_command();
   cmd.fix();
   let mut guard = RecentActivities::default();
+  // One timestamp for seeding and every iteration: a fresh `now` per
+  // iteration would eventually age past the dedup window and measure the
+  // admit path instead of the drop path.
+  let seeded_at = std::time::Instant::now();
   {
     let fp = activity_fingerprint(&mut cmd).expect("fingerprint");
-    assert!(!guard.should_drop("123", 42, Some(fp.as_slice()), std::time::Instant::now()));
+    assert!(!guard.should_drop("123", 42, Some(fp.as_slice()), seeded_at));
   }
   c.bench_function("publish_flood_drop", |b| {
     b.iter(|| {
       let fp = activity_fingerprint(black_box(&mut cmd)).expect("fingerprint");
-      black_box(guard.should_drop("123", 42, Some(fp.as_slice()), std::time::Instant::now()))
+      black_box(guard.should_drop("123", 42, Some(fp.as_slice()), seeded_at))
     })
   });
 }

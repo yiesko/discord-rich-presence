@@ -1124,7 +1124,7 @@ impl ProcessServer {
     // Drop memoized AppIds of dead pids (pid reuse must never serve a
     // stale id): one set build + retain per tick, replacing hundreds of
     // kilobyte environ re-reads.
-    self.sweep_dead_appids(&processes)?;
+    self.sweep_dead_appids(&processes);
 
     let mut reversed_path = String::with_capacity(256);
     // Variant scratch space, reused for every process: the scan allocates
