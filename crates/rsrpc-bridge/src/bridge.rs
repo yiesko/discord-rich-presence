@@ -472,6 +472,13 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
                   for id in dead {
                     tracing::warn!("[bridge] Pruning dead consumer {id}");
                     clients.remove(&id);
+                    // Paired table: prune both or dead ids pin protocol
+                    // entries forever (same as the broadcast prunes).
+                    shared
+                      .consumer_protocol
+                      .lock()
+                      .unwrap_or_else(|e| e.into_inner())
+                      .remove(&id);
                   }
                 }
               }
