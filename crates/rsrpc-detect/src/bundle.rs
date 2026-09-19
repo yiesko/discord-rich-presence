@@ -485,13 +485,15 @@ mod tests {
   }
 
   /// Same guard in the Proton fallback: an empty win32 name leaves no automaton.
+  /// (`_bundle`: the assertion is Linux-only, so other platforms must not
+  /// see an unused binding under `-D warnings`.)
   #[test]
   fn proton_builder_ignores_empty_names() {
-    let bundle =
+    let _bundle =
       build_bundle(vec![entry_with_exes("1", OsName::Win32, &[""])], vec![]).expect("builds");
     #[cfg(target_os = "linux")]
     assert!(
-      bundle.proton_ac.is_none(),
+      _bundle.proton_ac.is_none(),
       "empty name must not arm the Proton automaton"
     );
   }

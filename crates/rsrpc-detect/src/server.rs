@@ -1310,6 +1310,7 @@ mod tests {
     unpark_scan_wake(&Arc::new(Mutex::new(None)));
   }
 
+  /// Backoff stretches idle ticks only while the watcher is confirmed live.
   #[test]
   fn backoff_applies_only_with_live_watcher() {
     use std::time::Duration;
@@ -1323,6 +1324,7 @@ mod tests {
     assert_eq!(scan_cadence(base, 4, true), Duration::from_secs(30));
   }
 
+  /// Refused bundle swaps report failure so validators are never committed.
   #[test]
   fn refused_bundle_swap_reports_failure() {
     // Empty input and failing builds must report failure so the refresh
@@ -1333,6 +1335,7 @@ mod tests {
     assert!(server.update_main_detectables(vec![custom_entry()]));
   }
 
+  /// Concurrent appends and refreshes lose neither side (writer lock).
   #[test]
   fn concurrent_writers_preserve_both_sides() {
     // Refresh (`update_main_detectables`) and override rebuilds

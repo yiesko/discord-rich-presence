@@ -42,6 +42,7 @@ fn trim_keeps_only_scanner_fields() {
   assert_eq!(entry["id"], "9");
   assert_eq!(entry["aliases"], serde_json::json!(["Alt"]));
   assert_eq!(entry["executables"][0]["arguments"], "--x");
+  assert!(entry["executables"][0].get("extra").is_none());
   assert!(entry.get("description").is_none());
   assert!(entry.get("extra").is_none());
   // Empty distributor dropped, steam kept.
