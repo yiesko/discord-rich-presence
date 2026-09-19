@@ -146,6 +146,7 @@ fn checked_send_reports_closed_receiver() {
   assert_eq!(tx.gauge().dropped_total(), 0);
 }
 
+/// The census line carries reason, RSS and every count field.
 #[test]
 fn format_resource_stats_mentions_reason_and_fields() {
   // 40 MiB exactly: deterministic rendering check.

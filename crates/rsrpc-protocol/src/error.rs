@@ -45,7 +45,7 @@ pub enum RsrpcError {
 
   /// WebSocket server bind failed on every candidate port without a
   /// capturable OS error (empty range / listener-only failures).
-  #[error("websocket bind failed on ports {start}-{end}: all in use")]
+  #[error("websocket bind failed on ports {start}-{end}: no candidate could be bound")]
   WsExhausted { start: u16, end: u16 },
 
   /// Bridge listener bind failed on every candidate port.

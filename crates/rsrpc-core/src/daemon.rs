@@ -14,7 +14,7 @@ use rsrpc_detect::db::DetectableActivity;
 use rsrpc_detect::refresh::RefreshConfig;
 use rsrpc_detect::server::ProcessServer;
 use rsrpc_detect::types::{ProcessCallback, ProcessEventListeners, ProcessScanState};
-use rsrpc_protocol::error::Result;
+use rsrpc_protocol::error::{Result, RsrpcError};
 use rsrpc_telemetry::QueueGauge;
 use rsrpc_transport_ipc::IpcTransport;
 use rsrpc_transport_ws::{WsTransport, WsTransportConfig};
@@ -158,6 +158,12 @@ impl Daemon {
     summarize(&self.detectable)
   }
 
+  /// Held database entry count, without materializing the summary.
+  #[must_use]
+  pub fn database_len(&self) -> usize {
+    self.detectable.len()
+  }
+
   /// Run the daemon until `shutdown` completes: scanner threads, both
   /// transports and the bridge on the caller's Tokio runtime, torn down
   /// in reverse order afterwards.
@@ -191,7 +197,7 @@ impl Daemon {
     // a pump thread onto a bounded channel. Started first so game STARTs
     // during transport binds are still observed. The handle lives in this
     // frame until shutdown documents the ownership.
-    let (_scanner, proc_rx, proc_tx) = self.start_scanner(db, staged).await;
+    let (_scanner, proc_rx, proc_tx) = self.start_scanner(db, staged).await?;
     let mut ipc_transport = None;
     let mut game_transport = None;
 
@@ -281,21 +287,31 @@ impl Daemon {
   /// The automaton build runs in `spawn_blocking` (seconds of CPU);
   /// the pump thread translates scanner events and exits when the bridge
   /// drops the channel (shutdown).
+  ///
+  /// # Errors
+  ///
+  /// [`RsrpcError::InvalidConfig`] for a zero `scan_interval_secs` (a zero
+  /// cadence would hot-spin the scan loop): checked before the build.
   async fn start_scanner(
     &self,
     db: Vec<Arc<DetectableActivity>>,
     staged: Vec<DetectableActivity>,
-  ) -> (
+  ) -> Result<(
     Option<ProcessServer>,
     mpsc::Receiver<ProcInput>,
     Option<mpsc::Sender<ProcInput>>,
-  ) {
+  )> {
+    if self.config.enable_process_scanner && self.config.scan_interval_secs == 0 {
+      return Err(RsrpcError::InvalidConfig(
+        "scan_interval_secs must be non-zero",
+      ));
+    }
     let (proc_tx, proc_rx) = mpsc::channel(PROC_CHANNEL_BOUND);
     if !self.config.enable_process_scanner {
       // No scanning: pre-closed stream, the bridge pump exits at once.
       // (The legacy no-scan path never built automata either.)
       drop(proc_tx);
-      return (None, proc_rx, None);
+      return Ok((None, proc_rx, None));
     }
     let (scan_tx, scan_rx) = QueueGauge::pair();
     let refresh = RefreshConfig {
@@ -348,7 +364,7 @@ impl Daemon {
         }
       }
     });
-    (Some(server), proc_rx, Some(census_tx))
+    Ok((Some(server), proc_rx, Some(census_tx)))
   }
 }
 

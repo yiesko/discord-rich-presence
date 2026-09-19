@@ -23,7 +23,7 @@ fn bind_exhaustion_names_range() {
       end: 6472
     }
     .to_string(),
-    "websocket bind failed on ports 6463-6472: all in use"
+    "websocket bind failed on ports 6463-6472: no candidate could be bound"
   );
   assert_eq!(
     RsrpcError::BridgeBind {

@@ -13,5 +13,6 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     cmd.fix();
-    let _ = rsrpc_protocol::commands::cached_activity(&mut cmd);
+    // No fingerprint: exercises the always-changed path, like a first publish.
+    let _ = rsrpc_protocol::commands::cached_activity(&mut cmd, None);
 });

@@ -462,11 +462,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
   // Boot inventory: which database is live and how big it is. A silent
   // daemon is undiagnosable without it (a degenerate fetch used to pass
   // with only benign-looking counts downstream).
-  let entries = daemon.database_summary();
   println!(
     "[rsrpc] Database: {} ({} entries)",
     db_source,
-    entries.len()
+    daemon.database_len()
   );
 
   // Staged BEFORE any branch below — so --list-detected sees exactly
