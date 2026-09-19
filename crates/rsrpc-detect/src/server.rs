@@ -147,6 +147,38 @@ fn wait_scan(wait_time: Duration) {
   std::thread::park_timeout(wait_time);
 }
 
+/// Whether an EXEC fast-path hit must be skipped: ignored app IDs behave
+/// as absent everywhere (parity with the polling path's
+/// [`apply_ignore_list`]). One `HashSet` lookup; empty set early-outs via
+/// the caller's check below (`contains` on empty is already cheap, but the
+/// intent reads explicitly at the call site).
+fn exec_hit_ignored(ignored_ids: &HashSet<String>, hit: &ScannedHit) -> bool {
+  ignored_ids.contains(hit.entry.id.as_ref())
+}
+
+/// Whether a failed `event_sender.send` must end the calling thread.
+///
+/// The sender wraps an unbounded `std::mpsc`: `Err` means the receiver is
+/// gone (shutdown), never transient backpressure — retrying would spin
+/// `scan_for_processes` forever after shutdown. The EXEC fast path already
+/// breaks; the polling loop must do the same.
+fn should_exit_on_send_error<T>(result: &Result<(), std::sync::mpsc::SendError<T>>) -> bool {
+  result.is_err()
+}
+
+/// `(app id, pid)` pairs present in the previous snapshot but absent now.
+/// Exact-tuple matching (not id-only): a pid replacement reports the old
+/// pair as removed before the new detection is published, so the bridge
+/// rotates the card instead of keeping a stale pid. Tables are tiny
+/// (co-running games), so the quadratic scan allocates nothing.
+fn removed_slots(previous: &[(String, u64)], current: &[(String, u64)]) -> Vec<(String, u64)> {
+  previous
+    .iter()
+    .filter(|pair| !current.contains(pair))
+    .cloned()
+    .collect()
+}
+
 /// Idle-stretched cadence: base × 2^idle_ticks, capped at 30s
 /// (5s → 10s → 20s → 30s at the default base). Overflow-safe.
 pub fn idle_wait(base: Duration, idle_ticks: u32) -> Duration {
@@ -196,6 +228,15 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
             &mut reversed_path,
             &mut obs_open,
           ) {
+            // Coexistence parity with the polling path: ignored IDs never
+            // publish, even on the event-driven fast path.
+            if exec_hit_ignored(&dispatch.ignored_ids, &hit) {
+              tracing::debug!(
+                "[Process Scanner] exec event: pid {pid} ignored ({}), skipping",
+                hit.entry.id.as_ref() as &str
+              );
+              continue;
+            }
             let game_pid = hit.pid;
             tracing::debug!(
               "[Process Scanner] exec event: pid {pid} matched {}",
@@ -215,11 +256,11 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
               .store(true, std::sync::atomic::Ordering::Release);
             // Receiver gone means shutdown: end the thread, polling dies
             // with the daemon anyway.
-            if dispatch
-              .event_sender
-              .send(ProcessDetectedEvent { hit: Some(hit) })
-              .is_err()
-            {
+            if should_exit_on_send_error(
+              &dispatch
+                .event_sender
+                .send(ProcessDetectedEvent::detected(hit)),
+            ) {
               break;
             }
           }
@@ -797,30 +838,46 @@ impl ProcessServer {
           .scan_dirty
           .swap(false, std::sync::atomic::Ordering::AcqRel);
         let emit = changed || forced;
+        // Slots vanished while others remain (A+B -> B): clear exactly
+        // those before republishing the rest. The empty-table clear below
+        // only fires when nothing remains, so without this the removed
+        // game would ghost while another continues.
+        let removed = if emit {
+          removed_slots(&last_emitted, &snapshot)
+        } else {
+          Vec::new()
+        };
         if emit {
           last_emitted = snapshot;
+        }
+        // A failed send means the receiver is gone (shutdown): the channel
+        // is unbounded, so there is no transient backpressure to retry.
+        // End the thread instead of spinning `scan_for_processes` forever.
+        if emit && !removed.is_empty() {
+          for (id, pid) in removed {
+            if should_exit_on_send_error(
+              &clone
+                .event_sender
+                .send(ProcessDetectedEvent::removed(id.into_boxed_str(), pid)),
+            ) {
+              tracing::warn!("[Process Scanner] Event receiver gone, shutting down scan");
+              return;
+            }
+          }
         }
         // Forward the changed table, one event per slot. Downstream
         // publishes per app id and dedups repeats, so co-running games
         // each own their card instead of only the first.
         if emit && !detected.is_empty() {
-          let mut send_failed = false;
           for game in &detected {
-            if clone
-              .event_sender
-              .send(ProcessDetectedEvent {
-                hit: Some(game.clone()),
-              })
-              .is_err()
-            {
-              tracing::warn!("[Process Scanner] Event receiver gone, retrying scan");
-              send_failed = true;
-              break;
+            if should_exit_on_send_error(
+              &clone
+                .event_sender
+                .send(ProcessDetectedEvent::detected(game.clone())),
+            ) {
+              tracing::warn!("[Process Scanner] Event receiver gone, shutting down scan");
+              return;
             }
-          }
-          if send_failed {
-            wait_scan(wait_time);
-            continue;
           }
         }
 
@@ -828,13 +885,12 @@ impl ProcessServer {
         // but only on the transition into emptiness (the bridge clears
         // once and then ignores further nulls the same way). A forced
         // emission of the empty table carries the EXEC-hole clear.
-        if emit && detected.is_empty() {
-          let cleared = clone.event_sender.send(ProcessDetectedEvent { hit: None });
-          if cleared.is_err() {
-            tracing::warn!("[Process Scanner] Event receiver gone, retrying scan");
-            wait_scan(wait_time);
-            continue;
-          }
+        if emit
+          && detected.is_empty()
+          && should_exit_on_send_error(&clone.event_sender.send(ProcessDetectedEvent::cleared()))
+        {
+          tracing::warn!("[Process Scanner] Event receiver gone, shutting down scan");
+          return;
         }
 
         // Idle backoff: consecutive empty ticks stretch the cadence
@@ -1074,6 +1130,54 @@ mod tests {
         .expect("fixture parses")
       })
       .collect()
+  }
+
+  #[test]
+  fn removed_slots_reports_only_vanished_ids() {
+    let previous = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+    let current = vec![("b".to_string(), 2)];
+    assert_eq!(
+      removed_slots(&previous, &current),
+      vec![("a".to_string(), 1)]
+    );
+    // Identical tables: nothing to clear (downstream dedups repeats).
+    assert!(removed_slots(&current, &current).is_empty());
+    // Empty current: full-table clear path handles it, not per-slot.
+    // `removed_slots` still reports all previous as vanished; the caller
+    // only uses it when `detected` is non-empty (see emission block).
+    assert_eq!(removed_slots(&previous, &[]).len(), 2);
+    // Pid replacement rotates the card: same id, new pid reports the old
+    // pair as removed so the bridge clears before republishing.
+    let restarted = vec![("a".to_string(), 9), ("b".to_string(), 2)];
+    assert_eq!(
+      removed_slots(&previous, &restarted),
+      vec![("a".to_string(), 1)]
+    );
+  }
+
+  #[test]
+  fn closed_queue_exits_scan_instead_of_retrying() {
+    // `GaugeSender` wraps an unbounded `std::mpsc`: `Err` means the
+    // receiver is gone (shutdown), never transient backpressure.
+    let (tx, rx) = rsrpc_telemetry::QueueGauge::pair();
+    drop(rx);
+    let failed: Result<(), std::sync::mpsc::SendError<ProcessDetectedEvent>> =
+      tx.send(ProcessDetectedEvent::cleared());
+    assert!(failed.is_err());
+    assert!(should_exit_on_send_error(&failed));
+  }
+
+  #[test]
+  fn exec_path_skips_ignored_ids() {
+    use std::collections::HashSet;
+    let hit = ScannedHit::stamp(
+      std::sync::Arc::new(ScannedEntry::from_activity(&custom_entry())),
+      4242,
+    );
+    let ignored: HashSet<String> = ["777".to_string()].into_iter().collect();
+    assert!(exec_hit_ignored(&ignored, &hit));
+    let empty: HashSet<String> = HashSet::new();
+    assert!(!exec_hit_ignored(&empty, &hit));
   }
 
   #[test]

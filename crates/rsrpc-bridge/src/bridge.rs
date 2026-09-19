@@ -625,7 +625,13 @@ async fn proc_pump(
         if let Some(reason) = table_transition(had_games, &input) {
           tracing::info!("{}", shared.census_line(reason));
         }
-        had_games = matches!(input, ProcInput::Detected(_));
+        // Per-slot churn stays quiet: only empty<->non-empty edges log.
+        // `Removed` preserves occupancy (other games may remain).
+        had_games = match &input {
+          ProcInput::Detected(_) => true,
+          ProcInput::Cleared => false,
+          ProcInput::Removed(..) => had_games,
+        };
         match input {
       ProcInput::Cleared => {
         shared.handoff.lock().unwrap_or_else(|e| e.into_inner()).note_scan(None);
@@ -702,6 +708,43 @@ async fn proc_pump(
         );
         tracing::debug!("[bridge] Publishing generic presence for activity: {}", game.name);
         shared.broadcast_activity(generic_payload(&game), SocketId::from(&game.id));
+      }
+      ProcInput::Removed(app_id, pid) => {
+        // One `(app, pid)` pair vanished while others remain: clear exactly
+        // this card. The pid gates both removals: a stale event (pid reuse,
+        // EXEC-vs-poll race) must never clear a newer detection that already
+        // re-armed the slot under a fresh pid.
+        // Suppressed slots (live IPC owner) show no generic card, so there
+        // is nothing to broadcast — but scanner memory must still drop a
+        // matching slot, or a later IPC clear would resurrect stale state.
+        shared
+          .handoff
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .note_remove(app_id.as_ref(), pid);
+        let outstanding = shared
+          .last_process
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .get(&app_id)
+          .is_some_and(|known| *known == pid)
+          .then(|| {
+            shared
+              .last_process
+              .lock()
+              .unwrap_or_else(|e| e.into_inner())
+              .remove(&app_id)
+          })
+          .flatten();
+        if let Some(pid) = outstanding {
+          tracing::info!("[bridge] Clearing removed game slot");
+          shared.broadcast_activity(
+            commands::empty_cached(pid, SocketId::from(&app_id)),
+            SocketId::from(&app_id),
+          );
+        } else {
+          tracing::debug!("[bridge] Removed slot had no matching generic card");
+        }
       }
         }
       }
@@ -1373,5 +1416,14 @@ mod tests {
       Some("game-end")
     );
     assert_eq!(table_transition(false, &ProcInput::Cleared), None);
+    // Per-slot churn stays quiet in both occupancy states.
+    assert_eq!(
+      table_transition(true, &ProcInput::Removed(AppId::from("1"), 7)),
+      None
+    );
+    assert_eq!(
+      table_transition(false, &ProcInput::Removed(AppId::from("1"), 7)),
+      None
+    );
   }
 }

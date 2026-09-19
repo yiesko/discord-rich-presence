@@ -327,14 +327,17 @@ impl Daemon {
     let census_tx = proc_tx.clone();
     std::thread::spawn(move || {
       while let Ok(event) = scan_rx.recv() {
-        let input = match event.hit {
-          Some(hit) => ProcInput::Detected(ScannedGame {
+        let input = match event {
+          rsrpc_detect::ProcessDetectedEvent::Detected(hit) => ProcInput::Detected(ScannedGame {
             id: rsrpc_types::AppId::from(&*hit.entry.id),
             name: hit.entry.name.to_string(),
             pid: hit.pid,
             start: hit.start,
           }),
-          None => ProcInput::Cleared,
+          rsrpc_detect::ProcessDetectedEvent::Cleared => ProcInput::Cleared,
+          rsrpc_detect::ProcessDetectedEvent::Removed { id, pid } => {
+            ProcInput::Removed(rsrpc_types::AppId::from(&*id), pid)
+          }
         };
         if proc_tx.blocking_send(input).is_err() {
           break;

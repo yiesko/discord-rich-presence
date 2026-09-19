@@ -24,11 +24,18 @@ pub struct ScannedGame {
   pub start: u64,
 }
 
-/// Scanner input to the bridge: one game appeared, or the table is empty.
+/// Scanner input to the bridge: one game appeared, one slot vanished, or
+/// the table is empty.
 #[derive(Clone, Debug)]
 pub enum ProcInput {
   /// A game was detected (re-emits are deduped downstream).
   Detected(ScannedGame),
+  /// A `(app id, pid)` pair present in the previous snapshot but absent
+  /// now, while others remain: clear exactly this card without flapping
+  /// co-running games. The pid gates the removal (see `note_remove`): a
+  /// stale removal must never clear a newer detection of the same slot
+  /// (pid reuse, EXEC-vs-poll race).
+  Removed(AppId, u64),
   /// No games detected: clear every outstanding generic publication.
   Cleared,
 }
@@ -125,6 +132,22 @@ impl HandoffState {
       true
     } else {
       false
+    }
+  }
+
+  /// Forget one scanner slot (per-slot clear while others remain).
+  /// Removes only when the stored pid matches the removal event: a stale
+  /// removal (pid reuse, EXEC-vs-poll race) must not drop a newer scan.
+  /// Returns the game previously remembered there, if released.
+  pub fn note_remove(&mut self, app_id: &str, pid: u64) -> Option<ScannedGame> {
+    if self
+      .last_scans
+      .get(app_id)
+      .is_some_and(|known| known.pid == pid)
+    {
+      self.last_scans.remove(app_id)
+    } else {
+      None
     }
   }
 
@@ -231,6 +254,21 @@ mod tests {
     assert!(handoff.note_clear(game.id.as_ref(), 77));
     assert!(!handoff.is_suppressed(game.id.as_ref()));
     assert_eq!(handoff.resume_for(game.id.as_ref()), Some(game));
+  }
+
+  #[test]
+  fn per_slot_remove_forgets_only_that_slot() {
+    let mut handoff = HandoffState::default();
+    handoff.note_scan(Some(game("1")));
+    handoff.note_scan(Some(game("2")));
+    assert!(handoff.resume_for("1").is_some());
+    // Stale pid never drops a newer scan.
+    assert!(handoff.note_remove("1", 9999).is_none());
+    assert!(handoff.resume_for("1").is_some());
+    assert!(handoff.note_remove("1", 1234).is_some());
+    assert_eq!(handoff.resume_for("1"), None);
+    assert!(handoff.resume_for("2").is_some());
+    assert!(handoff.note_remove("missing", 1).is_none());
   }
 
   #[test]

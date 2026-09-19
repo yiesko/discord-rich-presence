@@ -26,11 +26,47 @@ pub struct Exec {
   pub arguments: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct ProcessDetectedEvent {
-  /// Classified game, or `None` for the empty-table clear event (the old
-  /// `id == "null"` convention, now explicit).
-  pub hit: Option<ScannedHit>,
+/// Scanner event: one game appeared, the whole table went empty, or one
+/// previously-announced slot vanished while others remain.
+///
+/// Enum (not `Option`) because the states are mutually exclusive: a
+/// per-slot clear must not be mistaken for a full-table clear downstream.
+#[derive(Clone, Debug)]
+pub enum ProcessDetectedEvent {
+  /// One classified game (re-emits are deduped downstream).
+  Detected(ScannedHit),
+  /// No games detected: clear every outstanding generic publication.
+  Cleared,
+  /// A slot present in the previous non-empty snapshot but absent now.
+  /// Carries the last-known app id + pid so the bridge can clear exactly
+  /// that card without flapping co-running games.
+  Removed {
+    /// Application id of the vanished slot.
+    id: Box<str>,
+    /// Last-known pid (for the empty payload + logs).
+    pid: u64,
+  },
+}
+
+impl ProcessDetectedEvent {
+  /// One classified game.
+  #[must_use]
+  pub fn detected(hit: ScannedHit) -> Self {
+    Self::Detected(hit)
+  }
+
+  /// The empty-table clear event (the old `id == "null"` convention, now
+  /// explicit).
+  #[must_use]
+  pub fn cleared() -> Self {
+    Self::Cleared
+  }
+
+  /// A per-slot clear for a vanished snapshot entry.
+  #[must_use]
+  pub fn removed(id: Box<str>, pid: u64) -> Self {
+    Self::Removed { id, pid }
+  }
 }
 
 /// One executable as the scanner needs it: matcher inputs only. Slimmer

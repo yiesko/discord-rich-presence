@@ -13,3 +13,5 @@ pub mod refresh;
 pub mod scan;
 pub mod server;
 pub mod types;
+
+pub use types::ProcessDetectedEvent;
