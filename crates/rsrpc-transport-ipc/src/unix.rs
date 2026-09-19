@@ -398,7 +398,12 @@ async fn accept_loop(
         let (tok_stream, _) = match accepted {
           Ok(pair) => pair,
           Err(err) => {
+            // Persistent readiness errors (fd exhaustion) would otherwise
+            // hot-spin this loop: back off briefly, like the Windows
+            // WouldBlock poll below. Cancelled tokens still break promptly
+            // at the top of the next iteration.
             tracing::warn!("[ipc] Accept failed: {err}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
           }
         };
