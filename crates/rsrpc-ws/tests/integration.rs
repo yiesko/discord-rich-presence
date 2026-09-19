@@ -285,7 +285,6 @@ async fn shutdown_with_open_conns_completes() {
   assert!(hub.next_event().await.is_none());
 }
 
-/// Unread outboxes report `Full` under flood (never grow, never block).
 /// Zero bounds are rejected with a config error, never a channel panic.
 #[tokio::test]
 async fn bind_rejects_zero_bounds_without_panic() {
