@@ -1,13 +1,11 @@
-//! Tests for user override loading (pure file IO under unique temp dirs).
-
-#[path = "common/mod.rs"]
-mod common;
+//! Tests for user override loading (pure file IO under unique temp dirs;
+//! no process-environment mutation anywhere: env-dependent paths take an
+//! explicit environment source).
 
 use std::path::PathBuf;
 
-use common::{EnvRestore, lock_env};
 use rsrpc_core::overrides::{
-  default_dir_path, default_file_path, load_dir, load_file, parse_overrides,
+  default_dir_path_with, default_file_path_with, load_dir, load_file, parse_overrides,
 };
 
 const GAME_ARRAY: &str = r#"[{
@@ -64,21 +62,24 @@ fn load_dir_merges_sorted_and_skips_bad_files() {
 
 #[test]
 fn default_paths_honor_env() {
-  // Save, override, restore: env is process-global (serialized via
-  // lock_env). EnvRestore guards restore on drop, panic or not (lock
-  // declared first, drops last).
-  let _guard = lock_env();
-  let _env_file = EnvRestore::set("RSRPC_OVERRIDES_FILE", "/tmp/custom-overrides.json");
-  let _env_dir = EnvRestore::set("RSRPC_OVERRIDES_DIR", "/tmp/custom-overrides.d");
+  // Explicit environment source: no process-global mutation, so no lock,
+  // no restore, no cross-test interference by construction.
+  let env = |key: &str| match key {
+    "RSRPC_OVERRIDES_FILE" => Some("/tmp/custom-overrides.json".to_string()),
+    "RSRPC_OVERRIDES_DIR" => Some("/tmp/custom-overrides.d".to_string()),
+    _ => None,
+  };
   assert_eq!(
-    default_file_path(),
+    default_file_path_with(&env),
     PathBuf::from("/tmp/custom-overrides.json")
   );
-  assert_eq!(default_dir_path(), PathBuf::from("/tmp/custom-overrides.d"));
-  drop(_env_file);
-  drop(_env_dir);
+  assert_eq!(
+    default_dir_path_with(&env),
+    PathBuf::from("/tmp/custom-overrides.d")
+  );
   // Without env: XDG-shaped defaults (values depend on the machine, shape
   // is what matters).
-  assert!(default_file_path().ends_with("rsrpc/overrides.json"));
-  assert!(default_dir_path().ends_with("rsrpc/overrides.d"));
+  let empty = |_: &str| None;
+  assert!(default_file_path_with(&empty).ends_with("rsrpc/overrides.json"));
+  assert!(default_dir_path_with(&empty).ends_with("rsrpc/overrides.d"));
 }

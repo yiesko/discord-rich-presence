@@ -77,11 +77,11 @@ pub fn load_dir(dir: &Path) -> Vec<DetectableActivity> {
   overrides
 }
 
-fn config_dir() -> PathBuf {
-  std::env::var("XDG_CONFIG_HOME")
+fn config_dir_with(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+  env("XDG_CONFIG_HOME")
     .map(PathBuf::from)
-    .unwrap_or_else(|_| {
-      let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    .unwrap_or_else(|| {
+      let home = env("HOME").unwrap_or_else(|| ".".to_string());
       PathBuf::from(home).join(".config")
     })
     .join("rsrpc")
@@ -92,18 +92,34 @@ fn config_dir() -> PathBuf {
 /// else `~/.config/rsrpc/overrides.json`.
 #[must_use]
 pub fn default_file_path() -> PathBuf {
-  if let Ok(custom) = std::env::var("RSRPC_OVERRIDES_FILE") {
+  default_file_path_with(&|key| std::env::var(key).ok())
+}
+
+/// Same as [`default_file_path`], with an explicit environment source
+/// instead of the process environment (hermetic tests, embedders that
+/// virtualize configuration).
+#[must_use]
+pub fn default_file_path_with(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+  if let Some(custom) = env("RSRPC_OVERRIDES_FILE") {
     return PathBuf::from(custom);
   }
-  config_dir().join("overrides.json")
+  config_dir_with(env).join("overrides.json")
 }
 
 /// Default directory location: `$RSRPC_OVERRIDES_DIR`, else
 /// `$XDG_CONFIG_HOME/rsrpc/overrides.d`, else `~/.config/rsrpc/overrides.d`.
 #[must_use]
 pub fn default_dir_path() -> PathBuf {
-  if let Ok(custom) = std::env::var("RSRPC_OVERRIDES_DIR") {
+  default_dir_path_with(&|key| std::env::var(key).ok())
+}
+
+/// Same as [`default_dir_path`], with an explicit environment source
+/// instead of the process environment (hermetic tests, embedders that
+/// virtualize configuration).
+#[must_use]
+pub fn default_dir_path_with(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
+  if let Some(custom) = env("RSRPC_OVERRIDES_DIR") {
     return PathBuf::from(custom);
   }
-  config_dir().join("overrides.d")
+  config_dir_with(env).join("overrides.d")
 }
