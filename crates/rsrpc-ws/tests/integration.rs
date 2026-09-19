@@ -303,6 +303,61 @@ async fn bind_rejects_zero_bounds_without_panic() {
   }
 }
 
+/// Rejection backlog is bounded: over-limit half-open peers past
+/// `MAX_PENDING_REJECTS` are dropped at once instead of piling 10s
+/// handshake tasks no shutdown can reach.
+#[tokio::test]
+async fn rejection_backlog_does_not_pile_handshake_tasks() {
+  use tokio::io::AsyncReadExt;
+  const PROBES: usize = rsrpc_ws::MAX_PENDING_REJECTS + 4;
+  let config = ServerConfig::builder("127.0.0.1:0".parse().unwrap())
+    .max_connections(1)
+    .build()
+    .unwrap();
+  let (server, mut hub) = Server::bind(config).await.unwrap();
+  let addr = server.local_addr();
+
+  // Fill the single connection slot so every probe takes the reject path.
+  let _held = connect(addr).await;
+  match next_event(&mut hub).await {
+    Event::Connect(_, _) => {}
+    other => panic!("expected Connect, got {other:?}"),
+  }
+
+  // Half-open raws: TCP completes, then silence (each live rejection parks
+  // up to HANDSHAKE_TIMEOUT waiting for handshake bytes that never come).
+  let mut raws = Vec::new();
+  for _ in 0..PROBES {
+    raws.push(tokio::net::TcpStream::connect(addr).await.unwrap());
+  }
+
+  // Dropped peers resolve fast (reset/close); held ones pend. Poll until
+  // the surplus is visibly gone or the deadline hits.
+  let deadline = std::time::Instant::now() + Duration::from_secs(5);
+  let mut dropped = 0;
+  let mut pending = raws;
+  while dropped < PROBES - rsrpc_ws::MAX_PENDING_REJECTS {
+    assert!(
+      std::time::Instant::now() < deadline,
+      "rejection backlog must drop the surplus, dropped {dropped}"
+    );
+    let mut still_pending = Vec::new();
+    for mut raw in pending {
+      let mut byte = [0u8; 1];
+      match tokio::time::timeout(Duration::from_millis(100), raw.read(&mut byte)).await {
+        Ok(_) => dropped += 1,
+        Err(_) => still_pending.push(raw),
+      }
+    }
+    pending = still_pending;
+  }
+
+  tokio::time::timeout(TIMEOUT, server.shutdown())
+    .await
+    .expect("shutdown completes with rejections in flight");
+}
+
+/// Unread outboxes report `Full` under flood (never grow, never block).
 #[tokio::test]
 async fn slow_consumer_try_send_reports_full() {
   let config = ServerConfig::builder("127.0.0.1:0".parse().unwrap())

@@ -48,6 +48,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper bound for graceful connection drain in [`Server::shutdown`].
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Cap on concurrent over-limit rejections (handshake-then-1013 tasks).
+/// Past this, peers are dropped at once: unbounded handshake tasks would
+/// pile up under connection floods with no shutdown able to reach them.
+pub const MAX_PENDING_REJECTS: usize = 8;
+
 /// Async WebSocket server handle.
 ///
 /// Obtained from [`bind`](Self::bind); owns the accept task and every
@@ -108,6 +113,7 @@ impl Server {
       listener,
       token: token.clone(),
       semaphore,
+      reject_sem: Arc::new(Semaphore::new(MAX_PENDING_REJECTS)),
       ids,
       event_tx,
       conns: Arc::clone(&conns),
@@ -169,6 +175,8 @@ struct AcceptCtx {
   listener: TcpListener,
   token: CancellationToken,
   semaphore: Arc<Semaphore>,
+  /// Bounds concurrent over-limit rejections (see `MAX_PENDING_REJECTS`).
+  reject_sem: Arc<Semaphore>,
   ids: Arc<AtomicU64>,
   event_tx: mpsc::Sender<Event>,
   conns: Arc<Mutex<JoinSet<()>>>,
@@ -215,7 +223,22 @@ impl AcceptCtx {
               conns.spawn(async move { task.run().await });
             }
             Err(_) => {
-              tokio::spawn(reject_overloaded(stream, self.ws_config));
+              // Bounded rejections: register the task like a connection so
+              // shutdown can abort and drain it; past the cap, drop the
+              // peer at once instead of piling 10s handshake tasks.
+              match self.reject_sem.clone().try_acquire_owned() {
+                Ok(reject_permit) => {
+                  let mut conns = self.conns.lock().await;
+                  while conns.try_join_next().is_some() {}
+                  conns.spawn(async move {
+                    let _permit = reject_permit;
+                    reject_overloaded(stream, self.ws_config).await;
+                  });
+                }
+                Err(_) => {
+                  drop(stream);
+                }
+              }
             }
           }
         }
