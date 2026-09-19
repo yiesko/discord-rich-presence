@@ -394,12 +394,38 @@ async fn null_scan_keeps_live_pid_cards() {
   assert_eq!(got["activity"]["name"], "Live");
 
   fx.proc_tx.send(ProcInput::Cleared).await.unwrap();
-  // No clear may arrive for a live pid: only READY-gated silence, then
-  // the cached card still replays to a late joiner.
+  // Ordering barrier: the pump applies inputs in order, so consuming the
+  // barrier card proves the clear above landed before the late join below
+  // (no handshake-vs-pump race either way).
+  fx.proc_tx
+    .send(ProcInput::Detected(ScannedGame {
+      id: "barrier".into(),
+      name: "Barrier".to_string(),
+      pid: live,
+      start: 1_700_000_000,
+    }))
+    .await
+    .unwrap();
+  let barrier = read_json(&mut json).await;
+  assert_eq!(barrier["activity"]["name"], "Barrier");
+
+  // No clear may arrive for a live pid: then the cached cards still replay
+  // to a late joiner (Live among them, whatever the order).
   let mut late = connect(fx.json_port, "?format=json").await;
   let _ = read_json(&mut late).await; // READY
-  let replay = read_json(&mut late).await;
-  assert_eq!(replay["activity"]["name"], "Live");
+  let mut names = Vec::new();
+  for _ in 0..2 {
+    names.push(
+      read_json(&mut late).await["activity"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string(),
+    );
+  }
+  assert!(
+    names.contains(&"Live".to_string()),
+    "live card must replay, got: {names:?}"
+  );
 
   fx.bridge.shutdown().await;
 }

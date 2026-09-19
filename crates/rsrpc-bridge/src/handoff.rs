@@ -49,6 +49,15 @@ pub enum ProcInput {
 /// re-arms them (self-healing).
 pub const MAX_HANDOFF_ENTRIES: usize = 64;
 
+/// Fallible `u64` pid narrowing for `libc::kill`: kernel pids fit `pid_t`
+/// (`i32` on 64-bit unix), so anything wider names no process. Same gate
+/// as its only caller (the non-Linux probe below); `libc` is a `cfg(unix)`
+/// dependency of this crate.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_to_pid_t(pid: u64) -> Option<libc::pid_t> {
+  libc::pid_t::try_from(pid).ok()
+}
+
 /// Best-effort liveness probe so a clear for an already-dead game doesn't
 /// flash the generic card on the way out (the scanner's null event clears
 /// the slot anyway).
@@ -65,8 +74,16 @@ pub fn is_process_alive(pid: u64) -> bool {
   {
     // SAFETY: signal 0 performs no action; only error reporting. A zero
     // return (or EPERM: exists but unowned) means alive; ESRCH means dead.
-    (unsafe { libc::kill(pid as libc::pid_t, 0) }) == 0
-      || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    match pid_to_pid_t(pid) {
+      Some(narrow) => {
+        (unsafe { libc::kill(narrow, 0) }) == 0
+          || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+      }
+      // Beyond `pid_t` range (e.g. `u32::MAX` where `pid_t` is `i32`): no
+      // such process can exist, and a truncating `as` cast would alias it
+      // onto a live id (notably `-1`, the whole process group).
+      None => false,
+    }
   }
   #[cfg(windows)]
   {
@@ -337,6 +354,18 @@ mod tests {
       handoff.note_publish(&format!("app-{index}"), 0);
     }
     assert!(handoff.live_ipc.len() <= MAX_HANDOFF_ENTRIES);
+  }
+
+  /// Out-of-range pids convert to nothing (never truncated onto `-1`).
+  #[cfg(all(unix, not(target_os = "linux")))]
+  #[test]
+  fn pid_narrowing_rejects_unrepresentable_pids() {
+    assert_eq!(pid_to_pid_t(1), Some(1));
+    let own = u64::from(std::process::id());
+    assert!(own <= libc::pid_t::MAX as u64);
+    assert_eq!(pid_to_pid_t(own), Some(own as libc::pid_t));
+    assert_eq!(pid_to_pid_t(u64::from(u32::MAX)), None);
+    assert_eq!(pid_to_pid_t(u64::MAX), None);
   }
 
   /// Pid 0 and dead pids read dead; our own pid reads alive.
