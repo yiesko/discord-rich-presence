@@ -60,6 +60,7 @@ pub struct Server {
 }
 
 impl std::fmt::Debug for Server {
+  /// Bound address only; tasks and tokens stay out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Server")
       .field("local_addr", &self.local_addr)
@@ -75,10 +76,21 @@ impl Server {
   ///
   /// # Errors
   ///
-  /// [`Error::Bind`] when the address cannot be bound (source keeps
-  /// `AddrInUse` etc.), [`Error::Runtime`] when the bound address cannot
-  /// be read back.
+  /// [`Error::Config`] when a bound is zero (same invariant as the builder;
+  /// direct field mutation bypasses it, and zero would panic the channel
+  /// constructors below). [`Error::Bind`] when the address cannot be bound
+  /// (source keeps `AddrInUse` etc.), [`Error::Runtime`] when the bound
+  /// address cannot be read back.
   pub async fn bind(config: ServerConfig) -> Result<(Self, EventHub), Error> {
+    if config.max_connections == 0 {
+      return Err(Error::Config("max_connections must be non-zero"));
+    }
+    if config.event_queue == 0 {
+      return Err(Error::Config("event_queue must be non-zero"));
+    }
+    if config.per_client_queue == 0 {
+      return Err(Error::Config("per_client_queue must be non-zero"));
+    }
     let listener = TcpListener::bind(config.bind).await.map_err(Error::Bind)?;
     let local_addr = listener.local_addr().map_err(Error::Runtime)?;
 
@@ -167,6 +179,8 @@ struct AcceptCtx {
 }
 
 impl AcceptCtx {
+  /// Accept loop: admit clients up to the semaphore, reject the rest with
+  /// 1013, reap finished tasks. Ends on token cancel (shutdown).
   async fn run(self) {
     loop {
       tokio::select! {
@@ -243,6 +257,9 @@ impl ConnTask {
   // The handshake closure must return tungstenite's `ErrorResponse`
   // (136 bytes); the large-Err type is mandated by the API, not a choice
   // (same precedent as `lib/src/server/ipc_utils.rs`).
+  /// Per-connection pump: handshake, then relay until peer, idle or
+  /// shutdown ends it (emits `Disconnect` on exit; best-effort when the
+  /// hub is already gone).
   #[allow(clippy::result_large_err)]
   async fn run(self) {
     let Self {
@@ -379,6 +396,7 @@ impl ConnTask {
 }
 
 impl Message {
+  /// Lower to the tungstenite wire type (borrowed buffers stay shared).
   fn into_ws(self) -> WsMessage {
     match self {
       Self::Text(text) => WsMessage::Text(text),

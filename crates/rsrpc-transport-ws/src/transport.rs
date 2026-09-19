@@ -49,41 +49,68 @@ const ALLOWED_ORIGINS: [&str; 3] = [
 struct ClientSlot {
   responder: Responder,
   /// Every pid published on this connection (slim records), oldest first.
-  /// A single-pid client — the norm — keeps exactly one entry.
+  /// A single-pid client — the norm — keeps exactly one entry. Capped at
+  /// [`handlers::MAX_TRACKED_PIDS`]: extras are refused before forwarding,
+  /// so this history is always complete and disconnect cleanup clears
+  /// every forwarded card.
   published: Vec<handlers::PublishedSlot>,
-  /// Evicted clears whose immediate enqueue failed (shed sink). Drained
-  /// on disconnect alongside `published`, so a dropped eviction clear
-  /// cannot ghost. Bounded like `published`; never holds the lock across
-  /// an await.
-  pending_clears: Vec<handlers::PublishedSlot>,
   query_client_id: Option<String>,
+}
+
+/// Whether a publication was admitted to the bounded per-connection history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Admission {
+  /// Tracked (re-publishes refresh as most recent). Carries the displaced
+  /// prior slot, if any, so a shed delivery can roll back to it instead of
+  /// dropping tracking for a previously shown card.
+  Admitted {
+    /// Previous record for this pid (`None` for first-time publishes).
+    displaced: Option<handlers::PublishedSlot>,
+  },
+  /// Unknown pid past the bound: refused before forwarding.
+  RefusedFull,
 }
 
 impl ClientSlot {
   /// Record a publication, refreshing a re-published pid as most recent.
-  /// Returns the oldest entry when it is evicted past
-  /// [`handlers::MAX_TRACKED_PIDS`]: the caller must clear it at once,
-  /// or the evicted card ghosts (disconnect cleanup only sees tracked
-  /// pids).
-  fn note_published(
-    &mut self,
-    app_id: Option<String>,
-    pid: u64,
-    nonce: Value,
-  ) -> Option<handlers::PublishedSlot> {
+  /// Unknown pids past [`handlers::MAX_TRACKED_PIDS`] are refused: the
+  /// caller must not forward them, keeping every forwarded pid tracked
+  /// (and therefore covered by disconnect cleanup).
+  fn note_published(&mut self, app_id: Option<String>, pid: u64, nonce: Value) -> Admission {
     if let Some(pos) = self.published.iter().position(|entry| entry.pid == pid) {
-      self.published.remove(pos);
-    } else if self.published.len() >= handlers::MAX_TRACKED_PIDS {
-      let evicted = self.published.remove(0);
+      let displaced = self.published.remove(pos);
       self
         .published
         .push(handlers::PublishedSlot { app_id, pid, nonce });
-      return Some(evicted);
+      Admission::Admitted {
+        displaced: Some(displaced),
+      }
+    } else if self.published.len() >= handlers::MAX_TRACKED_PIDS {
+      Admission::RefusedFull
+    } else {
+      self
+        .published
+        .push(handlers::PublishedSlot { app_id, pid, nonce });
+      Admission::Admitted { displaced: None }
     }
-    self
-      .published
-      .push(handlers::PublishedSlot { app_id, pid, nonce });
-    None
+  }
+
+  /// Forget one tracked pid. Used when a genuine client clear lands
+  /// (frees the slot for new pids). No-op when absent.
+  fn forget_published(&mut self, pid: u64) {
+    if let Some(pos) = self.published.iter().position(|entry| entry.pid == pid) {
+      self.published.remove(pos);
+    }
+  }
+
+  /// Roll back a shed admission: drop the undelivered record, restoring the
+  /// displaced slot of a refresh so a previously shown card stays tracked
+  /// (and clearable on disconnect). First-time publishes leave nothing.
+  fn rollback_publish(&mut self, pid: u64, displaced: Option<handlers::PublishedSlot>) {
+    self.forget_published(pid);
+    if let Some(old) = displaced {
+      self.published.push(old);
+    }
   }
 }
 
@@ -109,62 +136,18 @@ pub(crate) struct Sink {
 
 impl Sink {
   /// Queue one command downstream, shedding (counted) instead of stalling
-  /// the pump when the bridge stops draining.
-  pub(crate) async fn emit(&self, cmd: ActivityCmd) {
-    match self.tx.send_timeout(cmd, SINK_SEND_TIMEOUT).await {
-      Ok(()) => {}
-      Err(_) => {
-        self.dropped.fetch_add(1, Ordering::Relaxed);
-        tracing::warn!("[transport-ws] Event sink full/closed, dropping command");
-      }
-    }
-  }
-
-  /// Queue one clear downstream, reporting whether it landed.
-  ///
-  /// Same shed-counted timeout as [`emit`](Self::emit): callers retain the
-  /// slot in `pending_clears` before awaiting and confirm it only on
-  /// `true`, so a shed eviction clear is retried at disconnect instead of
-  /// ghosting.
-  pub(crate) async fn emit_clear(&self, cmd: ActivityCmd) -> bool {
+  /// the pump when the bridge stops draining. Returns whether the command
+  /// was accepted: callers track a publication only on `true`, so a shed
+  /// publish leaves no disconnect clear behind for a card that never showed.
+  pub(crate) async fn emit(&self, cmd: ActivityCmd) -> bool {
     match self.tx.send_timeout(cmd, SINK_SEND_TIMEOUT).await {
       Ok(()) => true,
       Err(_) => {
         self.dropped.fetch_add(1, Ordering::Relaxed);
-        tracing::warn!("[transport-ws] Event sink full/closed, dropping clear");
+        tracing::warn!("[transport-ws] Event sink full/closed, dropping command");
         false
       }
     }
-  }
-}
-
-/// Register an evicted slot for disconnect cleanup. Bounded like
-/// `published`: beyond the cap the oldest pending entry drops (shed,
-/// counted downstream via `dropped`). Unbounded retention would let a
-/// pathological publisher grow memory forever while the bridge is wedged;
-/// every handoff/publish table in this workspace sheds oldest the same way.
-fn retain_pending(pending: &mut Vec<handlers::PublishedSlot>, evicted: handlers::PublishedSlot) {
-  if pending.len() >= handlers::MAX_TRACKED_PIDS {
-    let dropped = pending.remove(0);
-    tracing::warn!(
-      "[transport-ws] Pending eviction clears full, shedding oldest (pid {})",
-      dropped.pid
-    );
-  }
-  pending.push(evicted);
-}
-
-/// Drop a pending clear once its enqueue succeeded. Matches the exact
-/// `(pid, nonce)` pair so a re-published pid does not confirm a stale entry.
-fn confirm_pending(pending: &mut Vec<handlers::PublishedSlot>, pid: u64, nonce: &Value) -> bool {
-  if let Some(pos) = pending
-    .iter()
-    .position(|entry| entry.pid == pid && entry.nonce == *nonce)
-  {
-    pending.remove(pos);
-    true
-  } else {
-    false
   }
 }
 
@@ -209,6 +192,7 @@ pub struct WsTransport {
 }
 
 impl std::fmt::Debug for WsTransport {
+  /// Bound port only; internal handles stay out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("WsTransport")
       .field("bound_port", &self.bound_port)
@@ -374,6 +358,7 @@ impl WsTransport {
 }
 
 impl Drop for WsTransport {
+  /// Abort a still-running pump so drops never park it forever.
   fn drop(&mut self) {
     // Best-effort: an explicit shutdown() drains gracefully; a drop must
     // at least not leave the pump parked forever.
@@ -484,7 +469,6 @@ async fn on_connect(
     ClientSlot {
       responder,
       published: Vec::new(),
-      pending_clears: Vec::new(),
       query_client_id,
     },
   );
@@ -494,8 +478,8 @@ async fn on_connect(
 /// Remove the slot and emit one clear per published pid (shared by
 /// Disconnect and prune paths). A connection that published several pids
 /// (multiplexing companion) clears every card, not just the latest.
-/// Pending eviction clears (whose immediate enqueue was shed) ride along,
-/// so a full sink cannot strand a ghost.
+/// Complete by construction: extras past the bound are refused before
+/// forwarding, so everything forwarded is tracked here.
 async fn remove_and_clear(
   id: ClientId,
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
@@ -507,9 +491,6 @@ async fn remove_and_clear(
   total.fetch_sub(1, Ordering::Relaxed);
   for published in &slot.published {
     sink.emit(handlers::clear_for_slot(published)).await;
-  }
-  for pending in &slot.pending_clears {
-    sink.emit(handlers::clear_for_slot(pending)).await;
   }
 }
 
@@ -580,47 +561,66 @@ async fn on_message(
       if !set_activity {
         return;
       }
-      let alive = handlers::handle_set_activity(
-        &event,
-        slot.query_client_id.as_deref(),
-        &slot.responder,
-        sink,
-      )
-      .await;
-      // Record the publication regardless of the reply outcome: the
-      // command already reached the sink, and a stalled or gone client
-      // is pruned right below — its removal must clear the pid or the
-      // card ghosts. Applies the same connect-query client_id fallback
-      // the forwarded command carries. Short write-back, no await inside.
+      // Genuine clears are not publications: they never consume history,
+      // always forward (the bridge may hold the card), and free the slot
+      // once delivered so new pids fit again. Applies the same
+      // connect-query client_id fallback the forwarded command carries.
       let app_id = event
         .application_id
         .clone()
         .or_else(|| slot.query_client_id.clone());
       let pid = event.args.as_ref().and_then(|a| a.pid).unwrap_or_default();
-      // Short write-back, no await inside: record the publication and
-      // stage a shed eviction clear before any await, so the client lock
-      // never crosses the sink wait.
-      let evicted = {
-        let mut guard = clients.write().await;
-        let evicted = guard
-          .get_mut(&id)
-          .and_then(|entry| entry.note_published(app_id, pid, event.nonce.clone()));
-        if let Some(ref old) = evicted
-          && let Some(entry) = guard.get_mut(&id)
-        {
-          retain_pending(&mut entry.pending_clears, old.clone());
-        }
-        evicted
+      let is_clear = event
+        .args
+        .as_ref()
+        .and_then(|args| args.activity.as_ref())
+        .is_none();
+      // Record first (one short write, no await inside): every forwarded
+      // publication is tracked, so disconnect cleanup stays complete. The
+      // pump is the only map mutator, so admission cannot change before
+      // forwarding below.
+      let admission = if is_clear {
+        None
+      } else if let Some(entry) = clients.write().await.get_mut(&id) {
+        Some(entry.note_published(app_id, pid, event.nonce.clone()))
+      } else {
+        // Slot pruned mid-flight: forward nothing rather than ghost.
+        None
       };
-      if let Some(old) = evicted {
-        // Bounded history evicted a live card: clear it at once, or it
-        // ghosts (disconnect cleanup only ever sees tracked pids). On
-        // shed, the staged pending entry survives for disconnect cleanup.
-        if sink.emit_clear(handlers::clear_for_slot(&old)).await {
-          let mut guard = clients.write().await;
-          if let Some(entry) = guard.get_mut(&id) {
-            confirm_pending(&mut entry.pending_clears, old.pid, &old.nonce);
+      // Refusals still earn their lock-step reply (clients hang without
+      // one) but never reach the sink — recording the publication
+      // regardless also keeps the reply-fails prune below clearing the
+      // pid instead of ghosting it.
+      let (alive, delivered) = handlers::handle_set_activity(
+        &event,
+        slot.query_client_id.as_deref(),
+        &slot.responder,
+        sink,
+        // Clears always forward; publications only when admitted.
+        is_clear || matches!(admission, Some(Admission::Admitted { .. })),
+      )
+      .await;
+      if delivered {
+        // Landed: genuine clears free their slot for new pids.
+        if is_clear && let Some(entry) = clients.write().await.get_mut(&id) {
+          entry.forget_published(pid);
+        }
+      } else {
+        match admission {
+          // Shed publish: roll back (a refresh restores its prior slot so
+          // shown cards stay tracked; first-time publishes leave nothing).
+          Some(Admission::Admitted { displaced }) => {
+            if let Some(entry) = clients.write().await.get_mut(&id) {
+              entry.rollback_publish(pid, displaced);
+            }
           }
+          Some(Admission::RefusedFull) => {
+            tracing::debug!(
+              "[transport-ws] Client {id} past {MAX} tracked pids, refusing pid {pid}",
+              MAX = handlers::MAX_TRACKED_PIDS,
+            );
+          }
+          None => {}
         }
       }
       alive
@@ -645,71 +645,7 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 mod tests {
   use super::*;
 
-  #[tokio::test]
-  async fn emit_clear_reports_enqueue_result() {
-    // Closed sink: enqueue fails, counted, returns false.
-    let (tx, rx) = mpsc::channel(1);
-    drop(rx);
-    let sink = Sink {
-      tx,
-      dropped: Arc::new(AtomicU64::new(0)),
-    };
-    let cmd = handlers::clear_for_slot(&handlers::PublishedSlot {
-      app_id: None,
-      pid: 7,
-      nonce: Value::Null,
-    });
-    assert!(!sink.emit_clear(cmd).await);
-    assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
-  }
-
-  #[tokio::test]
-  async fn emit_clear_succeeds_when_capacity_free() {
-    let (tx, mut rx) = mpsc::channel(1);
-    let sink = Sink {
-      tx,
-      dropped: Arc::new(AtomicU64::new(0)),
-    };
-    let cmd = handlers::clear_for_slot(&handlers::PublishedSlot {
-      app_id: None,
-      pid: 9,
-      nonce: Value::Null,
-    });
-    assert!(sink.emit_clear(cmd).await);
-    assert!(rx.try_recv().is_ok());
-    assert_eq!(sink.dropped.load(Ordering::Relaxed), 0);
-  }
-
-  #[test]
-  fn evicted_clear_is_retained_until_confirmed() {
-    let mut pending: Vec<handlers::PublishedSlot> = Vec::new();
-    let evicted = handlers::PublishedSlot {
-      app_id: None,
-      pid: 1,
-      nonce: Value::Null,
-    };
-    retain_pending(&mut pending, evicted.clone());
-    assert_eq!(pending.len(), 1);
-    assert!(confirm_pending(&mut pending, evicted.pid, &evicted.nonce));
-    assert!(pending.is_empty());
-  }
-
-  #[test]
-  fn pending_clears_stay_bounded() {
-    let mut pending: Vec<handlers::PublishedSlot> = Vec::new();
-    for pid in 0..(handlers::MAX_TRACKED_PIDS + 5) as u64 {
-      retain_pending(
-        &mut pending,
-        handlers::PublishedSlot {
-          app_id: None,
-          pid,
-          nonce: Value::Null,
-        },
-      );
-    }
-    assert!(pending.len() <= handlers::MAX_TRACKED_PIDS);
-  }
-
+  /// Discord origins pass, missing origin passes, anything else is refused.
   #[test]
   fn origin_policy() {
     assert!(origin_allowed(None));
@@ -720,6 +656,7 @@ mod tests {
     assert!(!origin_allowed(Some("")));
   }
 
+  /// The re-exported query parser keeps its legacy key/value behavior.
   #[test]
   fn query_params_match_legacy_semantics() {
     // Canonical parser lives in rsrpc-protocol (tested there); this pins

@@ -176,18 +176,26 @@ pub(crate) async fn handle_unknown(cmd: &str, event: &ActivityCmd, responder: &R
   .await
 }
 
-/// Forward `SET_ACTIVITY` and confirm with the arRPC-shaped reply.
+/// Forward `SET_ACTIVITY` (unless refused) and confirm with the
+/// arRPC-shaped reply.
 ///
-/// Returns whether the client is still alive; `false` prunes the slot
-/// immediately. The fixed command (with the connect-query `client_id`
-/// fallback applied) goes to the sink; the caller records the slim
-/// [`PublishedSlot`] itself, so no second deep clone happens here.
+/// `forward` is `false` when the connection already tracks
+/// [`MAX_TRACKED_PIDS`] distinct pids: the command is acknowledged (lock-step
+/// clients must receive *some* reply or they hang) but never forwarded, so
+/// every forwarded pid stays tracked and disconnect cleanup stays complete.
+/// Returns `(alive, delivered)`: `alive` prunes the slot when `false`;
+/// `delivered` tells the caller whether the card actually reached the sink,
+/// so shed publishes stay untracked (nothing shown, nothing to clear).
+/// The fixed command (with the connect-query `client_id` fallback applied)
+/// goes to the sink; the caller records the slim [`PublishedSlot`] itself,
+/// so no second deep clone happens here.
 pub(crate) async fn handle_set_activity(
   event: &ActivityCmd,
   query_client_id: Option<&str>,
   responder: &Responder,
   sink: &Sink,
-) -> bool {
+  forward: bool,
+) -> (bool, bool) {
   // Fall back to the client_id provided on connect (query param) when the
   // command itself does not carry an application_id.
   let mut event = event.clone();
@@ -198,15 +206,20 @@ pub(crate) async fn handle_set_activity(
   // Apply field fixes so the confirmation reply carries labels/urls (fix is
   // idempotent, so a downstream fix pass is harmless).
   event.fix();
-  sink.emit(event.clone()).await;
+  let delivered = if forward {
+    sink.emit(event.clone()).await
+  } else {
+    false
+  };
 
   // Confirm to the game client; some RPC libraries wait for this before
   // considering the presence set. No confirm to send means the client is
   // still considered alive.
-  match commands::set_activity_response(&event) {
+  let alive = match commands::set_activity_response(&event) {
     Some(response) => reply(responder, Message::Text(response.into())).await,
     None => true,
-  }
+  };
+  (alive, delivered)
 }
 
 /// Slim per-pid publication record: everything a disconnect clear needs,
@@ -222,8 +235,9 @@ pub(crate) struct PublishedSlot {
 
 /// Cap on tracked pids per connection: bounds memory against pathological
 /// publishers while covering every realistic multiplexer. Beyond the cap
-/// the oldest entry is evicted and cleared at once (see `note_published`),
-/// so no forwarded card can ghost.
+/// new pids are refused before forwarding (see `note_published`), so every
+/// forwarded card stays tracked and disconnect cleanup stays complete —
+/// nothing ghosts, nothing is ever cleared while live.
 pub(crate) const MAX_TRACKED_PIDS: usize = 16;
 
 /// Build the clear command emitted when a published pid dies.

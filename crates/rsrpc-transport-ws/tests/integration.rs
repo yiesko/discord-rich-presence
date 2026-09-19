@@ -11,14 +11,17 @@ use rsrpc_types::cmd::ActivityCmd;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default-identity fixture shared by the transport tests.
 fn user() -> std::sync::Arc<std::sync::Mutex<rsrpc_types::user::RpcUser>> {
   std::sync::Arc::new(std::sync::Mutex::new(rsrpc_types::user::RpcUser::default()))
 }
 
+/// OS-assigned port config for hermetic binds.
 fn config() -> WsTransportConfig {
   WsTransportConfig::new(0, 0)
 }
 
+/// Next sink event, failing (not hanging) after the timeout.
 async fn next_cmd(rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) -> ActivityCmd {
   tokio::time::timeout(TIMEOUT, rx.recv())
     .await
@@ -26,6 +29,7 @@ async fn next_cmd(rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) -> Activity
     .expect("sink closed unexpectedly")
 }
 
+/// Connect a game client with the given query string.
 async fn connect(
   port: u16,
   query: &str,
@@ -36,6 +40,7 @@ async fn connect(
   ws
 }
 
+/// Next text reply, parsed as JSON (panics on anything else).
 async fn read_text(
   ws: &mut tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -53,6 +58,7 @@ const SET_ACTIVITY: &str =
   r#"{"cmd":"SET_ACTIVITY","args":{"pid":123,"activity":{"name":"Game","type":0}},"nonce":"1"}"#;
 
 #[tokio::test]
+/// `SET_ACTIVITY` reaches the sink and earns its lock-step reply.
 async fn set_activity_flows_to_sink_with_reply() {
   let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
   let port = transport.bound_port();
@@ -80,6 +86,7 @@ async fn set_activity_flows_to_sink_with_reply() {
 }
 
 #[tokio::test]
+/// Wrong protocol versions are closed before any sink traffic.
 async fn invalid_version_is_closed_without_sink_traffic() {
   let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
   let port = transport.bound_port();
@@ -96,6 +103,7 @@ async fn invalid_version_is_closed_without_sink_traffic() {
 }
 
 #[tokio::test]
+/// Clean disconnects emit one clear for the last published pid.
 async fn disconnect_emits_clear_for_last_activity() {
   let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
   let port = transport.bound_port();
@@ -128,6 +136,7 @@ async fn disconnect_emits_clear_for_last_activity() {
 }
 
 #[tokio::test]
+/// Snapshots concurrent with message floods always complete (no lock across await).
 async fn snapshots_under_flood_never_stall() {
   let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
   let port = transport.bound_port();
@@ -170,6 +179,7 @@ async fn snapshots_under_flood_never_stall() {
 }
 
 #[tokio::test]
+/// Dead sinks shed counted while the pump keeps answering clients.
 async fn closed_sink_counts_drops_and_stays_alive() {
   let (transport, rx) = WsTransport::bind(config(), user()).await.unwrap();
   drop(rx);
@@ -192,12 +202,14 @@ async fn closed_sink_counts_drops_and_stays_alive() {
   transport.shutdown().await;
 }
 
+/// `SET_ACTIVITY` JSON fixture with caller-chosen pid, app and name.
 fn activity_cmd(pid: u64, app: &str, name: &str) -> String {
   format!(
     r#"{{"cmd":"SET_ACTIVITY","application_id":"{app}","args":{{"pid":{pid},"activity":{{"name":"{name}","type":0}}}},"nonce":"n{pid}"}}"#
   )
 }
 
+/// Next sink clear as `(application_id, pid)` (panics on non-clears).
 async fn recv_clear(
   rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>,
 ) -> (Option<String>, Option<u64>) {
@@ -218,6 +230,7 @@ async fn recv_clear(
 }
 
 #[tokio::test]
+/// Abrupt TCP drops clear every pid published on the connection.
 async fn abrupt_close_clears_every_published_pid() {
   let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
   let port = transport.bound_port();
@@ -251,6 +264,8 @@ async fn abrupt_close_clears_every_published_pid() {
   transport.shutdown().await;
 }
 
+/// Beyond the bound, extras are refused before forwarding: disconnect
+/// clears exactly the tracked 1..=16, and nothing ghosts.
 #[tokio::test]
 async fn published_pid_history_is_bounded() {
   let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
@@ -258,11 +273,9 @@ async fn published_pid_history_is_bounded() {
 
   let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
   let _ready = read_text(&mut ws).await;
-  // 20 distinct pids on one connection: the bounded history (16) evicts
-  // the oldest as it goes, and every eviction is cleared at once — so all
-  // 20 pids must produce clears, none may ghost. The echo per message
-  // proves the pump processed it; sink commands are collected below
-  // tolerating any publish/clear interleave.
+  // 20 distinct pids on one connection: the first 16 are tracked, pids
+  // 17..=20 are refused before forwarding (lock-step replies still flow,
+  // so every echo below proves the pump processed the message).
   for pid in 1u64..=20 {
     ws.send(tungstenite::Message::Text(
       activity_cmd(pid, "app", "G").into(),
@@ -271,11 +284,19 @@ async fn published_pid_history_is_bounded() {
     .unwrap();
     let _echo = read_text(&mut ws).await;
   }
+  // Only 16 publishes may reach the sink (refusals forward nothing).
+  let mut published = Vec::new();
+  for _ in 0..16 {
+    let cmd = next_cmd(&mut rx).await;
+    published.push(cmd.args.as_ref().and_then(|a| a.pid).expect("pid"));
+  }
+  published.sort_unstable();
+  assert_eq!(published, (1u64..=16).collect::<Vec<_>>());
   drop(ws);
 
   let mut pids = std::collections::HashSet::new();
   let deadline = std::time::Instant::now() + TIMEOUT;
-  while pids.len() < 20 {
+  while pids.len() < 16 {
     let cmd = next_cmd(&mut rx).await;
     if cmd.cmd == "SET_ACTIVITY"
       && cmd
@@ -289,16 +310,24 @@ async fn published_pid_history_is_bounded() {
     }
     assert!(
       std::time::Instant::now() < deadline,
-      "every forwarded pid must be cleared, got {pids:?}"
+      "every tracked pid must be cleared, got {pids:?}"
     );
   }
   let mut pids: Vec<u64> = pids.into_iter().collect();
   pids.sort_unstable();
-  assert_eq!(pids, (1u64..=20).collect::<Vec<_>>());
+  assert_eq!(pids, (1u64..=16).collect::<Vec<_>>());
+  // Refused pids (17..=20) forward nothing and clear nothing: the sink
+  // must be drained exactly (an evict-and-clear design would leave four
+  // more clears queued here).
+  assert!(
+    rx.try_recv().is_err(),
+    "refused pids must leave no sink traffic behind"
+  );
 
   transport.shutdown().await;
 }
 
+/// A reader that stops draining is pruned; the pump keeps serving others.
 #[tokio::test]
 async fn stalled_reader_does_not_freeze_the_pump() {
   // One client that stops reading must not park the shared pump: replies
@@ -388,6 +417,7 @@ async fn stalled_reader_does_not_freeze_the_pump() {
   drain.abort();
 }
 
+/// Recording the publication first means pruning clears it, never ghosts.
 #[tokio::test]
 async fn close_while_reply_is_undeliverable_clears_publication() {
   // Publication must be recorded even when the reply cannot be delivered
@@ -436,6 +466,143 @@ async fn close_while_reply_is_undeliverable_clears_publication() {
   transport.shutdown().await;
 }
 
+/// A publish shed by a full sink is untracked: disconnect clears only shown cards.
+#[tokio::test]
+async fn shed_publish_leaves_no_tracking_behind() {
+  let (transport, mut rx) = WsTransport::bind(config().event_queue(1), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+  // Cap-1 sink, never drained: first publish lands, second sheds.
+  for pid in [7u64, 8] {
+    ws.send(tungstenite::Message::Text(
+      activity_cmd(pid, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+    let _echo = read_text(&mut ws).await;
+  }
+  let first = next_cmd(&mut rx).await;
+  assert_eq!(first.args.as_ref().and_then(|a| a.pid), Some(7));
+  drop(ws);
+
+  // Only the shown card clears; the shed pid leaves nothing behind.
+  let clear = next_cmd(&mut rx).await;
+  assert_eq!(clear.args.as_ref().and_then(|a| a.pid), Some(7));
+  assert!(
+    tokio::time::timeout(Duration::from_secs(1), rx.recv())
+      .await
+      .is_err(),
+    "shed pid must not produce a disconnect clear"
+  );
+
+  transport.shutdown().await;
+}
+
+/// A shed re-publish restores the prior slot: the shown card stays clearable.
+#[tokio::test]
+async fn shed_republish_keeps_prior_tracking() {
+  let (transport, mut rx) = WsTransport::bind(config().event_queue(1), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+  // Publish lands in the cap-1 sink and stays queued (never drained).
+  ws.send(tungstenite::Message::Text(
+    activity_cmd(7, "app", "G").into(),
+  ))
+  .await
+  .unwrap();
+  let _echo = read_text(&mut ws).await;
+  // Re-publish sheds against the full sink: the rollback must restore the
+  // prior slot instead of dropping tracking for a shown card.
+  ws.send(tungstenite::Message::Text(
+    activity_cmd(7, "app", "G2").into(),
+  ))
+  .await
+  .unwrap();
+  let _echo = read_text(&mut ws).await;
+
+  let first = next_cmd(&mut rx).await;
+  assert_eq!(first.args.as_ref().and_then(|a| a.pid), Some(7));
+  drop(ws);
+
+  // Disconnect must still clear pid 7 (shown once, tracked throughout).
+  let clear = next_cmd(&mut rx).await;
+  assert_eq!(clear.args.as_ref().and_then(|a| a.pid), Some(7));
+  assert!(
+    clear
+      .args
+      .as_ref()
+      .and_then(|a| a.activity.as_ref())
+      .is_none()
+  );
+
+  transport.shutdown().await;
+}
+
+/// A genuine client clear frees its slot: the next new pid is admitted.
+#[tokio::test]
+async fn genuine_clear_frees_tracking_capacity() {
+  let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+  for pid in 1u64..=16 {
+    ws.send(tungstenite::Message::Text(
+      activity_cmd(pid, "app", "G").into(),
+    ))
+    .await
+    .unwrap();
+    let _echo = read_text(&mut ws).await;
+  }
+  for _ in 0..16 {
+    next_cmd(&mut rx).await;
+  }
+  // Clear pid 1 (null activity), then publish a 17th pid: freed capacity
+  // admits it instead of refusing.
+  ws.send(tungstenite::Message::Text(
+    r#"{"cmd":"SET_ACTIVITY","application_id":"app","args":{"pid":1,"activity":null},"nonce":"c1"}"#.into(),
+  ))
+  .await
+  .unwrap();
+  let _echo = read_text(&mut ws).await;
+  ws.send(tungstenite::Message::Text(
+    activity_cmd(17, "app", "G").into(),
+  ))
+  .await
+  .unwrap();
+  let _echo = read_text(&mut ws).await;
+
+  // Drain to the fresh publish (clear + publish, any order past the echo).
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  loop {
+    let cmd = next_cmd(&mut rx).await;
+    if cmd.args.as_ref().and_then(|a| a.pid) == Some(17)
+      && cmd
+        .args
+        .as_ref()
+        .and_then(|a| a.activity.as_ref())
+        .is_some()
+    {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "freed capacity must admit pid 17"
+    );
+  }
+
+  transport.shutdown().await;
+}
+
+/// Disallowed origins are closed at connect, before READY or registration.
 #[tokio::test]
 async fn disallowed_origin_is_refused_before_ready() {
   use tokio_tungstenite::tungstenite::http::Request;
