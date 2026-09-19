@@ -31,6 +31,17 @@ use crate::sink::{DEFAULT_IPC_QUEUE, EventSink};
 /// Upper bound for graceful connection drain in [`IpcTransport::shutdown`].
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Backoff after a listener accept error: transient per-connection
+/// failures retry at once, persistent ones (fd exhaustion) pause briefly
+/// instead of hot-spinning. Duplicated from `rsrpc-ws` (peer crates share
+/// no helper crate for this); both copies are pinned by the unit test below.
+fn accept_error_backoff(err: &std::io::Error) -> Option<Duration> {
+  match err.kind() {
+    ErrorKind::ConnectionAborted | ErrorKind::Interrupted => None,
+    _ => Some(Duration::from_millis(50)),
+  }
+}
+
 /// Per-connection protocol state plus shared handles.
 struct ConnFacilitator {
   handshake: bool,
@@ -400,10 +411,13 @@ async fn accept_loop(
           Err(err) => {
             // Persistent readiness errors (fd exhaustion) would otherwise
             // hot-spin this loop: back off briefly, like the Windows
-            // WouldBlock poll below. Cancelled tokens still break promptly
-            // at the top of the next iteration.
+            // WouldBlock poll below. Transient per-connection failures
+            // retry at once. Cancelled tokens still break promptly at the
+            // top of the next iteration.
             tracing::warn!("[ipc] Accept failed: {err}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(backoff) = accept_error_backoff(&err) {
+              tokio::time::sleep(backoff).await;
+            }
             continue;
           }
         };
@@ -448,5 +462,28 @@ async fn accept_loop(
         });
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Transient per-connection failures retry at once; persistent ones
+  /// pause instead of hot-spinning the accept loop.
+  #[test]
+  fn accept_errors_back_off_only_when_persistent() {
+    assert_eq!(
+      accept_error_backoff(&std::io::Error::from(ErrorKind::ConnectionAborted)),
+      None
+    );
+    assert_eq!(
+      accept_error_backoff(&std::io::Error::from(ErrorKind::Interrupted)),
+      None
+    );
+    assert_eq!(
+      accept_error_backoff(&std::io::Error::from(ErrorKind::PermissionDenied)),
+      Some(Duration::from_millis(50))
+    );
   }
 }

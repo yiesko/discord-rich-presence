@@ -192,6 +192,17 @@ struct AcceptCtx {
   idle_timeout: Duration,
 }
 
+/// Backoff after a listener accept error: transient per-connection
+/// failures (`ConnectionAborted`, `Interrupted`) retry at once, while
+/// persistent ones (fd exhaustion) pause briefly instead of hot-spinning
+/// the loop. Pure decision table, unit-tested below.
+fn accept_error_backoff(err: &std::io::Error) -> Option<Duration> {
+  match err.kind() {
+    std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted => None,
+    _ => Some(Duration::from_millis(50)),
+  }
+}
+
 impl AcceptCtx {
   /// Accept loop: admit clients up to the semaphore, reject the rest with
   /// 1013, reap finished tasks. Ends on token cancel (shutdown).
@@ -203,7 +214,14 @@ impl AcceptCtx {
         accepted = self.listener.accept() => {
           let (stream, peer) = match accepted {
             Ok(pair) => pair,
-            Err(_) => continue,
+            Err(err) => {
+              // No logging here by design: this crate stays dependency-free
+              // of `tracing` (unlike the transports above it).
+              if let Some(backoff) = accept_error_backoff(&err) {
+                tokio::time::sleep(backoff).await;
+              }
+              continue;
+            }
           };
           let _ = stream.set_nodelay(true);
           match self.semaphore.clone().try_acquire_owned() {
@@ -467,4 +485,28 @@ where
     })))
     .await;
   let _ = outgoing.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Transient per-connection failures retry at once; persistent ones
+  /// pause instead of hot-spinning the accept loop.
+  #[test]
+  fn accept_errors_back_off_only_when_persistent() {
+    use std::io::ErrorKind;
+    assert_eq!(
+      accept_error_backoff(&std::io::Error::from(ErrorKind::ConnectionAborted)),
+      None
+    );
+    assert_eq!(
+      accept_error_backoff(&std::io::Error::from(ErrorKind::Interrupted)),
+      None
+    );
+    assert_eq!(
+      accept_error_backoff(&std::io::Error::from(ErrorKind::PermissionDenied)),
+      Some(Duration::from_millis(50))
+    );
+  }
 }
