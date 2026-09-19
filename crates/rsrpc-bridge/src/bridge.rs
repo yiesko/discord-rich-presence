@@ -1116,6 +1116,9 @@ impl Shared {
             .map(|_| *id)
         })
         .collect();
+      self
+        .dropped_broadcasts
+        .fetch_add(dead.len() as u64, Ordering::Relaxed);
       for id in dead {
         tracing::warn!("[bridge] Pruning dead consumer {id}");
         json_clients.remove(&id);
@@ -1131,6 +1134,9 @@ impl Shared {
             .map(|_| *id)
         })
         .collect();
+      self
+        .dropped_broadcasts
+        .fetch_add(dead.len() as u64, Ordering::Relaxed);
       for id in dead {
         tracing::warn!("[bridge] Pruning dead consumer {id}");
         msgpack_clients.remove(&id);

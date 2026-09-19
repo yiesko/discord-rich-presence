@@ -430,6 +430,46 @@ async fn null_scan_keeps_live_pid_cards() {
   fx.bridge.shutdown().await;
 }
 
+/// Raw broadcasts count (not just prune) consumers whose outbox died.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn raw_broadcast_counts_dead_consumers() {
+  let fx = fixture().await;
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+
+  // Abrupt drop: the server task dies on read error, closing the outbox.
+  let mut doomed = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut doomed).await; // READY
+  drop(doomed);
+
+  // A raw (non-activity) event fans out via broadcast_raw; the dead slot
+  // must be pruned AND counted. Generous deadline: under full-workspace
+  // parallel load, the dead task's read error can take seconds to be
+  // polled (isolated it lands in milliseconds).
+  let deep_link: rsrpc_types::cmd::ActivityCmd = serde_json::from_value(serde_json::json!({
+    "cmd": "DEEP_LINK",
+    "nonce": "d1",
+  }))
+  .unwrap();
+  let deadline = std::time::Instant::now() + Duration::from_secs(15);
+  loop {
+    fx.game_tx.send(deep_link.clone()).await.unwrap();
+    if fx.bridge.dropped_total() >= 1 {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "dead consumer must be counted once its outbox dies"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  // The live consumer still gets its frame.
+  let got = read_json(&mut json).await;
+  assert_eq!(got["cmd"], "DEEP_LINK");
+
+  fx.bridge.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 /// The census line reports live consumers, queues and RSS.
 async fn census_line_reports_live_counts() {
