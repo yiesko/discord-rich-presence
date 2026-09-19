@@ -90,6 +90,7 @@ pub struct Responder {
 }
 
 impl Responder {
+  /// Handle for one accepted connection (crate-internal: hubs hand these out on `Connect`).
   pub(crate) fn new(tx: mpsc::Sender<Cmd>, id: ClientId, details: Arc<ConnectionDetails>) -> Self {
     Self { tx, id, details }
   }
@@ -208,6 +209,7 @@ pub struct EventHub {
 }
 
 impl EventHub {
+  /// Pump end of the event queue (crate-internal: built by `Server::bind`).
   pub(crate) fn new(rx: mpsc::Receiver<Event>) -> Self {
     Self { rx }
   }
@@ -232,6 +234,7 @@ impl EventHub {
 impl Stream for EventHub {
   type Item = Event;
 
+  /// Poll the event queue ( `Stream` adapter over `next_event` ).
   fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Event>> {
     self.rx.poll_recv(cx)
   }
@@ -241,6 +244,7 @@ impl Stream for EventHub {
 mod tests {
   use super::*;
 
+  /// Fixture responder with a controllable outbox of `channel` slots.
   fn responder_with(channel: usize) -> (Responder, mpsc::Receiver<Cmd>) {
     let (tx, rx) = mpsc::channel(channel);
     let responder = Responder::new(
@@ -255,6 +259,7 @@ mod tests {
     (responder, rx)
   }
 
+  /// A full outbox reports `Full` instead of blocking or growing memory.
   #[test]
   fn try_send_full_does_not_block() {
     let (r, _rx) = responder_with(1);
@@ -262,6 +267,7 @@ mod tests {
     assert_eq!(r.try_send(Message::from("two")), Err(TrySendError::Full));
   }
 
+  /// Sends after the connection task exits report `Closed`.
   #[test]
   fn try_send_closed_after_task_exit() {
     let (r, rx) = responder_with(1);
@@ -269,6 +275,7 @@ mod tests {
     assert_eq!(r.try_send(Message::from("x")), Err(TrySendError::Closed));
   }
 
+  /// `is_closed` flips exactly when the connection task exits.
   #[test]
   fn closed_probe_tracks_task_exit() {
     let (r, rx) = responder_with(1);
@@ -277,6 +284,7 @@ mod tests {
     assert!(r.is_closed());
   }
 
+  /// Async send and close succeed while the task drains (best-effort).
   #[tokio::test]
   async fn send_async_and_close_are_best_effort() {
     let (r, _rx) = responder_with(8);
@@ -284,6 +292,7 @@ mod tests {
     r.close(CloseCode::Normal).await;
   }
 
+  /// Bounded sends fail fast on a full outbox and recover after drain.
   #[tokio::test]
   async fn send_timeout_gives_up_on_a_full_outbox() {
     let (r, mut rx) = responder_with(1);
@@ -304,6 +313,7 @@ mod tests {
       .unwrap();
   }
 
+  /// The hub yields queued events in order, then `None` after drain.
   #[tokio::test]
   async fn hub_streams_events_in_order() {
     use futures_util::StreamExt;

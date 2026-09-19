@@ -40,30 +40,35 @@ impl Message {
 }
 
 impl From<String> for Message {
+  /// Adopt an owned string as text (no copy).
   fn from(s: String) -> Self {
     Self::Text(s.into())
   }
 }
 
 impl From<&str> for Message {
+  /// Copy a borrowed string as text.
   fn from(s: &str) -> Self {
     Self::Text(s.into())
   }
 }
 
 impl From<Utf8Bytes> for Message {
+  /// Adopt refcounted text without copying.
   fn from(s: Utf8Bytes) -> Self {
     Self::Text(s)
   }
 }
 
 impl From<Bytes> for Message {
+  /// Adopt refcounted bytes without copying.
   fn from(b: Bytes) -> Self {
     Self::Binary(b)
   }
 }
 
 impl From<Vec<u8>> for Message {
+  /// Adopt an owned byte vector as binary (no copy).
   fn from(v: Vec<u8>) -> Self {
     Self::Binary(Bytes::from(v))
   }
@@ -73,6 +78,7 @@ impl From<Vec<u8>> for Message {
 mod tests {
   use super::*;
 
+  /// Binary clones share the backing (pointer-equal), never copy bytes.
   #[test]
   fn binary_clone_shares_allocation() {
     let msg = Message::Binary(Bytes::from(vec![1u8; 1024]));
@@ -84,6 +90,7 @@ mod tests {
     assert_eq!(a.as_ptr(), b.as_ptr());
   }
 
+  /// Text clones share the backing (pointer-equal), never copy bytes.
   #[test]
   fn text_clone_shares_allocation() {
     let msg = Message::from(String::from("hello"));
@@ -95,6 +102,7 @@ mod tests {
     assert!(std::ptr::eq(a.as_str().as_ptr(), b.as_str().as_ptr()));
   }
 
+  /// Every `From` direction builds the expected variant with equal bytes.
   #[test]
   fn conversions_cover_common_inputs() {
     assert_eq!(

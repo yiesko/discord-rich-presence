@@ -38,6 +38,7 @@ pub struct Daemon {
 }
 
 impl std::fmt::Debug for Daemon {
+  /// Entry counts only; database contents stay out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Daemon")
       .field("entries", &self.detectable.len())

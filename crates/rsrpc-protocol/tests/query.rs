@@ -1,5 +1,6 @@
 use rsrpc_protocol::query::query_params;
 
+/// `key=value` pairs parse; bare flags and empty inputs yield nothing.
 #[test]
 fn parses_pairs_and_ignores_bare_flags() {
   let params = query_params("/?v=1&encoding=json&client_id=abc");

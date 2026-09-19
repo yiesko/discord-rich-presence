@@ -24,6 +24,7 @@ pub struct Scratch {
 }
 
 impl Scratch {
+  /// Fresh unique temp dir for one test (pre-cleaned).
   pub fn new(tag: &str) -> Self {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -38,18 +39,21 @@ impl Scratch {
     Self { path }
   }
 
+  /// Created subdirectory inside the scratch root.
   pub fn sub(&self, name: &str) -> PathBuf {
     let dir = self.path.join(name);
     std::fs::create_dir_all(&dir).expect("scratch subdir");
     dir
   }
 
+  /// Scratch root path.
   pub fn path(&self) -> &Path {
     &self.path
   }
 }
 
 impl Drop for Scratch {
+  /// Remove the scratch dir (best-effort, panic-safe).
   fn drop(&mut self) {
     let _ = std::fs::remove_dir_all(&self.path);
   }

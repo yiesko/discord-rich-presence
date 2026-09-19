@@ -5,6 +5,7 @@
 
 use rsrpc_protocol::error::RsrpcError;
 
+/// `ScanInProgress` keeps its historical display text.
 #[test]
 fn scan_in_progress_keeps_historical_text() {
   assert_eq!(
@@ -13,6 +14,7 @@ fn scan_in_progress_keeps_historical_text() {
   );
 }
 
+/// Port-exhaustion errors name the scanned range in their text.
 #[test]
 fn bind_exhaustion_names_range() {
   assert_eq!(
@@ -34,6 +36,7 @@ fn bind_exhaustion_names_range() {
   );
 }
 
+/// Invalid-config errors carry the offending field description.
 #[test]
 fn invalid_config_names_the_field() {
   assert_eq!(
@@ -42,6 +45,7 @@ fn invalid_config_names_the_field() {
   );
 }
 
+/// Wrapped HTTP causes stay reachable via `source` and `Display`.
 #[test]
 fn http_errors_keep_their_source_chain() {
   // The protocol crate owns no HTTP client: callers wrap their client

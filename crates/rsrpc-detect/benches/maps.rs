@@ -11,12 +11,14 @@ use std::hint::black_box;
 
 const PIDS: usize = 500;
 
+/// Scattered pid-like keys (golden-ratio stride, no clustering).
 fn pid_keys() -> Vec<u64> {
   (1..=PIDS as u64)
     .map(|pid| pid.wrapping_mul(0x9E3779B97F4A7C15))
     .collect()
 }
 
+/// Lookup race: std SipHash vs FxHash on pid keys.
 fn bench_get_hit(c: &mut Criterion) {
   let keys = pid_keys();
   let std_map: HashMap<u64, u64> = keys.iter().map(|&k| (k, k)).collect();
@@ -42,6 +44,7 @@ fn bench_get_hit(c: &mut Criterion) {
   });
 }
 
+/// Insert race: std SipHash vs FxHash on pid keys.
 fn bench_insert(c: &mut Criterion) {
   let keys = pid_keys();
   c.bench_function("map_insert_std", |b| {

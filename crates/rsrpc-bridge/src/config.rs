@@ -121,6 +121,7 @@ impl BridgeConfig {
 mod tests {
   use super::*;
 
+  /// Default port ranges stay on the arRPC-known values.
   #[test]
   fn defaults_match_arrpc_ports() {
     let config = BridgeConfig::new(

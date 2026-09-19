@@ -7,6 +7,7 @@ use rsrpc_detect::refresh::RefreshConfig;
 use rsrpc_detect::server::ProcessServer;
 use rsrpc_detect::types::{Exec, ProcessEventListeners};
 
+/// One-game custom database fixture for generation-swap tests.
 fn custom_db() -> Vec<DetectableActivity> {
   serde_json::from_value(serde_json::json!([
     {
@@ -19,6 +20,7 @@ fn custom_db() -> Vec<DetectableActivity> {
   .expect("fixture parses")
 }
 
+/// Empty-database server fixture with a live event sender.
 fn server() -> ProcessServer {
   let (tx, _rx) = rsrpc_telemetry::QueueGauge::pair();
   ProcessServer::new_with_custom(
@@ -31,6 +33,7 @@ fn server() -> ProcessServer {
   )
 }
 
+/// Appends swap in a new `Arc` generation that classifies immediately.
 #[test]
 fn append_swaps_in_a_new_classifying_generation() {
   let server = server();
@@ -59,6 +62,7 @@ fn append_swaps_in_a_new_classifying_generation() {
   assert_eq!(&*hit.entry.id, "424242");
 }
 
+/// Removed entries stop classifying in the swapped generation.
 #[test]
 fn remove_by_name_drops_the_generation_entry() {
   let server = server();

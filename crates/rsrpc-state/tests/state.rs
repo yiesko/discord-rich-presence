@@ -71,6 +71,7 @@ fn snapshot_round_trips_through_atomic_write() {
   let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Snapshots stamp the caller daemon version, never the crate version.
 #[test]
 fn snapshot_carries_caller_version_not_crate_version() {
   // Regression net for the extraction: `env!("CARGO_PKG_VERSION")` inside

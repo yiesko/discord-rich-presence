@@ -42,6 +42,7 @@ struct ConnFacilitator {
 }
 
 impl ConnFacilitator {
+  /// Blank per-connection state (handshake pending, no pid yet).
   fn fresh(user: Arc<Mutex<RpcUser>>, sink: EventSink) -> Self {
     Self {
       handshake: false,
@@ -56,30 +57,39 @@ impl ConnFacilitator {
 }
 
 impl IpcFacilitator for ConnFacilitator {
+  /// Whether the handshake completed on this connection.
   fn handshake(&self) -> bool {
     self.handshake
   }
+  /// Record handshake completion.
   fn set_handshake(&mut self, handshake: bool) {
     self.handshake = handshake;
   }
+  /// Application id from the handshake (empty until then).
   fn client_id(&self) -> String {
     self.client_id.clone()
   }
+  /// Store the handshake application id.
   fn set_client_id(&mut self, client_id: String) {
     self.client_id = client_id;
   }
+  /// Last pid seen on this connection (0 until the first activity).
   fn pid(&self) -> u64 {
     self.pid
   }
+  /// Store the latest activity pid.
   fn set_pid(&mut self, pid: u64) {
     self.pid = pid;
   }
+  /// Latest command nonce (lock-step replies echo it back).
   fn nonce(&self) -> String {
     self.nonce.clone()
   }
+  /// Store the latest command nonce.
   fn set_nonce(&mut self, nonce: String) {
     self.nonce = nonce;
   }
+  /// Current identity rendered as the READY payload.
   fn user_payload(&self) -> String {
     self
       .user
@@ -87,15 +97,19 @@ impl IpcFacilitator for ConnFacilitator {
       .unwrap_or_else(|e| e.into_inner())
       .ready_payload()
   }
+  /// Snapshot of the current identity for `GET_USER` answers.
   fn current_user(&self) -> RpcUser {
     self.user.lock().unwrap_or_else(|e| e.into_inner()).clone()
   }
+  /// Downstream sink for validated commands and clears.
   fn sink(&self) -> &EventSink {
     &self.sink
   }
+  /// Remember a published pid for disconnect cleanup (bounded history).
   fn note_published_pid(&mut self, pid: u64) {
     crate::frame::track_pid(&mut self.published_pids, pid);
   }
+  /// Drain the published-pid history for disconnect clears.
   fn take_published_pids(&mut self) -> Vec<u64> {
     std::mem::take(&mut self.published_pids)
   }
@@ -112,6 +126,7 @@ pub struct IpcTransport {
 }
 
 impl std::fmt::Debug for IpcTransport {
+  /// Pipe path only; live handles stay out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("IpcTransport")
       .field("pipe_path", &self.pipe_path)
@@ -219,6 +234,7 @@ impl IpcTransport {
 }
 
 impl Drop for IpcTransport {
+  /// Abort a still-running dispatch task so drops never leak it.
   fn drop(&mut self) {
     if let Some(task) = &self.accept_task {
       task.abort();
@@ -302,6 +318,7 @@ struct DispatchCtx {
   sink: EventSink,
 }
 
+/// Dispatch loop: spawn one pump per pipe stream until token cancel (shutdown).
 async fn dispatch_loop(
   DispatchCtx {
     mut stream_rx,

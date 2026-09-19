@@ -36,10 +36,12 @@ impl QueueGauge {
     self.depth.load(Ordering::Relaxed)
   }
 
+  /// Count one queued send (diagnostic only: `Relaxed` ordering suffices).
   fn inc(&self) {
     self.depth.fetch_add(1, Ordering::Relaxed);
   }
 
+  /// Release one backlog count after a successful receive.
   fn dec(&self) {
     self.depth.fetch_sub(1, Ordering::Relaxed);
   }
@@ -66,6 +68,7 @@ pub struct GaugeSender<T> {
 }
 
 impl<T> Clone for GaugeSender<T> {
+  /// Share the channel and gauge (same backlog counter).
   fn clone(&self) -> Self {
     Self {
       inner: self.inner.clone(),
@@ -75,6 +78,7 @@ impl<T> Clone for GaugeSender<T> {
 }
 
 impl<T> std::fmt::Debug for GaugeSender<T> {
+  /// Backlog depth only; queued values stay out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("GaugeSender")
       .field("depth", &self.gauge.depth())
@@ -123,12 +127,14 @@ pub trait RecvQueue<T> {
 }
 
 impl<T> RecvQueue<T> for mpsc::Receiver<T> {
+  /// Plain blocking receive (no gauge to update).
   fn recv_q(&self) -> Result<T, mpsc::RecvError> {
     self.recv()
   }
 }
 
 impl<T> RecvQueue<T> for GaugeReceiver<T> {
+  /// Blocking receive that also releases the backlog count.
   fn recv_q(&self) -> Result<T, mpsc::RecvError> {
     self.recv()
   }
@@ -141,6 +147,7 @@ pub struct GaugeReceiver<T> {
 }
 
 impl<T> std::fmt::Debug for GaugeReceiver<T> {
+  /// Backlog depth only; queued values stay out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("GaugeReceiver")
       .field("depth", &self.gauge.depth())
@@ -222,6 +229,7 @@ pub fn format_resource_stats(reason: &str, snapshot: &StatsSnapshot) -> String {
 }
 
 impl StatsSnapshot {
+  /// Resident bytes as `12.3MB`, or `n/a` when unreadable/off-Linux.
   fn rss_mb(&self) -> String {
     self
       .rss_bytes

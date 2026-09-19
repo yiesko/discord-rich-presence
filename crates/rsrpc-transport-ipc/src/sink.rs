@@ -103,6 +103,7 @@ impl EventSink {
 mod tests {
   use super::*;
 
+  /// Full sinks shed counted instead of blocking the caller.
   #[test]
   fn emit_never_blocks_and_counts() {
     let (sink, mut rx) = EventSink::bounded(1);
@@ -112,6 +113,7 @@ mod tests {
     assert!(rx.try_recv().is_ok());
   }
 
+  /// Clears wait briefly for space instead of shedding like commands.
   #[test]
   fn emit_clear_survives_a_full_queue() {
     // Clears are final (no later event repairs a dropped one): a full

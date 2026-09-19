@@ -11,12 +11,14 @@ use tokio_tungstenite::tungstenite;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default config on an ephemeral loopback port.
 fn test_config() -> ServerConfig {
   ServerConfig::builder("127.0.0.1:0".parse().unwrap())
     .build()
     .unwrap()
 }
 
+/// Next hub event, failing (not hanging) after the timeout.
 async fn next_event(hub: &mut rsrpc_ws::EventHub) -> Event {
   tokio::time::timeout(TIMEOUT, hub.next_event())
     .await
@@ -24,6 +26,7 @@ async fn next_event(hub: &mut rsrpc_ws::EventHub) -> Event {
     .expect("hub closed unexpectedly")
 }
 
+/// Connect a raw client to the bound address.
 async fn connect(
   addr: std::net::SocketAddr,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
@@ -34,6 +37,7 @@ async fn connect(
 }
 
 #[tokio::test]
+/// Connect→message→disconnect surfaces all three hub events with stable ids.
 async fn connect_and_disconnect_roundtrip() {
   let (server, mut hub) = Server::bind(test_config()).await.unwrap();
   let addr = server.local_addr();
@@ -67,6 +71,7 @@ async fn connect_and_disconnect_roundtrip() {
 }
 
 #[tokio::test]
+/// Responder sends reach the client as text and binary frames.
 async fn echo_via_responder() {
   let (server, mut hub) = Server::bind(test_config()).await.unwrap();
   let addr = server.local_addr();
@@ -96,6 +101,7 @@ async fn echo_via_responder() {
 }
 
 #[tokio::test]
+/// Upgrade snapshots carry the loopback peer and request target.
 async fn connection_details_carry_peer_and_uri() {
   let (server, mut hub) = Server::bind(test_config()).await.unwrap();
   let addr = server.local_addr();
@@ -113,6 +119,7 @@ async fn connection_details_carry_peer_and_uri() {
 }
 
 #[tokio::test]
+/// Over-limit peers get a 1013 close instead of hanging.
 async fn over_connection_limit_gets_try_again_later() {
   let config = ServerConfig::builder("127.0.0.1:0".parse().unwrap())
     .max_connections(1)
@@ -142,6 +149,7 @@ async fn over_connection_limit_gets_try_again_later() {
   server.shutdown().await;
 }
 
+/// Silent post-handshake peers are reaped by idle timeout (no task leak).
 #[tokio::test]
 async fn half_open_conn_dies_on_idle_timeout() {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -197,6 +205,7 @@ async fn half_open_conn_dies_on_idle_timeout() {
   server.shutdown().await;
 }
 
+/// Idle deadline reaps even when keepalive ticks are hours away.
 #[tokio::test]
 async fn idle_timeout_fires_independently_of_keepalive() {
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -246,6 +255,7 @@ async fn idle_timeout_fires_independently_of_keepalive() {
   server.shutdown().await;
 }
 
+/// Shutdown drains 50 open conns: one `ServerShutdown` each, then hub close.
 #[tokio::test]
 async fn shutdown_with_open_conns_completes() {
   let (server, mut hub) = Server::bind(test_config()).await.unwrap();
@@ -273,6 +283,24 @@ async fn shutdown_with_open_conns_completes() {
     }
   }
   assert!(hub.next_event().await.is_none());
+}
+
+/// Unread outboxes report `Full` under flood (never grow, never block).
+/// Zero bounds are rejected with a config error, never a channel panic.
+#[tokio::test]
+async fn bind_rejects_zero_bounds_without_panic() {
+  for mutate in [
+    (|c: &mut ServerConfig| c.event_queue = 0) as fn(&mut ServerConfig),
+    (|c: &mut ServerConfig| c.per_client_queue = 0),
+    (|c: &mut ServerConfig| c.max_connections = 0),
+  ] {
+    let mut config = test_config();
+    mutate(&mut config);
+    assert!(
+      Server::bind(config).await.is_err(),
+      "zero bound must be a config error, not a panic"
+    );
+  }
 }
 
 #[tokio::test]

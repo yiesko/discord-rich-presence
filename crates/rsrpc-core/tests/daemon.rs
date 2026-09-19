@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use rsrpc_core::{Daemon, RPCConfig};
 
+/// Zero-port config: every listener binds ephemeral for hermetic tests.
 fn ephemeral_config() -> RPCConfig {
   RPCConfig::builder()
     .port(0)
@@ -14,6 +15,7 @@ fn ephemeral_config() -> RPCConfig {
     .build()
 }
 
+/// Empty databases detect nothing but stay fully operational.
 #[test]
 fn empty_database_detects_nothing_but_stays_ok() {
   let daemon = Daemon::from_json_str("[]", ephemeral_config()).expect("empty db parses");
@@ -22,12 +24,14 @@ fn empty_database_detects_nothing_but_stays_ok() {
   assert!(daemon.database_summary().is_empty());
 }
 
+/// The bundled snapshot parses and summarizes non-empty.
 #[test]
 fn bundled_database_summarizes() {
   let daemon = Daemon::from_bundled(RPCConfig::default()).expect("bundled parses");
   assert!(!daemon.database_summary().is_empty());
 }
 
+/// Full boot on ephemeral ports shuts down cleanly inside the deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_binds_and_shuts_down_cleanly() {
   let daemon = Daemon::from_json_str("[]", ephemeral_config()).expect("empty db parses");

@@ -27,47 +27,61 @@ struct TestFacilitator {
 }
 
 impl IpcFacilitator for TestFacilitator {
+  /// Test state: handshake flag.
   fn handshake(&self) -> bool {
     self.handshake
   }
+  /// Test state: handshake flag.
   fn set_handshake(&mut self, handshake: bool) {
     self.handshake = handshake;
   }
+  /// Test state: handshake application id.
   fn client_id(&self) -> String {
     self.client_id.clone()
   }
+  /// Test state: handshake application id.
   fn set_client_id(&mut self, client_id: String) {
     self.client_id = client_id;
   }
+  /// Test state: latest activity pid.
   fn pid(&self) -> u64 {
     self.pid
   }
+  /// Test state: latest activity pid.
   fn set_pid(&mut self, pid: u64) {
     self.pid = pid;
   }
+  /// Test state: latest command nonce.
   fn nonce(&self) -> String {
     self.nonce.clone()
   }
+  /// Test state: latest command nonce.
   fn set_nonce(&mut self, nonce: String) {
     self.nonce = nonce;
   }
+  /// Default identity payload (no user state in these tests).
   fn user_payload(&self) -> String {
     RpcUser::default().ready_payload()
   }
+  /// Default identity (no user state in these tests).
   fn current_user(&self) -> RpcUser {
     RpcUser::default()
   }
+  /// Test sink under assertion.
   fn sink(&self) -> &EventSink {
     &self.sink
   }
+  /// Test history via the shared bound helper.
   fn note_published_pid(&mut self, pid: u64) {
     rsrpc_transport_ipc::frame::track_pid(&mut self.published_pids, pid);
   }
+  /// Test history drain for disconnect-clear assertions.
   fn take_published_pids(&mut self) -> Vec<u64> {
     std::mem::take(&mut self.published_pids)
   }
 }
 
+/// Full flow: handshake→READY, SUBSCRIBE ack, SET_ACTIVITY echo+sink, Close→clear.
 #[test]
 fn handshake_set_activity_close_flow() {
   let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
@@ -139,6 +153,7 @@ fn handshake_set_activity_close_flow() {
   server.join().expect("server thread");
 }
 
+/// Garbage bytes kill the pump but must still clear the published pid.
 #[test]
 fn invalid_utf8_body_clears_published_pid() {
   let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
@@ -199,6 +214,7 @@ fn invalid_utf8_body_clears_published_pid() {
   server.join().expect("server thread");
 }
 
+/// Handshake + one presence publish, asserting echo and sink event.
 fn publish_presence(client: &mut UnixStream, rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) {
   write_frame(
     client,
@@ -218,6 +234,7 @@ fn publish_presence(client: &mut UnixStream, rx: &mut tokio::sync::mpsc::Receive
   assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(9));
 }
 
+/// Live pump on a socketpair, returning client end, sink and thread.
 fn spawn_server() -> (
   UnixStream,
   tokio::sync::mpsc::Receiver<ActivityCmd>,
@@ -242,6 +259,7 @@ fn spawn_server() -> (
   (client, rx, server)
 }
 
+/// Oversize frames close with 1003 and still clear the presence.
 #[test]
 fn oversize_frame_close_still_clears_presence() {
   use std::io::Write;
@@ -271,6 +289,7 @@ fn oversize_frame_close_still_clears_presence() {
   server.join().expect("server thread");
 }
 
+/// Unknown packet types close the connection but still clear presence.
 #[test]
 fn unknown_packet_type_close_still_clears_presence() {
   use std::io::Write;
@@ -298,6 +317,7 @@ fn unknown_packet_type_close_still_clears_presence() {
   server.join().expect("server thread");
 }
 
+/// Publish one pid, asserting echo and sink event carry it.
 fn publish_pid(
   client: &mut UnixStream,
   rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>,
@@ -316,6 +336,7 @@ fn publish_pid(
   assert_eq!(cmd.args.as_ref().and_then(|a| a.pid), Some(pid));
 }
 
+/// Next sink clear, returning its pid (panics on non-clears).
 fn recv_clear_pid(rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) -> u64 {
   let cmd = recv_cmd(rx);
   assert_eq!(cmd.cmd, "SET_ACTIVITY");
@@ -334,6 +355,7 @@ fn recv_clear_pid(rx: &mut tokio::sync::mpsc::Receiver<ActivityCmd>) -> u64 {
     .expect("clear carries pid")
 }
 
+/// Abrupt close (no Close frame) clears every published pid.
 #[test]
 fn abrupt_close_clears_every_published_pid() {
   let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
@@ -372,6 +394,7 @@ fn abrupt_close_clears_every_published_pid() {
   server.join().expect("server thread");
 }
 
+/// Beyond 16 pids only the most recent clear on disconnect.
 #[test]
 fn published_pid_history_is_bounded() {
   let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
@@ -415,6 +438,7 @@ fn published_pid_history_is_bounded() {
   server.join().expect("server thread");
 }
 
+/// Close clears retry through a full sink instead of shedding.
 #[test]
 fn clean_close_clear_survives_a_full_sink() {
   let (server_stream, mut client) = UnixStream::pair().expect("socketpair");

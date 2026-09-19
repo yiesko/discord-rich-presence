@@ -20,6 +20,7 @@ fn proc_buf(what: u32, pid: u32) -> Vec<u8> {
   buf
 }
 
+/// EXEC/EXIT parse by discriminant; foreign, control and corrupt input yield `None`.
 #[test]
 fn proc_event_parses_exec_and_exit() {
   assert_eq!(
@@ -57,6 +58,7 @@ fn proc_event_parses_exec_and_exit() {
   assert_eq!(parse_event(&proc_buf(0x2, 1)[..10]), None);
 }
 
+/// Liveness means parsed events; chatter without parses is drift, silence is a stall.
 #[test]
 fn self_test_report_distinguishes_silence_from_drift() {
   // Proven delivery: any parsed event counts.
@@ -81,6 +83,7 @@ fn self_test_report_distinguishes_silence_from_drift() {
   assert!(!SelfTestReport::default().live());
 }
 
+/// Gaps count by distance; u32 wraps and restarts re-anchor silently.
 #[test]
 fn seq_tracker_counts_gaps_wraps_and_resets() {
   let mut tracker = SeqTracker::default();
@@ -105,6 +108,7 @@ fn seq_tracker_counts_gaps_wraps_and_resets() {
   assert_eq!(tracker.missed(), 4);
 }
 
+/// The walker visits every message; single-shot parse keeps the first.
 #[test]
 fn walk_observes_every_message_while_parse_takes_first() {
   use rsrpc_proc_events::{ProcEvent, parse_event, walk_proc_messages};
@@ -129,6 +133,7 @@ fn walk_observes_every_message_while_parse_takes_first() {
   assert_eq!(seen, vec![(0, 10, true), (1, 20, true)]);
 }
 
+/// Multi-event datagrams forward every event, not just the first.
 #[test]
 fn forward_proc_events_delivers_every_event_in_one_datagram() {
   use rsrpc_proc_events::{ProcEvent, SeqTracker, forward_proc_events};
@@ -153,6 +158,7 @@ fn forward_proc_events_delivers_every_event_in_one_datagram() {
   assert_eq!(got, vec![ProcEvent::Exec(111), ProcEvent::Exec(222)]);
 }
 
+/// Undelivered events (dead receiver) are neither counted nor walked past.
 #[test]
 fn forward_counts_only_delivered_events() {
   use rsrpc_proc_events::{SeqTracker, forward_proc_events};

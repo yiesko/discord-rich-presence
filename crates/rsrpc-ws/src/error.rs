@@ -47,6 +47,7 @@ pub enum TrySendError {
 }
 
 impl From<TrySendError> for SendError {
+  /// Collapse both `Full` and `Closed` into "not delivered".
   fn from(_: TrySendError) -> Self {
     Self
   }
@@ -56,12 +57,14 @@ impl From<TrySendError> for SendError {
 mod tests {
   use super::*;
 
+  /// Both `Full` and `Closed` convert into `SendError`.
   #[test]
   fn try_send_error_collapses_to_send_error() {
     let _: SendError = TrySendError::Full.into();
     let _: SendError = TrySendError::Closed.into();
   }
 
+  /// `Bind` keeps the OS error as source (e.g. `AddrInUse` stays matchable).
   #[test]
   fn bind_error_preserves_os_source() {
     use std::error::Error as _;

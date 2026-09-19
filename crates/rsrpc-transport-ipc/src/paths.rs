@@ -138,6 +138,7 @@ pub fn socket_file_name(bound_path: &str) -> String {
 mod tests {
   use super::*;
 
+  /// Isolated temp dir per test (tag-suffixed, hermetic).
   fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rsrpc-paths-test-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -145,6 +146,7 @@ mod tests {
     dir
   }
 
+  /// Fanout skips links whose socket answers (live foreign owner).
   #[test]
   fn fanout_never_steals_live_foreign_link() {
     let ours = scratch("ours");
@@ -171,6 +173,7 @@ mod tests {
     let _ = std::fs::remove_dir_all(&foreign);
   }
 
+  /// Dangling links to dead sockets are reclaimed for our bind.
   #[test]
   fn fanout_reclaims_stale_dangling_link() {
     let dir = scratch("stale");

@@ -147,6 +147,8 @@ pub fn walk_proc_messages(buf: &[u8], visit: &mut impl FnMut(u32, u32, Option<Pr
   }
 }
 
+/// First lifecycle event in a netlink datagram, if any (single-shot helper
+/// for tests and slow paths; the watcher uses the streaming walker).
 pub fn parse_event(buf: &[u8]) -> Option<ProcEvent> {
   let mut found = None;
   walk_proc_messages(buf, &mut |_, _, event| {

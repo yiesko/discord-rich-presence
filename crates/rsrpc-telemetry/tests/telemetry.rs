@@ -2,6 +2,7 @@
 use rsrpc_telemetry::rss_bytes;
 use rsrpc_telemetry::{QueueGauge, StatsSnapshot, format_resource_stats};
 
+/// Depth follows sends and receives one by one.
 #[test]
 fn queue_gauge_tracks_depth() {
   let (tx, rx) = QueueGauge::pair::<u64>();
@@ -17,6 +18,7 @@ fn queue_gauge_tracks_depth() {
   assert_eq!(gauge.depth(), 0);
 }
 
+/// Cloned senders report into the same shared depth.
 #[test]
 fn queue_gauge_clone_shares_depth() {
   // Production clones senders across threads: the gauge must follow.
@@ -27,6 +29,7 @@ fn queue_gauge_clone_shares_depth() {
   assert_eq!(gauge.depth(), 1);
 }
 
+/// Failed sends roll back, leaving no phantom backlog.
 #[test]
 fn queue_gauge_ignores_failed_send() {
   // Receiver gone (shutdown): no phantom backlog may stick.
@@ -37,6 +40,7 @@ fn queue_gauge_ignores_failed_send() {
   assert_eq!(gauge.depth(), 0);
 }
 
+/// Concurrent hammering never wraps the depth; quiescence reads zero.
 #[test]
 fn queue_gauge_settles_at_zero_after_concurrent_use() {
   // Hammering senders racing a drainer must never wrap the depth: at
@@ -61,6 +65,7 @@ fn queue_gauge_settles_at_zero_after_concurrent_use() {
   assert_eq!(gauge.depth(), 0);
 }
 
+/// Self-RSS reads positive on a live Linux test process.
 #[test]
 #[cfg(target_os = "linux")]
 fn rss_bytes_reports_live_process() {
@@ -68,6 +73,7 @@ fn rss_bytes_reports_live_process() {
   assert!(rss > 0, "a live test process has resident memory");
 }
 
+/// The census line carries reason, RSS and every count field.
 #[test]
 fn format_resource_stats_mentions_reason_and_fields() {
   // 40 MiB exactly: deterministic rendering check.

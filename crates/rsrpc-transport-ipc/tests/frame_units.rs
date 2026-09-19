@@ -4,6 +4,7 @@
 use rsrpc_transport_ipc::frame::{MAX_IPC_PAYLOAD, PacketType, close_frame, encode};
 use rsrpc_transport_ipc::{EventSink, send_empty};
 
+/// Disconnect clears route as `SET_ACTIVITY`, or the bridge never clears them.
 #[test]
 fn send_empty_routes_as_set_activity_clear() {
   // Regression: disconnect clears must carry cmd == SET_ACTIVITY, or
@@ -18,6 +19,7 @@ fn send_empty_routes_as_set_activity_clear() {
   assert!(args.activity.is_none());
 }
 
+/// Out-of-range packet types map to `None` (refused, never misread).
 #[test]
 fn unknown_packet_types_are_refused_not_misread_as_frames() {
   assert!(PacketType::try_from_u32(0).is_some());
@@ -26,11 +28,13 @@ fn unknown_packet_types_are_refused_not_misread_as_frames() {
   assert!(PacketType::try_from_u32(u32::MAX).is_none());
 }
 
+/// Payload cap stays at the Discord-compatible 1 MiB.
 #[test]
 fn payload_limit_matches_discord_1mib() {
   assert_eq!(MAX_IPC_PAYLOAD, 1024 * 1024);
 }
 
+/// Close frames carry the Discord-shaped `{code, message}` body.
 #[test]
 fn close_frame_carries_code_and_message() {
   let frame = close_frame(1003, "Payload too large");
@@ -43,6 +47,7 @@ fn close_frame_carries_code_and_message() {
   assert_eq!(body["message"], "Payload too large");
 }
 
+/// Encoded headers round-trip type tag and length exactly.
 #[test]
 fn encode_roundtrips_header() {
   let frame = encode(PacketType::Ping, "hello");
@@ -51,6 +56,7 @@ fn encode_roundtrips_header() {
   assert_eq!(&frame[8..], b"hello");
 }
 
+/// Full sinks shed (counted) instead of blocking connection threads.
 #[test]
 fn full_sink_sheds_and_counts() {
   let (sink, _rx) = EventSink::bounded(1);

@@ -2,6 +2,7 @@ use rsrpc_detect::db::{
   BUNDLED_DETECTABLE, content_hashes, parse_exclusions, trim_detectable, trim_detectable_value,
 };
 
+/// Bundled snapshot parses and survives the trim round-trip intact.
 #[test]
 fn bundled_snapshot_parses_and_hashes() {
   let parsed: Vec<serde_json::Value> =
@@ -12,6 +13,7 @@ fn bundled_snapshot_parses_and_hashes() {
   assert_eq!(reparsed.len(), parsed.len());
 }
 
+/// Canonical hashes ignore hook/description churn; raw hashes do not.
 #[test]
 fn content_hashes_ignore_volatile_churn() {
   let body_a = r#"[{"id":"1","name":"Game","executables":[{"name":"game.exe","is_launcher":false,"os":"win32"}],"third_party_skus":[],"aliases":[],"hook":false,"description":"v1"}]"#;
@@ -29,6 +31,7 @@ fn content_hashes_ignore_volatile_churn() {
   assert_eq!(canon_a, canon_b);
 }
 
+/// Trimming drops descriptions, extras and empty SKUs; keeps match fields.
 #[test]
 fn trim_keeps_only_scanner_fields() {
   let value = trim_detectable_value(
@@ -45,6 +48,7 @@ fn trim_keeps_only_scanner_fields() {
   assert_eq!(entry["third_party_skus"].as_array().unwrap().len(), 1);
 }
 
+/// Exclusions match basenames and regexes, case-insensitively.
 #[test]
 fn exclusions_match_basename_and_patterns() {
   let exclusions = parse_exclusions(
@@ -55,6 +59,7 @@ fn exclusions_match_basename_and_patterns() {
   assert!(!exclusions.is_excluded("game.exe"));
 }
 
+/// Garbage exclusion payloads block nothing and keep valid patterns.
 #[test]
 fn exclusions_tolerate_garbage() {
   let empty = parse_exclusions("not json{{");

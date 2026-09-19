@@ -208,6 +208,7 @@ mod tests {
 
   use super::*;
 
+  /// Exclusions fixture with one executable and no patterns.
   fn full_exclusions() -> Exclusions {
     Exclusions {
       executables: HashSet::from(["setup.exe".to_string()]),
@@ -215,6 +216,7 @@ mod tests {
     }
   }
 
+  /// Empty exclusions fixture (blocks nothing).
   fn empty_exclusions() -> Exclusions {
     Exclusions {
       executables: HashSet::new(),
@@ -222,6 +224,7 @@ mod tests {
     }
   }
 
+  /// Empty fetches never wipe the active exclusion set.
   #[test]
   fn empty_fetch_never_wipes_active_set() {
     // A malformed upstream (error page served with HTTP 200) parses to

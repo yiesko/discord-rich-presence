@@ -23,18 +23,21 @@ pub struct AppId(pub Arc<str>);
 pub struct SocketId(pub Arc<str>);
 
 impl std::fmt::Display for AppId {
+  /// Format the inner id verbatim (wire format).
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     self.0.fmt(f)
   }
 }
 
 impl std::fmt::Display for SocketId {
+  /// Format the inner id verbatim (wire format).
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     self.0.fmt(f)
   }
 }
 
 impl AsRef<str> for AppId {
+  /// Borrow the inner id as `str` (no allocation, no copy).
   fn as_ref(&self) -> &str {
     &self.0
   }
@@ -43,6 +46,7 @@ impl AsRef<str> for AppId {
 /// Borrow as `str` so `HashMap<AppId, _>` lookups accept `&str` without
 /// allocating an owned key on the hot path.
 impl std::borrow::Borrow<str> for AppId {
+  /// Borrow for `HashMap` str lookups (no owned key).
   fn borrow(&self) -> &str {
     &self.0
   }
@@ -50,48 +54,56 @@ impl std::borrow::Borrow<str> for AppId {
 
 /// Same as [`AppId`]: socket maps accept `&str` lookups directly.
 impl std::borrow::Borrow<str> for SocketId {
+  /// Borrow for `HashMap` str lookups (no owned key).
   fn borrow(&self) -> &str {
     &self.0
   }
 }
 
 impl AsRef<str> for SocketId {
+  /// Borrow the inner id as `str` (no allocation, no copy).
   fn as_ref(&self) -> &str {
     &self.0
   }
 }
 
 impl From<String> for AppId {
+  /// Adopt an owned string without revalidating (ids are opaque).
   fn from(id: String) -> Self {
     Self(id.into())
   }
 }
 
 impl From<Box<str>> for AppId {
+  /// Adopt a boxed slice (one copy into the refcounted layout).
   fn from(id: Box<str>) -> Self {
     Self(Arc::from(id))
   }
 }
 
 impl From<&str> for AppId {
+  /// Copy a borrowed id into shared ownership.
   fn from(id: &str) -> Self {
     Self(Arc::from(id))
   }
 }
 
 impl From<String> for SocketId {
+  /// Adopt an owned string without revalidating (ids are opaque).
   fn from(id: String) -> Self {
     Self(id.into())
   }
 }
 
 impl From<Box<str>> for SocketId {
+  /// Adopt a boxed slice (one copy into the refcounted layout).
   fn from(id: Box<str>) -> Self {
     Self(Arc::from(id))
   }
 }
 
 impl From<&str> for SocketId {
+  /// Copy a borrowed id into shared ownership.
   fn from(id: &str) -> Self {
     Self(Arc::from(id))
   }
@@ -100,6 +112,7 @@ impl From<&str> for SocketId {
 /// An app slot doubles as its own socket on the generic (scanner-driven)
 /// path: move the id across instead of cloning it.
 impl From<AppId> for SocketId {
+  /// Move the allocation across (no clone, no copy).
   fn from(id: AppId) -> Self {
     Self(id.0)
   }
@@ -107,6 +120,7 @@ impl From<AppId> for SocketId {
 
 /// Borrow an app id as its socket without touching the inner string.
 impl From<&AppId> for SocketId {
+  /// Share the allocation (refcount bump, no string copy).
   fn from(id: &AppId) -> Self {
     Self(id.0.clone())
   }
@@ -114,6 +128,7 @@ impl From<&AppId> for SocketId {
 
 /// Unwrap back to the wire string (Display also works for formatting).
 impl From<AppId> for String {
+  /// Copy out to an owned wire string.
   fn from(id: AppId) -> Self {
     id.0.to_string()
   }
@@ -121,6 +136,7 @@ impl From<AppId> for String {
 
 /// Unwrap back to the wire string (Display also works for formatting).
 impl From<SocketId> for String {
+  /// Copy out to an owned wire string.
   fn from(id: SocketId) -> Self {
     id.0.to_string()
   }
@@ -131,6 +147,7 @@ mod tests {
   use super::*;
   use std::collections::HashMap;
 
+  /// Newtypes stay pointer-sized: no inline buffer beside the `Arc`.
   #[test]
   fn ids_share_arc_allocation() {
     assert_eq!(
@@ -143,6 +160,7 @@ mod tests {
     );
   }
 
+  /// Clones share the allocation (pointer-equal), never copy the bytes.
   #[test]
   fn clone_shares_instead_of_copying() {
     let id = AppId::from("123456789012345678");
@@ -156,6 +174,7 @@ mod tests {
     ));
   }
 
+  /// `Borrow<str>` lets maps answer `&str` lookups with no owned key.
   #[test]
   fn str_lookup_needs_no_owned_key() {
     let mut map: HashMap<AppId, u64> = HashMap::new();
@@ -166,6 +185,7 @@ mod tests {
     assert_eq!(sockets.get("sock-1"), Some(&7));
   }
 
+  /// Every `From` direction preserves the exact id string.
   #[test]
   fn conversions_roundtrip() {
     let app = AppId::from("abc");
@@ -177,6 +197,7 @@ mod tests {
     assert_eq!(moved.as_ref(), "abc");
   }
 
+  /// Boxed-slice adoption shares on later clones (pointer-equal).
   #[test]
   fn boxed_str_converts() {
     // One copy into the refcounted layout (Arc stores counters inline, so
@@ -189,6 +210,7 @@ mod tests {
     assert_eq!(sock.as_ref(), "sock-id");
   }
 
+  /// Serde wire format is a plain JSON string, both directions.
   #[test]
   fn wire_format_is_plain_string() {
     let json = serde_json::to_string(&AppId::from("123")).unwrap();

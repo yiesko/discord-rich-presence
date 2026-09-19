@@ -63,6 +63,7 @@ mod tests {
 
   use super::*;
 
+  /// Isolated temp dir per test (tag-suffixed, hermetic).
   fn scratch(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("rsrpc-probe-test-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -70,6 +71,7 @@ mod tests {
     dir
   }
 
+  /// Absent socket paths read as not alive.
   #[test]
   fn missing_socket_reads_as_not_alive() {
     let dir = scratch("missing");
@@ -78,6 +80,7 @@ mod tests {
     let _ = std::fs::remove_dir_all(&dir);
   }
 
+  /// A bound-but-silent holder still reads as alive.
   #[test]
   fn silent_holder_reads_as_alive() {
     // A holder that accepts but never answers (wedged or slow) must not

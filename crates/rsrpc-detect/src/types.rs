@@ -98,6 +98,7 @@ pub enum OsName {
 }
 
 impl OsName {
+  /// Classify a database `os` tag, cloning only exotic values.
   pub fn from_os(os: &str) -> Self {
     match os {
       "win32" => Self::Win32,
@@ -120,6 +121,7 @@ impl OsName {
     }
   }
 
+  /// Back to the database tag string (borrows exotic values in place).
   pub fn as_str(&self) -> &str {
     match self {
       Self::Win32 => "win32",
@@ -130,6 +132,7 @@ impl OsName {
     }
   }
 
+  /// True for the empty tag (database entries without an OS).
   pub fn is_empty(&self) -> bool {
     matches!(self, Self::Empty)
   }

@@ -58,6 +58,7 @@ pub fn read_exec(pid: u64) -> Option<Exec> {
   })
 }
 
+/// Whether a database `os` tag applies on this build (unknown platforms match all).
 pub(crate) fn os_matches(os: &str) -> bool {
   match std::env::consts::OS {
     "windows" => os == "win32",

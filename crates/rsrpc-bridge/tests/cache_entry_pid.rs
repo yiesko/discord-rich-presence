@@ -8,6 +8,7 @@ use rsrpc_bridge::cache_entry_pid;
 use rsrpc_protocol::commands::CachedActivity;
 use rsrpc_types::SocketId;
 
+/// Clear-payload fixture carrying a chosen pid in its JSON body.
 fn cached_with(pid_json: &str) -> CachedActivity {
   CachedActivity {
     json: tungstenite::Utf8Bytes::from(format!(r#"{{"activity":null,"pid":{pid_json}}}"#)),
@@ -17,6 +18,7 @@ fn cached_with(pid_json: &str) -> CachedActivity {
   }
 }
 
+/// The JSON body pid is authoritative over a numeric socket id.
 #[test]
 fn body_pid_wins_over_numeric_socket_id() {
   // Generic scanner cards are cached under the numeric application id
@@ -25,6 +27,7 @@ fn body_pid_wins_over_numeric_socket_id() {
   assert_eq!(cache_entry_pid(&SocketId::from("4242"), &payload), Some(42));
 }
 
+/// Unparseable bodies fall back to the numeric socket id.
 #[test]
 fn numeric_socket_id_used_when_body_unusable() {
   let broken = CachedActivity {
@@ -39,6 +42,7 @@ fn numeric_socket_id_used_when_body_unusable() {
   );
 }
 
+/// Non-numeric socket ids resolve through the body pid.
 #[test]
 fn falls_back_to_body() {
   let payload = cached_with("77");
@@ -48,6 +52,7 @@ fn falls_back_to_body() {
   );
 }
 
+/// Zero and garbage resolve to `None` (never proven dead, never reaped).
 #[test]
 fn rejects_zero_and_garbage() {
   let payload = cached_with("0");

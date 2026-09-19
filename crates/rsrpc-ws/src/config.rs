@@ -192,10 +192,12 @@ impl ServerConfigBuilder {
 mod tests {
   use super::*;
 
+  /// Ephemeral loopback address for hermetic bind tests.
   fn loopback() -> SocketAddr {
     "127.0.0.1:0".parse().unwrap()
   }
 
+  /// Defaults match the documented production bounds.
   #[test]
   fn builder_defaults_are_sane() {
     let cfg = ServerConfig::builder(loopback()).build().unwrap();
@@ -208,6 +210,7 @@ mod tests {
     assert_eq!(cfg.idle_timeout, DEFAULT_IDLE_TIMEOUT);
   }
 
+  /// Zero bounds are rejected at build time, never at bind time.
   #[test]
   fn builder_rejects_zero_bounds() {
     assert!(matches!(

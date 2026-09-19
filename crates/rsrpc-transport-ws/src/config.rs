@@ -88,6 +88,7 @@ impl WsTransportConfig {
 mod tests {
   use super::*;
 
+  /// Defaults enable activity plus secondary events with bounded queues.
   #[test]
   fn defaults_enable_full_behavior() {
     let config = WsTransportConfig::new(6463, 6472);

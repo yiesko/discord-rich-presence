@@ -14,6 +14,7 @@ struct Scratch {
 }
 
 impl Scratch {
+  /// Fresh unique temp dir for one test (pre-cleaned).
   fn new(tag: &str) -> Self {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -27,18 +28,21 @@ impl Scratch {
     Self { path }
   }
 
+  /// Path inside the scratch root.
   fn join(&self, name: &str) -> PathBuf {
     self.path.join(name)
   }
 }
 
 impl Drop for Scratch {
+  /// Remove the scratch dir (best-effort, panic-safe).
   fn drop(&mut self) {
     let _ = std::fs::remove_dir_all(&self.path);
   }
 }
 
 /// Hermetic fake Steam root with `libraryfolders.vdf` + manifests.
+/// Fake Steam root with libraryfolders.vdf plus the given manifests.
 fn fake_steam_root(tag: &str, manifests: &[(&str, &str)]) -> Scratch {
   let root = Scratch::new(tag);
   let apps = root.join("steamapps");
@@ -56,6 +60,7 @@ fn fake_steam_root(tag: &str, manifests: &[(&str, &str)]) -> Scratch {
   root
 }
 
+/// Deep nesting, truncation and stray braces degrade without corrupting.
 #[test]
 fn vdf_rejects_nesting_attacks_and_truncation() {
   // 10k-deep nesting: iterative parser survives, depth cap stops it.
@@ -82,6 +87,7 @@ fn vdf_rejects_nesting_attacks_and_truncation() {
   assert!(!doc.contains_key("b"));
 }
 
+/// New + legacy libraryfolders shapes and manifest id/dir extraction.
 #[test]
 fn vdf_parses_libraryfolders_and_manifest() {
   // New format: paths nested under "path".
@@ -127,6 +133,7 @@ fn vdf_parses_libraryfolders_and_manifest() {
   assert!(manifest_ids(&parse_vdf_str("")).is_none());
 }
 
+/// Install-prefix matching is case-insensitive; outside matches nothing.
 #[test]
 fn from_root_matches_install_prefix() {
   let root = fake_steam_root("prefix", &[("12345", "Vdf Game")]);
@@ -144,6 +151,7 @@ fn from_root_matches_install_prefix() {
   assert!(libraries.match_prefix("/usr/bin/fish").is_none());
 }
 
+/// Vanished roots drop out on refresh instead of serving stale dirs.
 #[test]
 fn refresh_drops_libraries_of_vanished_roots() {
   let root = fake_steam_root("vanish", &[("12345", "Vdf Game")]);
@@ -163,6 +171,7 @@ fn refresh_drops_libraries_of_vanished_roots() {
   assert_eq!(libraries.match_prefix(&query), None);
 }
 
+/// Off-root libraries surface via the mount table; pseudo-fs never do.
 #[test]
 fn mount_roots_detect_partition_layouts() {
   // A second disk carrying a library outside every Steam root: the mount
@@ -188,6 +197,7 @@ fn mount_roots_detect_partition_layouts() {
   );
 }
 
+/// Octal escapes decode (incl. multi-byte UTF-8); bad ones pass through.
 #[test]
 fn mount_escapes_decode_octal() {
   use rsrpc_steam::unescape_mount;

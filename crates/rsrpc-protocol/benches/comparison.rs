@@ -97,6 +97,7 @@ fn benchmark_set_activity_response(c: &mut Criterion) {
   });
 }
 
+/// Flood path: fingerprint once, drop repeats without building envelopes.
 fn benchmark_flood_drop_pipeline(c: &mut Criterion) {
   // The flood path after the reorder: fingerprint once, then drop on the
   // repeat publish — without ever building the envelope. The guard is

@@ -257,6 +257,7 @@ fn dedup_table_stays_bounded() {
   assert!(!recent.is_empty());
 }
 
+/// Cloned payloads share one allocation (`Arc` + refcounted encodings).
 #[test]
 fn cached_builds_share_one_allocation() {
   use rsrpc_protocol::commands::empty_cached;
@@ -276,6 +277,7 @@ fn cached_builds_share_one_allocation() {
   assert_eq!(payload.msgpack.as_ptr(), shared.msgpack.as_ptr());
 }
 
+/// `is_clear` is set at construction for all three build shapes.
 #[test]
 fn cached_payload_knows_whether_it_clears() {
   use rsrpc_protocol::commands::{cached_activity, empty_cached};
@@ -309,6 +311,7 @@ fn cached_payload_knows_whether_it_clears() {
   assert!(payload.is_clear);
 }
 
+/// Canonical `SET_ACTIVITY` command fixture (app 123, pid 42).
 fn set_activity_cmd() -> ActivityCmd {
   parse_cmd(
     r#"{
@@ -320,6 +323,7 @@ fn set_activity_cmd() -> ActivityCmd {
   )
 }
 
+/// Fingerprints equal the standalone serialization of the fixed activity.
 #[test]
 fn activity_fingerprint_matches_standalone_serialization() {
   use rsrpc_protocol::commands::activity_fingerprint;
@@ -335,6 +339,7 @@ fn activity_fingerprint_matches_standalone_serialization() {
   assert_eq!(fp, serde_json::to_vec(activity).expect("serializable"));
 }
 
+/// Activity-less commands (clears) fingerprint to `None`.
 #[test]
 fn activity_fingerprint_is_none_for_clears() {
   use rsrpc_protocol::commands::activity_fingerprint;
@@ -343,6 +348,7 @@ fn activity_fingerprint_is_none_for_clears() {
   assert!(activity_fingerprint(&mut cmd).is_none());
 }
 
+/// Built payloads store the exact fingerprint bytes for change detection.
 #[test]
 fn cached_activity_carries_fingerprint_bytes() {
   use rsrpc_protocol::commands::activity_fingerprint;
@@ -354,6 +360,7 @@ fn cached_activity_carries_fingerprint_bytes() {
   assert!(!cached.is_clear);
 }
 
+/// Outer application ids feed the fingerprint (no cross-app aliasing).
 #[test]
 fn fingerprint_includes_outer_application_id() {
   // The stamp (outer application_id -> activity.application_id) must

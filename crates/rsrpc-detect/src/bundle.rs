@@ -242,12 +242,14 @@ pub fn bare_exe(normalized_path: &str) -> Option<&str> {
   Some(trimmed)
 }
 
+/// Native patterns with the OS filter on (production main database).
 fn build_ac_patterns(
   detectables: &[Arc<ScannedEntry>],
 ) -> Result<(AhoCorasick, Vec<[usize; 2]>), aho_corasick::BuildError> {
   build_ac_patterns_with_os_filter(detectables, true)
 }
 
+/// Custom-override patterns with no OS filter (user entries match anywhere).
 fn build_ac_patterns_allow_all_os(
   detectables: &[Arc<ScannedEntry>],
 ) -> Result<(AhoCorasick, Vec<[usize; 2]>), aho_corasick::BuildError> {
@@ -294,6 +296,8 @@ pub(crate) fn build_bundle(
   })
 }
 
+/// Shared automaton builder: one pattern per non-launcher executable plus
+/// its index back into the entry list (empty input yields an empty matcher).
 fn build_ac_patterns_with_os_filter(
   detectables: &[Arc<ScannedEntry>],
   enforce_os: bool,

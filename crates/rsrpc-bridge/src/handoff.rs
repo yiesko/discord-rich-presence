@@ -218,6 +218,7 @@ pub fn track_process_publication(map: &mut HashMap<AppId, u64>, app_id: AppId, p
 mod tests {
   use super::*;
 
+  /// Own pid is alive everywhere; 0 and `u32::MAX` never are.
   #[test]
   fn liveness_spots_own_pid_and_rejects_absurd_ones() {
     // Contract on every platform: our own pid is alive, pid 0 never is,
@@ -227,6 +228,7 @@ mod tests {
     assert!(!is_process_alive(u64::from(u32::MAX)));
   }
 
+  /// Fixture game (fixed pid 1234) for handoff unit tests.
   fn game(id: &str) -> ScannedGame {
     ScannedGame {
       id: AppId::from(id),
@@ -236,6 +238,7 @@ mod tests {
     }
   }
 
+  /// Only the owning pid's clear releases suppression; others are ignored.
   #[test]
   fn suppresses_while_ipc_live_and_resumes_on_owner_clear() {
     let game = game("111111111111111111");
@@ -256,6 +259,7 @@ mod tests {
     assert_eq!(handoff.resume_for(game.id.as_ref()), Some(game));
   }
 
+  /// `note_remove` drops one slot (pid-gated) and leaves the rest alone.
   #[test]
   fn per_slot_remove_forgets_only_that_slot() {
     let mut handoff = HandoffState::default();
@@ -271,6 +275,7 @@ mod tests {
     assert!(handoff.note_remove("missing", 1).is_none());
   }
 
+  /// Takeover forgets the old pid: its late clear must not resume generics.
   #[test]
   fn takeover_last_publisher_wins() {
     let mut handoff = HandoffState::default();
@@ -285,6 +290,7 @@ mod tests {
     assert!(!handoff.is_suppressed("1"));
   }
 
+  /// Resume fires only for the game the scanner still reports.
   #[test]
   fn resume_only_matches_scanned_game() {
     let mut handoff = HandoffState::default();
@@ -304,6 +310,7 @@ mod tests {
     assert_eq!(handoff.resume_for("1"), None);
   }
 
+  /// Abrupt close releases every slot of the dead pid, idempotently.
   #[test]
   fn abrupt_close_releases_every_slot_of_dead_pid() {
     let mut handoff = HandoffState::default();
@@ -320,6 +327,7 @@ mod tests {
     assert!(handoff.note_clear_pid(10).is_empty());
   }
 
+  /// Hostile pid-0 floods cannot grow the tables past the cap.
   #[test]
   fn tables_stay_bounded() {
     let mut handoff = HandoffState::default();
@@ -331,6 +339,7 @@ mod tests {
     assert!(handoff.live_ipc.len() <= MAX_HANDOFF_ENTRIES);
   }
 
+  /// Pid 0 and dead pids read dead; our own pid reads alive.
   #[test]
   fn process_alive_rejects_zero_and_dead_pids() {
     assert!(!is_process_alive(0));

@@ -25,6 +25,7 @@ struct Fixture {
   proc_tx: tokio::sync::mpsc::Sender<ProcInput>,
 }
 
+/// Bound bridge on ephemeral ports with drivable input channels.
 async fn fixture() -> Fixture {
   let (ipc_tx, ipc_rx) = tokio::sync::mpsc::channel(64);
   let (game_tx, game_rx) = tokio::sync::mpsc::channel(1024);
@@ -59,6 +60,7 @@ async fn fixture() -> Fixture {
   }
 }
 
+/// Connect a raw consumer to one bridge port.
 async fn connect(port: u16, query: &str) -> WsStream {
   let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{query}"))
     .await
@@ -66,6 +68,7 @@ async fn connect(port: u16, query: &str) -> WsStream {
   ws
 }
 
+/// Next JSON text frame, parsed (panics on anything else).
 async fn read_json(ws: &mut WsStream) -> serde_json::Value {
   match tokio::time::timeout(TIMEOUT, ws.next()).await.unwrap() {
     Some(Ok(tungstenite::Message::Text(text))) => {
@@ -75,6 +78,7 @@ async fn read_json(ws: &mut WsStream) -> serde_json::Value {
   }
 }
 
+/// Next MessagePack frame, decoded to JSON for assertions.
 async fn read_msgpack(ws: &mut WsStream) -> serde_json::Value {
   match tokio::time::timeout(TIMEOUT, ws.next()).await.unwrap() {
     Some(Ok(tungstenite::Message::Binary(bytes))) => {
@@ -84,6 +88,7 @@ async fn read_msgpack(ws: &mut WsStream) -> serde_json::Value {
   }
 }
 
+/// Minimal `SET_ACTIVITY` command fixture for the given pid.
 fn set_activity(pid: u64, name: &str) -> rsrpc_types::cmd::ActivityCmd {
   serde_json::from_value(serde_json::json!({
     "cmd": "SET_ACTIVITY",
@@ -95,6 +100,7 @@ fn set_activity(pid: u64, name: &str) -> rsrpc_types::cmd::ActivityCmd {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Publishes fan out to JSON + MessagePack and replay to late joiners.
 async fn publish_reaches_both_protocols_with_replay() {
   let fx = fixture().await;
 
@@ -140,6 +146,7 @@ async fn publish_reaches_both_protocols_with_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// `SET_USER` acks and fans out `CURRENT_USER_UPDATE` to consumers.
 async fn set_user_fans_out_current_user_update() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -162,6 +169,7 @@ async fn set_user_fans_out_current_user_update() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Genuine clears empty the replay cache (late joiners see nothing).
 async fn genuine_clear_empties_replay() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -197,6 +205,7 @@ async fn genuine_clear_empties_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Scanner input publishes a generic card; empty tables clear it.
 async fn process_scan_publishes_generic_and_null_clears() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -223,6 +232,7 @@ async fn process_scan_publishes_generic_and_null_clears() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Empty tables clear live generics exactly once (no ghost-sweep echo).
 async fn null_scan_clears_live_generic_exactly_once() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -260,6 +270,7 @@ async fn null_scan_clears_live_generic_exactly_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Per-connection format overrides stick for the whole stream.
 async fn format_override_consumer_stays_on_resolved_protocol() {
   let fx = fixture().await;
   // Consumer overrides the JSON port to MessagePack: READY already
@@ -277,6 +288,7 @@ async fn format_override_consumer_stays_on_resolved_protocol() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Graceful shutdown removes the persisted state file.
 async fn shutdown_removes_state_file() {
   let dir = std::env::temp_dir().join(format!("rsrpc-bridge-state-{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&dir);
@@ -332,6 +344,7 @@ async fn shutdown_removes_state_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg(target_os = "linux")]
+/// Null scans reap dead-pid cards so late joiners never replay ghosts.
 async fn null_scan_reaps_dead_pid_cards_from_replay() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -368,6 +381,7 @@ async fn null_scan_reaps_dead_pid_cards_from_replay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Live-pid cards survive null scans and still replay.
 async fn null_scan_keeps_live_pid_cards() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -391,6 +405,7 @@ async fn null_scan_keeps_live_pid_cards() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// The census line reports live consumers, queues and RSS.
 async fn census_line_reports_live_counts() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
@@ -416,6 +431,7 @@ static LOGS: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock
 struct Capture;
 
 impl std::io::Write for Capture {
+  /// Append decoded log bytes to the shared buffer.
   fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
     LOGS
       .get_or_init(|| std::sync::Mutex::new(String::new()))
@@ -425,11 +441,13 @@ impl std::io::Write for Capture {
     Ok(buf.len())
   }
 
+  /// No-op flush (the buffer needs none).
   fn flush(&mut self) -> std::io::Result<()> {
     Ok(())
   }
 }
 
+/// Install the capturing log subscriber exactly once per binary.
 fn init_capture() {
   static ONCE: std::sync::Once = std::sync::Once::new();
   ONCE.call_once(|| {
@@ -440,6 +458,7 @@ fn init_capture() {
   });
 }
 
+/// Log bytes appended since `checkpoint`.
 fn logged_since(checkpoint: usize) -> String {
   LOGS
     .get_or_init(|| std::sync::Mutex::new(String::new()))
@@ -449,6 +468,7 @@ fn logged_since(checkpoint: usize) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Empty→game→empty brackets exactly one start and one end census line.
 async fn session_transitions_emit_census_lines() {
   init_capture();
   let fx = fixture().await;

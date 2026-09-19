@@ -48,6 +48,7 @@ pub struct RPCConfig {
 }
 
 impl Default for RPCConfig {
+  /// All connectors on, legacy ports (1337/1338), db updates disabled.
   fn default() -> Self {
     Self {
       enable_process_scanner: true,
@@ -134,6 +135,7 @@ impl RPCConfigBuilder {
 mod tests {
   use super::*;
 
+  /// Defaults keep the legacy ports and every connector enabled.
   #[test]
   fn defaults_match_legacy_ports_and_flags() {
     let config = RPCConfig::default();
@@ -152,6 +154,7 @@ mod tests {
     assert!(config.ignored_ids.is_empty());
   }
 
+  /// The builder reaches every field (no silent fallback).
   #[test]
   fn builder_covers_every_field() {
     let config = RPCConfig::builder()

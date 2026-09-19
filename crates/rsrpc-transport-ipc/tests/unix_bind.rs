@@ -16,10 +16,12 @@ use rsrpc_transport_ipc::IpcTransport;
 use rsrpc_transport_ipc::frame::{PacketType, encode};
 use rsrpc_types::user::RpcUser;
 
+/// Default-identity fixture shared by the bind tests.
 fn user() -> std::sync::Arc<std::sync::Mutex<RpcUser>> {
   std::sync::Arc::new(std::sync::Mutex::new(RpcUser::default()))
 }
 
+/// Bind creates the socket plus fan-out links; shutdown removes both.
 #[tokio::test]
 async fn bind_creates_socket_and_fans_out_links() {
   let scratch = Scratch::new("bind");
@@ -49,6 +51,7 @@ async fn bind_creates_socket_and_fans_out_links() {
   assert!(std::fs::read_link(b.join("discord-ipc-0")).is_err());
 }
 
+/// Regular files squatting an index are reclaimed for the socket.
 #[tokio::test]
 async fn stale_regular_file_is_reclaimed() {
   let scratch = Scratch::new("stale");
@@ -69,6 +72,7 @@ async fn stale_regular_file_is_reclaimed() {
   transport.shutdown().await;
 }
 
+/// Live sockets are never stolen: bind moves to the next index.
 #[tokio::test]
 async fn live_holder_blocks_rebind_to_next_index() {
   let scratch = Scratch::new("live");
