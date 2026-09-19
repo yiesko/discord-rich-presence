@@ -150,30 +150,53 @@ impl IpcTransport {
     Self::bind_with_dirs(user, socket_dir_candidates()).await
   }
 
-  /// Bind within explicit `dirs` (first = primary; tests point here at a
-  /// scratch dir instead of the real runtime dirs).
+  /// Bind within explicit `dirs`, trying each in order (first = primary;
+  /// tests point here at a scratch dir instead of the real runtime dirs).
+  /// Fan-out links still cover every dir once any of them binds.
   ///
   /// # Errors
   ///
-  /// [`RsrpcError::IpcBind`] when every index is held by a live holder.
+  /// [`RsrpcError::IpcBind`] when no candidate dir binds (every index held
+  /// by a live holder, or every dir unusable).
   pub async fn bind_with_dirs(
     user: Arc<Mutex<RpcUser>>,
     dirs: Vec<PathBuf>,
   ) -> Result<(Self, mpsc::Receiver<ActivityCmd>)> {
-    let base = dirs
-      .first()
-      .map(|dir| format!("{}/discord-ipc", dir.display()))
-      .unwrap_or_else(|| "/tmp/discord-ipc".to_string());
     // Blocking syscalls (bind, probe with its 1s budget, symlink fan-out)
     // run off the async workers; this executes once per (re)bind.
     let dirs_for_bind = dirs.clone();
-    let (std_listener, bound_path) =
-      tokio::task::spawn_blocking(move || create_socket(&base, &dirs_for_bind))
-        .await
-        .map_err(|_| RsrpcError::IpcBind {
-          attempts: 10,
-          source: std::io::Error::other("bind task panicked"),
-        })??;
+    let (std_listener, bound_path) = tokio::task::spawn_blocking(move || {
+      // One base per candidate: an unusable primary (permissions, regular
+      // file) falls through instead of failing the whole bind. Empty input
+      // keeps the legacy `/tmp` base.
+      let bases: Vec<String> = if dirs_for_bind.is_empty() {
+        vec!["/tmp/discord-ipc".to_string()]
+      } else {
+        dirs_for_bind
+          .iter()
+          .map(|dir| format!("{}/discord-ipc", dir.display()))
+          .collect()
+      };
+      let mut last_err = None;
+      for (index, base) in bases.iter().enumerate() {
+        match create_socket(base, &dirs_for_bind) {
+          Ok(bound) => return Ok(bound),
+          Err(err) => {
+            tracing::warn!("[ipc] Candidate dir {index} unusable, trying next: {err}");
+            last_err = Some(err);
+          }
+        }
+      }
+      Err(last_err.unwrap_or(RsrpcError::IpcBind {
+        attempts: 10,
+        source: std::io::Error::other("no candidate dirs"),
+      }))
+    })
+    .await
+    .map_err(|_| RsrpcError::IpcBind {
+      attempts: 10,
+      source: std::io::Error::other("bind task panicked"),
+    })??;
     std_listener
       .set_nonblocking(true)
       .map_err(|source| RsrpcError::IpcBind {

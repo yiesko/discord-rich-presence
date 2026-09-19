@@ -52,6 +52,28 @@ async fn bind_creates_socket_and_fans_out_links() {
 }
 
 /// Regular files squatting an index are reclaimed for the socket.
+/// An unusable primary dir falls through to the next candidate instead
+/// of failing the bind (a regular file is never a bindable dir, any user).
+#[tokio::test]
+async fn unusable_primary_dir_falls_through_to_next_candidate() {
+  let scratch = Scratch::new("fallback");
+  let squat = scratch.sub("a").join("not-a-dir");
+  std::fs::write(&squat, b"squat").expect("squat file");
+  let good = scratch.sub("b");
+
+  let (transport, _rx) = IpcTransport::bind_with_dirs(user(), vec![squat, good.clone()])
+    .await
+    .expect("bind falls through");
+  assert!(
+    transport
+      .socket_path()
+      .starts_with(good.to_string_lossy().as_ref()),
+    "must bind under the usable dir, got {}",
+    transport.socket_path()
+  );
+  transport.shutdown().await;
+}
+
 #[tokio::test]
 async fn stale_regular_file_is_reclaimed() {
   let scratch = Scratch::new("stale");
