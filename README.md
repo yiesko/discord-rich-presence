@@ -241,7 +241,7 @@ async fn run(detectable: String) -> Result<(), Box<dyn std::error::Error>> {
 
 Works fully offline with the bundled snapshot (no file/network needed):
 ```rust
-let daemon = Daemon::from_bundled(RPCConfig::default())
+let mut daemon = Daemon::from_bundled(RPCConfig::default())
   .expect("Failed to create daemon");
 ```
 
@@ -274,12 +274,12 @@ let games: Vec<DetectedGame> = daemon.detect_once()?;
 // Database summary without threads (entry/executable counts + names).
 let summary: Vec<rsrpc_core::DetectableSummary> = daemon.database_summary();
 
-// Stage entries before run() (bypass the OS filter, win over main DB);
+// Stage entries before run_until() (bypass the OS filter, win over main DB);
 // diagnostics below see exactly what running would publish.
 daemon.append_detectables(overrides);
 daemon.remove_detectable_by_name("Game Name");
 
-// OBS/streaming flag callback (must be set before run()).
+// OBS/streaming flag callback (must be set before run_until()).
 daemon.on_scan_complete(|state| {
   println!("obs open: {}", state.obs_open);
 });
