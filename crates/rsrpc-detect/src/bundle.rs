@@ -319,12 +319,14 @@ fn build_ac_patterns_with_os_filter(
         continue;
       }
 
-      // Empty names normalize to `/`, which matches every reversed path:
-      // drop them instead of detecting unrelated processes.
-      if executable.name.is_empty() {
+      // Names normalizing to `/` (empty, lone separators, bare `>`)
+      // match every reversed path: drop them instead of detecting
+      // unrelated processes.
+      let pattern = normalize_exe_pattern(&executable.name);
+      if pattern == "/" {
         continue;
       }
-      exe_patterns.push(normalize_exe_pattern(&executable.name));
+      exe_patterns.push(pattern);
       exe_indexes.push([activity_index, exe_index]);
     }
   }
@@ -385,10 +387,11 @@ fn build_proton_ac_patterns(
           continue;
         }
         // Same match-all hazard as the shared builder above.
-        if executable.name.is_empty() {
+        let pattern = normalize_exe_pattern(&executable.name);
+        if pattern == "/" {
           continue;
         }
-        exe_patterns.push(normalize_exe_pattern(&executable.name));
+        exe_patterns.push(pattern);
         exe_indexes.push([activity_index, exe_index]);
       }
     }
@@ -466,13 +469,18 @@ mod tests {
   #[test]
   fn empty_exe_names_build_no_patterns() {
     let bundle = build_bundle(
-      vec![entry_with_exes("1", OsName::Empty, &["", "game.exe"])],
+      vec![entry_with_exes(
+        "1",
+        OsName::Empty,
+        &["", "\\", ">", "/", "game.exe"],
+      )],
       vec![],
     )
     .expect("builds");
-    // Only the real exe survives, with its index intact (the empty name
-    // contributes neither pattern nor index).
-    assert_eq!(bundle.indexes, vec![[0, 1]]);
+    // Only the real exe survives, with its index intact (every name that
+    // normalizes to the match-all `"/"` contributes neither pattern nor
+    // index).
+    assert_eq!(bundle.indexes, vec![[0, 4]]);
     assert_eq!(bundle.ac.patterns_len(), 1);
   }
 

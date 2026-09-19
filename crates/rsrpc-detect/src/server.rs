@@ -171,7 +171,9 @@ fn exec_hit_ignored(ignored_ids: &HashSet<String>, hit: &ScannedHit) -> bool {
 /// Wake the scan thread if registered (best-effort): used when the
 /// watcher fails so one fresh poll compensates immediately instead of
 /// sleeping into the failure with possibly stale state. Missing handle:
-/// silent no-op.
+/// silent no-op. Linux-only caller (watcher retry thread); allowed dead
+/// elsewhere like [`ProcessServer::should_wake_on_exit`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn unpark_scan_wake(scan_wake: &Arc<Mutex<Option<std::thread::Thread>>>) {
   if let Some(thread) = scan_wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
     thread.unpark();
