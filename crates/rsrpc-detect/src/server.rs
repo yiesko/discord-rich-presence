@@ -168,6 +168,16 @@ fn exec_hit_ignored(ignored_ids: &HashSet<String>, hit: &ScannedHit) -> bool {
   ignored_ids.contains(hit.entry.id.as_ref())
 }
 
+/// Wake the scan thread if registered (best-effort): used when the
+/// watcher fails so one fresh poll compensates immediately instead of
+/// sleeping into the failure with possibly stale state. Missing handle:
+/// silent no-op.
+fn unpark_scan_wake(scan_wake: &Arc<Mutex<Option<std::thread::Thread>>>) {
+  if let Some(thread) = scan_wake.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    thread.unpark();
+  }
+}
+
 /// Whether a failed `event_sender.send` must end the calling thread.
 ///
 /// The sender wraps an unbounded `std::mpsc`: `Err` means the receiver is
@@ -336,6 +346,9 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
           watcher_state
             .watcher_live
             .store(false, std::sync::atomic::Ordering::Release);
+          // Poll once now: the watcher just died, so the scan loop must
+          // not sit out its whole backoff on possibly stale state.
+          unpark_scan_wake(&watcher_state.scan_wake);
           attempts = attempts.saturating_add(1);
           if attempts == 1 {
             tracing::warn!(
@@ -1275,6 +1288,26 @@ mod tests {
   }
 
   /// Concurrent appends and refreshes lose neither side (writer lock).
+  #[test]
+  fn watcher_failure_unparks_stale_scan() {
+    // A parked thread woken through the helper must observe the permit:
+    // park/unpark pairing is the whole contract (no scan logic here).
+    let woken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = woken.clone();
+    let waker = std::thread::spawn(move || {
+      std::thread::park();
+      flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let slot: Arc<Mutex<Option<std::thread::Thread>>> =
+      Arc::new(Mutex::new(Some(waker.thread().clone())));
+    unpark_scan_wake(&slot);
+    waker.join().expect("helper must unpark the waiter");
+    assert!(woken.load(std::sync::atomic::Ordering::SeqCst));
+    // Missing handle or lock: silent no-ops, never panics.
+    unpark_scan_wake(&Arc::new(Mutex::new(None)));
+  }
+
   #[test]
   fn backoff_applies_only_with_live_watcher() {
     use std::time::Duration;

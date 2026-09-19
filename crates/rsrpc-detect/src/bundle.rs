@@ -319,6 +319,11 @@ fn build_ac_patterns_with_os_filter(
         continue;
       }
 
+      // Empty names normalize to `/`, which matches every reversed path:
+      // drop them instead of detecting unrelated processes.
+      if executable.name.is_empty() {
+        continue;
+      }
       exe_patterns.push(normalize_exe_pattern(&executable.name));
       exe_indexes.push([activity_index, exe_index]);
     }
@@ -379,6 +384,10 @@ fn build_proton_ac_patterns(
         if executable.is_launcher || executable.os != OsName::Win32 {
           continue;
         }
+        // Same match-all hazard as the shared builder above.
+        if executable.name.is_empty() {
+          continue;
+        }
         exe_patterns.push(normalize_exe_pattern(&executable.name));
         exe_indexes.push([activity_index, exe_index]);
       }
@@ -426,4 +435,56 @@ pub(crate) fn initial_bundle(
   }));
   tracing::info!("[Process Scanner] Done!");
   bundle
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::types::{OsName, ScannedExe};
+
+  /// Slim entry fixture with caller-chosen executable names.
+  fn entry_with_exes(id: &str, os: OsName, names: &[&str]) -> Arc<ScannedEntry> {
+    Arc::new(ScannedEntry {
+      id: id.into(),
+      name: id.into(),
+      executables: names
+        .iter()
+        .map(|name| ScannedExe {
+          name: (*name).into(),
+          os: os.clone(),
+          is_launcher: false,
+          arguments: None,
+        })
+        .collect(),
+      steam_ids: Vec::new(),
+      aliases: Vec::new(),
+    })
+  }
+
+  /// Empty executable names must not reach the automaton: `"/"` matches
+  /// every reversed path and would detect unrelated processes.
+  #[test]
+  fn empty_exe_names_build_no_patterns() {
+    let bundle = build_bundle(
+      vec![entry_with_exes("1", OsName::Empty, &["", "game.exe"])],
+      vec![],
+    )
+    .expect("builds");
+    // Only the real exe survives, with its index intact (the empty name
+    // contributes neither pattern nor index).
+    assert_eq!(bundle.indexes, vec![[0, 1]]);
+    assert_eq!(bundle.ac.patterns_len(), 1);
+  }
+
+  /// Same guard in the Proton fallback: an empty win32 name leaves no automaton.
+  #[test]
+  fn proton_builder_ignores_empty_names() {
+    let bundle =
+      build_bundle(vec![entry_with_exes("1", OsName::Win32, &[""])], vec![]).expect("builds");
+    #[cfg(target_os = "linux")]
+    assert!(
+      bundle.proton_ac.is_none(),
+      "empty name must not arm the Proton automaton"
+    );
+  }
 }
