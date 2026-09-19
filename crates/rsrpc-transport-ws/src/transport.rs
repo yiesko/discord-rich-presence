@@ -32,6 +32,12 @@ use crate::handlers;
 /// How long the pump waits for sink capacity before shedding (counted).
 const SINK_SEND_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Shared budget for one disconnect cleanup pass: clears retry until it
+/// lapses instead of shedding on the first full queue, so a transiently
+/// wedged bridge still gets its clears. Bounds the worst pump stall per
+/// disconnect no matter how many pids were tracked.
+const DISCONNECT_CLEAR_BUDGET: Duration = Duration::from_secs(1);
+
 /// Discord origins allowed to drive game commands. Absent `origin`
 /// (non-browser clients) passes: only a mismatched origin is refused.
 const ALLOWED_ORIGINS: [&str; 3] = [
@@ -148,6 +154,41 @@ impl Sink {
         false
       }
     }
+  }
+
+  /// Queue one disconnect clear, retrying while `deadline` holds.
+  /// Disconnect cleanup must survive a transiently full sink: an accepted
+  /// publication delivered earlier would otherwise ghost when the bridge
+  /// resumes without a later clear. Past the budget the clear sheds
+  /// (counted) like any other — full reliability would need an unbounded
+  /// control path, which trades a bounded stall for unbounded memory.
+  pub(crate) async fn emit_clear_retry(
+    &self,
+    cmd: ActivityCmd,
+    deadline: std::time::Instant,
+  ) -> bool {
+    let mut pending = Some(cmd);
+    while let Some(cmd) = pending.take() {
+      match self.tx.try_send(cmd) {
+        Ok(()) => return true,
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+          self.dropped.fetch_add(1, Ordering::Relaxed);
+          tracing::warn!("[transport-ws] Event sink closed, dropping clear");
+          return false;
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => {
+          if std::time::Instant::now() >= deadline {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("[transport-ws] Event sink still full, dropping clear");
+            return false;
+          }
+          pending = Some(cmd);
+          tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+      }
+    }
+    // `pending` is `Some` on entry: the loop always returns above.
+    false
   }
 }
 
@@ -346,13 +387,49 @@ impl WsTransport {
     self.handle.dropped_total()
   }
 
-  /// Graceful shutdown: close the listener and connections, drain the pump.
+  /// Graceful shutdown: close the listener and connections, drain the pump
+  /// (including disconnect clears for every tracked pid), then clear any
+  /// residue the pump never saw (tasks aborted without `Disconnect`).
+  /// This is the only path that cleans up publications: `Drop` merely
+  /// aborts the pump (Rust forbids `await` there), so owners must call
+  /// `shutdown()` — the daemon always does. Past-budget sheds stay bounded
+  /// downstream by ghost reaping.
   pub async fn shutdown(mut self) {
     if let Some(server) = self.server.take() {
       server.shutdown().await;
     }
     if let Some(pump) = self.pump.take() {
       let _ = pump.await;
+    }
+    // Belt and braces: connection tasks aborted without `Disconnect` (or
+    // prunes the pump never processed) leave tracked pids with no one left
+    // to clear them. The pump is gone, so drain the map here with the same
+    // bounded retry policy. Normally empty: `Disconnect` already cleared
+    // everything on the way down.
+    let stale: Vec<handlers::PublishedSlot> = {
+      let mut clients = self.handle.clients.write().await;
+      let mut stale = Vec::new();
+      for (_, slot) in clients.drain() {
+        self.total.fetch_sub(1, Ordering::Relaxed);
+        stale.extend(slot.published);
+      }
+      stale
+    };
+    if !stale.is_empty() {
+      tracing::warn!(
+        "[transport-ws] Shutdown draining {} uncleared publication(s)",
+        stale.len()
+      );
+      let sink = Sink {
+        tx: self.sink_tx.clone(),
+        dropped: Arc::clone(&self.handle.dropped),
+      };
+      let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
+      for published in &stale {
+        sink
+          .emit_clear_retry(handlers::clear_for_slot(published), deadline)
+          .await;
+      }
     }
   }
 }
@@ -479,7 +556,11 @@ async fn on_connect(
 /// Disconnect and prune paths). A connection that published several pids
 /// (multiplexing companion) clears every card, not just the latest.
 /// Complete by construction: extras past the bound are refused before
-/// forwarding, so everything forwarded is tracked here.
+/// forwarding, so everything forwarded is tracked here. Each clear retries
+/// within one shared budget (never one timeout per pid), so a transiently
+/// wedged bridge still gets its clears without stalling the pump past a
+/// second; past the budget clears shed counted (bridge ghost-reaping
+/// bounds any residual staleness).
 async fn remove_and_clear(
   id: ClientId,
   clients: &Arc<RwLock<FxHashMap<ClientId, ClientSlot>>>,
@@ -489,8 +570,11 @@ async fn remove_and_clear(
   let slot = clients.write().await.remove(&id);
   let Some(slot) = slot else { return };
   total.fetch_sub(1, Ordering::Relaxed);
+  let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
   for published in &slot.published {
-    sink.emit(handlers::clear_for_slot(published)).await;
+    sink
+      .emit_clear_retry(handlers::clear_for_slot(published), deadline)
+      .await;
   }
 }
 
@@ -644,6 +728,62 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn clear_retry_survives_a_briefly_full_sink() {
+    // Cap-1 sink held full: the retry lands once space frees inside the
+    // budget (a single 250ms attempt would shed it).
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.send_timeout(
+      handlers::clear_for_slot(&handlers::PublishedSlot {
+        app_id: None,
+        pid: 1,
+        nonce: Value::Null,
+      }),
+      SINK_SEND_TIMEOUT,
+    )
+    .await
+    .expect("filler");
+    let sink = Sink {
+      tx,
+      dropped: Arc::new(AtomicU64::new(0)),
+    };
+    let cmd = handlers::clear_for_slot(&handlers::PublishedSlot {
+      app_id: None,
+      pid: 7,
+      nonce: Value::Null,
+    });
+    // Drain once after 400ms, then hold the receiver open (dropping it
+    // would close the channel and turn the retry into a `Closed` shed).
+    let drain = tokio::spawn(async move {
+      tokio::time::sleep(Duration::from_millis(400)).await;
+      rx.recv().await.expect("filler");
+      std::future::pending::<()>().await;
+    });
+    let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
+    assert!(sink.emit_clear_retry(cmd, deadline).await);
+    assert_eq!(sink.dropped.load(Ordering::Relaxed), 0);
+    drain.abort();
+  }
+
+  #[tokio::test]
+  async fn clear_retry_gives_up_past_the_budget() {
+    // Closed sink: no capacity will ever return — fail fast-ish, counted.
+    let (tx, rx) = mpsc::channel::<ActivityCmd>(1);
+    drop(rx);
+    let sink = Sink {
+      tx,
+      dropped: Arc::new(AtomicU64::new(0)),
+    };
+    let cmd = handlers::clear_for_slot(&handlers::PublishedSlot {
+      app_id: None,
+      pid: 7,
+      nonce: Value::Null,
+    });
+    let deadline = std::time::Instant::now() + DISCONNECT_CLEAR_BUDGET;
+    assert!(!sink.emit_clear_retry(cmd, deadline).await);
+    assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
+  }
 
   /// Discord origins pass, missing origin passes, anything else is refused.
   #[test]

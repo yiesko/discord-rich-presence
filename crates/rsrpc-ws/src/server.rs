@@ -83,9 +83,9 @@ impl Server {
   ///
   /// [`Error::Config`] when a bound is zero (same invariant as the builder;
   /// direct field mutation bypasses it, and zero would panic the channel
-  /// constructors below). [`Error::Bind`] when the address cannot be bound
-  /// (source keeps `AddrInUse` etc.), [`Error::Runtime`] when the bound
-  /// address cannot be read back.
+  /// constructors or the keepalive ticker below). [`Error::Bind`] when the
+  /// address cannot be bound (source keeps `AddrInUse` etc.),
+  /// [`Error::Runtime`] when the bound address cannot be read back.
   pub async fn bind(config: ServerConfig) -> Result<(Self, EventHub), Error> {
     if config.max_connections == 0 {
       return Err(Error::Config("max_connections must be non-zero"));
@@ -95,6 +95,9 @@ impl Server {
     }
     if config.per_client_queue == 0 {
       return Err(Error::Config("per_client_queue must be non-zero"));
+    }
+    if config.keepalive_interval.is_zero() {
+      return Err(Error::Config("keepalive_interval must be non-zero"));
     }
     let listener = TcpListener::bind(config.bind).await.map_err(Error::Bind)?;
     let local_addr = listener.local_addr().map_err(Error::Runtime)?;
