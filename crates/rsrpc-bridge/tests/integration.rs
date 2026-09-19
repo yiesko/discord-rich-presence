@@ -431,41 +431,51 @@ async fn null_scan_keeps_live_pid_cards() {
 }
 
 /// Raw broadcasts count (not just prune) consumers whose outbox died.
+///
+/// Deterministic by construction: instead of waiting for a dropped peer's
+/// read error (timing-sensitive under load), the doomed consumer stays
+/// connected but never reads. A burst of large frames fills its kernel
+/// buffer, its relay stalls, its outbox reports `Full`, and the slot is
+/// pruned AND counted — no wall-clock race anywhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn raw_broadcast_counts_dead_consumers() {
   let fx = fixture().await;
   let mut json = connect(fx.json_port, "?format=json").await;
   let _ = read_json(&mut json).await; // READY
 
-  // Abrupt drop: the server task dies on read error, closing the outbox.
+  // Connected but silent: never reads, so its outbox must eventually fill.
   let mut doomed = connect(fx.json_port, "?format=json").await;
   let _ = read_json(&mut doomed).await; // READY
-  drop(doomed);
 
-  // A raw (non-activity) event fans out via broadcast_raw; the dead slot
-  // must be pruned AND counted. Generous deadline: under full-workspace
-  // parallel load, the dead task's read error can take seconds to be
-  // polled (isolated it lands in milliseconds).
+  // Large nonce: each frame is ~64KB, so a handful fill the kernel
+  // buffer and stall the relay (small frames would need hundred-thousands
+  // and race the relay instead of outrunning it).
+  let big_nonce = "x".repeat(65536);
   let deep_link: rsrpc_types::cmd::ActivityCmd = serde_json::from_value(serde_json::json!({
     "cmd": "DEEP_LINK",
-    "nonce": "d1",
+    "nonce": big_nonce,
   }))
   .unwrap();
-  let deadline = std::time::Instant::now() + Duration::from_secs(15);
+  let deadline = std::time::Instant::now() + Duration::from_secs(60);
   loop {
     fx.game_tx.send(deep_link.clone()).await.unwrap();
+    // Drain only the healthy consumer: its slot must never fail.
+    let got = read_json(&mut json).await;
+    assert_eq!(got["cmd"], "DEEP_LINK");
     if fx.bridge.dropped_total() >= 1 {
       break;
     }
     assert!(
       std::time::Instant::now() < deadline,
-      "dead consumer must be counted once its outbox dies"
+      "silent consumer outbox must fill and count"
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
   }
-  // The live consumer still gets its frame.
-  let got = read_json(&mut json).await;
-  assert_eq!(got["cmd"], "DEEP_LINK");
+  // Loop exit already proves at least one prune was counted (only the
+  // silent slot can ever fail: the healthy one is drained every round).
+
+  // Release the silent peer so shutdown need not burn its drain deadline
+  // on a relay parked behind a full kernel buffer.
+  drop(doomed);
 
   fx.bridge.shutdown().await;
 }
