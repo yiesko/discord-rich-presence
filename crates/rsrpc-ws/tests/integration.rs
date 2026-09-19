@@ -293,6 +293,7 @@ async fn bind_rejects_zero_bounds_without_panic() {
     (|c: &mut ServerConfig| c.per_client_queue = 0),
     (|c: &mut ServerConfig| c.max_connections = 0),
     (|c: &mut ServerConfig| c.keepalive_interval = Duration::from_secs(0)),
+    (|c: &mut ServerConfig| c.idle_timeout = Duration::from_secs(0)),
   ] {
     let mut config = test_config();
     mutate(&mut config);

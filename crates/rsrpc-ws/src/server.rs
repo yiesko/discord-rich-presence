@@ -99,6 +99,9 @@ impl Server {
     if config.keepalive_interval.is_zero() {
       return Err(Error::Config("keepalive_interval must be non-zero"));
     }
+    if config.idle_timeout.is_zero() {
+      return Err(Error::Config("idle_timeout must be non-zero"));
+    }
     let listener = TcpListener::bind(config.bind).await.map_err(Error::Bind)?;
     let local_addr = listener.local_addr().map_err(Error::Runtime)?;
 
