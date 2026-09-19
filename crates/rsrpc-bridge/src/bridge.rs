@@ -137,6 +137,7 @@ pub struct Bridge {
 }
 
 impl std::fmt::Debug for Bridge {
+  /// Ports only; shared state stays out of logs.
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Bridge")
       .field("json_port", &self.json_port)
@@ -332,6 +333,7 @@ impl Bridge {
 }
 
 impl Drop for Bridge {
+  /// Cancel every pump so drops never outlive the bridge.
   fn drop(&mut self) {
     // Best-effort: shutdown() drains gracefully; a drop at least stops
     // every pump (hubs close once the servers below drop).
@@ -722,20 +724,14 @@ async fn proc_pump(
           .lock()
           .unwrap_or_else(|e| e.into_inner())
           .note_remove(app_id.as_ref(), pid);
-        let outstanding = shared
-          .last_process
-          .lock()
-          .unwrap_or_else(|e| e.into_inner())
-          .get(&app_id)
-          .is_some_and(|known| *known == pid)
-          .then(|| {
-            shared
-              .last_process
-              .lock()
-              .unwrap_or_else(|e| e.into_inner())
-              .remove(&app_id)
-          })
-          .flatten();
+        let outstanding = take_matching_process(
+          &mut shared
+            .last_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+          &app_id,
+          pid,
+        );
         if let Some(pid) = outstanding {
           tracing::info!("[bridge] Clearing removed game slot");
           shared.broadcast_activity(
@@ -1343,6 +1339,22 @@ fn prune_cache(cache: &mut ReplayCache) {
   }
 }
 
+/// Remove one process publication only when the stored pid matches the
+/// removal event (pid reuse / EXEC-vs-poll race must not clear a newer
+/// detection). Single map access: callers must hold one guard across the
+/// check, never compare-then-remove under separate locks.
+fn take_matching_process(
+  last_process: &mut HashMap<AppId, u64>,
+  app_id: &AppId,
+  pid: u64,
+) -> Option<u64> {
+  if last_process.get(app_id).is_some_and(|known| *known == pid) {
+    last_process.remove(app_id)
+  } else {
+    None
+  }
+}
+
 /// Consume the outstanding process publications for clearing, if any.
 /// Returns `(pid, app_id)` pairs, sorted for deterministic clears.
 /// Single-shot by construction (`drain`): repeated null scans clear once
@@ -1396,6 +1408,7 @@ fn send_cached(responder: &Responder, payload: &CachedActivity, protocol: Bridge
 mod tests {
   use super::*;
 
+  /// Session lines fire only on empty<->non-empty edges; slot churn stays quiet.
   #[test]
   fn table_transition_fires_only_on_state_edges() {
     let game = ScannedGame {
@@ -1410,6 +1423,23 @@ mod tests {
       Some("game-start")
     );
     assert_eq!(table_transition(true, &ProcInput::Detected(game)), None);
+    // Stale removals (pid mismatch) release nothing; matching ones do.
+    let mut table = HashMap::new();
+    table.insert(AppId::from("1"), 7u64);
+    assert_eq!(
+      take_matching_process(&mut table, &AppId::from("1"), 8),
+      None
+    );
+    assert!(table.contains_key(&AppId::from("1")));
+    assert_eq!(
+      take_matching_process(&mut table, &AppId::from("1"), 7),
+      Some(7)
+    );
+    assert!(!table.contains_key(&AppId::from("1")));
+    assert_eq!(
+      take_matching_process(&mut table, &AppId::from("9"), 7),
+      None
+    );
     // Game -> empty: session end; repeats stay quiet.
     assert_eq!(
       table_transition(true, &ProcInput::Cleared),

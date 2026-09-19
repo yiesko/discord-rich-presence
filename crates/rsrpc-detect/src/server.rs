@@ -106,6 +106,13 @@ pub struct ProcessServer {
   /// cross-platform builds warning-free.
   #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
   pub enable_proc_events: bool,
+  /// Whether the watcher socket is currently believed up. Set around the
+  /// blocking `watch()` call (Linux only); read every scan tick to gate
+  /// idle backoff. Starts `false` (pure polling) so macOS, Windows,
+  /// disabled watchers and failure windows never back off. `Relaxed` would
+  /// suffice for a cadence hint, but `Acquire`/`Release` is free here and
+  /// keeps the watcher-state reasoning uniform.
+  pub(crate) watcher_live: Arc<AtomicBool>,
 
   #[cfg(not(target_os = "linux"))]
   pub(crate) sysinfo: Arc<Mutex<System>>,
@@ -118,6 +125,7 @@ pub struct ScanGuard {
 }
 
 impl ScanGuard {
+  /// Acquire the guard, or `None` when a scan is already in progress.
   pub fn try_acquire(flag: &Arc<AtomicBool>) -> Option<Self> {
     flag
       .compare_exchange(
@@ -134,6 +142,7 @@ impl ScanGuard {
 }
 
 impl Drop for ScanGuard {
+  /// Release the re-entrancy flag (all exit paths, panics included).
   fn drop(&mut self) {
     self.flag.store(false, std::sync::atomic::Ordering::Release);
   }
@@ -190,6 +199,19 @@ pub fn idle_wait(base: Duration, idle_ticks: u32) -> Duration {
     .checked_mul(1 << idle_ticks.min(4))
     .unwrap_or(MAX_BACKOFF);
   stretched.min(MAX_BACKOFF)
+}
+
+/// Effective scan cadence: idle backoff applies only while the EXEC
+/// watcher is confirmed live (socket up). Polling-only paths — other
+/// OSes, disabled proc-events, failed watcher setups and retry windows —
+/// always use the configured base interval, or a short interval would
+/// silently grow to 30s with nothing to wake the scan early.
+fn scan_cadence(base: Duration, idle_ticks: u32, watcher_live: bool) -> Duration {
+  if watcher_live {
+    idle_wait(base, idle_ticks)
+  } else {
+    base
+  }
 }
 
 /// Spawn the netlink dispatch (Linux): EXEC classifies one process and
@@ -292,13 +314,28 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
   // genuinely unsupported systems do not log every 5 minutes forever.
   // A sleeping retry never delays shutdown: process exit does not wait
   // for this thread.
+  let watcher_state = server.clone();
   std::thread::spawn(move || {
     let mut attempts = 0u32;
     loop {
+      // Believed up while the blocking watch runs; a fast failure flips
+      // back before the retry sleep, so polling-only windows never back
+      // off (see `scan_cadence`).
+      watcher_state
+        .watcher_live
+        .store(true, std::sync::atomic::Ordering::Release);
       match watch(&tx) {
         // Receiver gone: daemon shutting down.
-        Ok(()) => break,
+        Ok(()) => {
+          watcher_state
+            .watcher_live
+            .store(false, std::sync::atomic::Ordering::Release);
+          break;
+        }
         Err(err) => {
+          watcher_state
+            .watcher_live
+            .store(false, std::sync::atomic::Ordering::Release);
           attempts = attempts.saturating_add(1);
           if attempts == 1 {
             tracing::warn!(
@@ -344,6 +381,7 @@ fn release_platform_arenas() {
   // `core::ffi` types keep this branch dependency-free (`libc` is only a
   // Linux dependency of this crate).
   unsafe extern "C" {
+    /// Advisory purge of malloc zones (NULL zone = all zones, goal 0 = no target).
     fn malloc_zone_pressure_relief(zone: *mut core::ffi::c_void, goal: usize) -> usize;
   }
   // SAFETY: (NULL, 0) means "all zones, no goal" and is advisory-only;
@@ -371,6 +409,7 @@ fn release_platform_arenas() {
 fn release_platform_arenas() {}
 
 impl Clone for ProcessServer {
+  /// Share every handle (generation pointer, channels, caches, locks).
   fn clone(&self) -> Self {
     Self {
       // Shared generation pointer: clones (scan loop, refresh thread)
@@ -391,6 +430,7 @@ impl Clone for ProcessServer {
       steam_libraries: Arc::clone(&self.steam_libraries),
       ignored_ids: self.ignored_ids.clone(),
       enable_proc_events: self.enable_proc_events,
+      watcher_live: Arc::clone(&self.watcher_live),
       #[cfg(not(target_os = "linux"))]
       sysinfo: Arc::clone(&self.sysinfo),
     }
@@ -427,6 +467,7 @@ impl ProcessServer {
       refresh,
       ignored_ids: ignored_ids.into_iter().collect(),
       enable_proc_events: true,
+      watcher_live: Arc::new(AtomicBool::new(false)),
       exclusions: Arc::new(RwLock::new(Exclusions::default())),
       steam_libraries: Arc::new(RwLock::new(SteamLibraries::discover())),
       detected_pids: Arc::new(Mutex::new(FxHashSet::default())),
@@ -476,8 +517,11 @@ impl ProcessServer {
 
   /// Replace the main detectable games database at runtime (used by the
   /// periodic refresh), rebuilding the whole bundle and swapping it in
-  /// one pointer write.
-  fn update_main_detectables(&self, detectable: Vec<DetectableActivity>) {
+  /// one pointer write. Returns whether the swap happened: refusals (empty
+  /// input, failing build) report `false` so the refresh thread keeps its
+  /// old validators and retries the data next hour instead of trusting
+  /// tags for a bundle that was never installed.
+  fn update_main_detectables(&self, detectable: Vec<DetectableActivity>) -> bool {
     // Never swap in an empty database (outage returning `[]`, corrupt
     // fetch): it would build a failing automaton and blind detection.
     // Keep serving the current data instead.
@@ -485,7 +529,7 @@ impl ProcessServer {
       tracing::warn!(
         "[Process Scanner] Refusing empty detectable database update, keeping current"
       );
-      return;
+      return false;
     }
     tracing::info!(
       "[Process Scanner] Rebuilding Aho-Corasick patterns for main detectable activities..."
@@ -510,7 +554,7 @@ impl ProcessServer {
           "[Process Scanner] Refusing detectable database update ({}), keeping current",
           e
         );
-        return;
+        return false;
       }
     };
     // load_full bumps the count by one transiently; subtract it back so
@@ -538,6 +582,7 @@ impl ProcessServer {
         rss as f64 / 1_048_576.0
       );
     }
+    true
   }
 
   /// Stage custom entries, rebuilding the shared generation so the scan
@@ -556,6 +601,7 @@ impl ProcessServer {
     });
   }
 
+  /// Drop a custom override by display name, rebuilding the generation.
   pub fn remove_detectable_by_name(&self, name: &str) {
     self.edit_custom(|mut custom| {
       custom.retain(|x| {
@@ -731,10 +777,14 @@ impl ProcessServer {
                 etag.as_deref().unwrap_or("none"),
                 new_tag.as_deref().unwrap_or("none")
               );
-              etag = new_tag;
-              content_hash = Some(new_hash);
-              trimmed_hash = Some(new_trimmed);
-              db_clone.update_main_detectables(detectable);
+              // Commit validators only after the bundle is validated and
+              // installed: a refused swap must not teach the next request
+              // that never-installed data is current.
+              if db_clone.update_main_detectables(detectable) {
+                etag = new_tag;
+                content_hash = Some(new_hash);
+                trimmed_hash = Some(new_trimmed);
+              }
             }
             Err(err) => {
               tracing::warn!(
@@ -897,16 +947,25 @@ impl ProcessServer {
         }
 
         // Idle backoff: consecutive empty ticks stretch the cadence
-        // (base → 30s cap). Safe because game START arrives via EXEC
-        // events instantly and EXITs of tracked games unpark us early —
-        // polling only backstops what the watcher cannot (untracked
-        // exits, DB refreshes). Any detection or early wake resets.
+        // (base → 30s cap), but only while the EXEC watcher is live to
+        // wake us early. Game START arrives via EXEC instantly and EXITs
+        // of tracked games unpark us — polling only backstops what the
+        // watcher cannot (untracked exits, DB refreshes). Polling-only
+        // paths (other OSes, disabled/failed watcher) keep the base
+        // cadence so a short interval never silently grows to 30s.
+        // Any detection or early wake resets.
         if detected.is_empty() {
           idle_ticks = idle_ticks.saturating_add(1);
         } else {
           idle_ticks = 0;
         }
-        let cadence = idle_wait(wait_time, idle_ticks);
+        let cadence = scan_cadence(
+          wait_time,
+          idle_ticks,
+          clone
+            .watcher_live
+            .load(std::sync::atomic::Ordering::Acquire),
+        );
         let wait_start = std::time::Instant::now();
         wait_scan(cadence);
         if wait_start.elapsed() < cadence.mul_f32(0.9) {
@@ -937,6 +996,7 @@ impl ProcessServer {
     self.enable_proc_events = enable;
   }
 
+  /// Enumerate processes via `sysinfo` (non-Linux: exe + cmdline snapshot).
   #[cfg(not(target_os = "linux"))]
   fn process_list(&self) -> rsrpc_protocol::error::Result<Vec<Exec>> {
     use std::path::Path;
@@ -969,6 +1029,7 @@ impl ProcessServer {
     Ok(processes)
   }
 
+  /// Enumerate processes via `/proc` (Linux: one `read_exec` per pid, skips unreadable).
   #[cfg(target_os = "linux")]
   fn process_list() -> rsrpc_protocol::error::Result<Vec<Exec>> {
     use std::fs;
@@ -1093,6 +1154,7 @@ impl ProcessServer {
 mod tests {
   use super::*;
 
+  /// Empty-database server with a live gauge sender for unit tests.
   fn fixture_server() -> ProcessServer {
     let (tx, _rx) = rsrpc_telemetry::QueueGauge::pair();
     ProcessServer::new_with_custom(
@@ -1105,10 +1167,12 @@ mod tests {
     )
   }
 
+  /// Single shared-generation custom entry (id 777).
   fn custom_entry() -> DetectableActivity {
     custom_entry_named("777")
   }
 
+  /// Custom entry with a caller-chosen id for concurrency tests.
   fn custom_entry_named(id: &str) -> DetectableActivity {
     serde_json::from_value(serde_json::json!({
       "id": id,
@@ -1135,6 +1199,7 @@ mod tests {
       .collect()
   }
 
+  /// Vanished slots (including pid rotations) report once; survivors never do.
   #[test]
   fn removed_slots_reports_only_vanished_ids() {
     let previous = vec![("a".to_string(), 1), ("b".to_string(), 2)];
@@ -1158,6 +1223,7 @@ mod tests {
     );
   }
 
+  /// A dropped receiver fails sends, and the policy says exit (no retry).
   #[test]
   fn closed_queue_exits_scan_instead_of_retrying() {
     // `GaugeSender` wraps an unbounded `std::mpsc`: `Err` means the
@@ -1170,6 +1236,7 @@ mod tests {
     assert!(should_exit_on_send_error(&failed));
   }
 
+  /// Ignored app ids never publish on the EXEC fast path either.
   #[test]
   fn exec_path_skips_ignored_ids() {
     use std::collections::HashSet;
@@ -1183,6 +1250,7 @@ mod tests {
     assert!(!exec_hit_ignored(&empty, &hit));
   }
 
+  /// Clones share one generation pointer in both directions.
   #[test]
   fn clones_share_one_detection_generation() {
     // The scan loop runs on a clone made in `start()`, while the hourly
@@ -1204,6 +1272,30 @@ mod tests {
     scan_clone.append_detectables(vec![custom_entry()]);
     assert_eq!(reverse.bundle().custom.len(), server.bundle().custom.len());
     assert_eq!(reverse.bundle().custom.len(), 2);
+  }
+
+  /// Concurrent appends and refreshes lose neither side (writer lock).
+  #[test]
+  fn backoff_applies_only_with_live_watcher() {
+    use std::time::Duration;
+    let base = Duration::from_secs(5);
+    // Polling-only paths (other OSes, disabled/failed watcher) never back
+    // off: a short configured interval stays short.
+    assert_eq!(scan_cadence(base, 4, false), base);
+    assert_eq!(scan_cadence(base, 0, false), base);
+    // Live watcher: idle ticks stretch up to the 30s cap.
+    assert_eq!(scan_cadence(base, 0, true), base);
+    assert_eq!(scan_cadence(base, 4, true), Duration::from_secs(30));
+  }
+
+  #[test]
+  fn refused_bundle_swap_reports_failure() {
+    // Empty input and failing builds must report failure so the refresh
+    // thread keeps its old validators (next hour retries the data instead
+    // of trusting tags for a bundle that was never installed).
+    let server = fixture_server();
+    assert!(!server.update_main_detectables(vec![]));
+    assert!(server.update_main_detectables(vec![custom_entry()]));
   }
 
   #[test]
