@@ -1068,6 +1068,13 @@ impl Shared {
       for id in dead {
         tracing::warn!("[bridge] Pruning dead consumer {id}");
         clients.remove(&id);
+        // Paired table: every insert writes both, so every prune clears
+        // both — otherwise dead ids pin protocol entries forever.
+        self
+          .consumer_protocol
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .remove(&id);
       }
     }
   }
@@ -1122,6 +1129,13 @@ impl Shared {
       for id in dead {
         tracing::warn!("[bridge] Pruning dead consumer {id}");
         json_clients.remove(&id);
+        // Paired table (see `send_to_all`): prune both or dead ids pin
+        // protocol entries forever.
+        self
+          .consumer_protocol
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .remove(&id);
       }
     }
     if let Some(payload) = msgpack_payload {
@@ -1140,6 +1154,13 @@ impl Shared {
       for id in dead {
         tracing::warn!("[bridge] Pruning dead consumer {id}");
         msgpack_clients.remove(&id);
+        // Paired table (see `send_to_all`): prune both or dead ids pin
+        // protocol entries forever.
+        self
+          .consumer_protocol
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .remove(&id);
       }
     }
   }
