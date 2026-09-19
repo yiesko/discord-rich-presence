@@ -129,7 +129,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.95
 
       - name: Generate detectable snapshot
         run: cargo run --manifest-path tools/updater/Cargo.toml

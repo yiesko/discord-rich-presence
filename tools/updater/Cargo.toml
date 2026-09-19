@@ -2,7 +2,7 @@
 name = "rsrpc-db-updater"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 description = "Fetches Discord's detectable games database and writes a trimmed offline snapshot for rsrpc"
 license = "MIT"
 

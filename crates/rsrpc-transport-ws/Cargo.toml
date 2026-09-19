@@ -2,7 +2,7 @@
 name = "rsrpc-transport-ws"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["spikehd"]
 description = "Discord-facing game WebSocket transport over rsrpc-ws: validation, dispatch, bounded sink"
 license = "MIT"

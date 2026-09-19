@@ -2,7 +2,7 @@
 name = "rsrpc-core"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["spikehd"]
 description = "rsRPC daemon wiring: config, database loading, one-shot diagnostics, async run"
 license = "MIT"

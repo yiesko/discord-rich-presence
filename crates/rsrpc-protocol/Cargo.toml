@@ -2,7 +2,7 @@
 name = "rsrpc-protocol"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["spikehd"]
 description = "rsRPC wire protocol: errors, bridge payloads, reply builders, flood guard"
 license = "MIT"

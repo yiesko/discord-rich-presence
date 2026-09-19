@@ -2,7 +2,7 @@
 name = "rsrpc-cli"
 version = "0.35.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["spikehd"]
 description = "Alternative Discord RPC server CLI: game detection with bundled database, IPC/WebSocket transports and bridge"
 license = "MIT"

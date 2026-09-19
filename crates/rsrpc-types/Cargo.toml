@@ -2,7 +2,7 @@
 name = "rsrpc-types"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["spikehd"]
 description = "Core wire types for rsRPC: ids, activity commands, bridge identity"
 license = "MIT"

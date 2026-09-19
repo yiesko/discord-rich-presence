@@ -46,7 +46,7 @@ caches and backups). Details: `docs/systemd-user-units.md`.
 
 ## Requirements
 
-- [Cargo and Rust](https://www.rust-lang.org/) 1.88+ (edition 2024 + let-chains)
+- [Cargo and Rust](https://www.rust-lang.org/) 1.95+ (edition 2024 + let-chains)
 
 ## Testing it out
 

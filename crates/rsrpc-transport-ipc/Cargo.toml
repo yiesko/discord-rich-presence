@@ -2,7 +2,7 @@
 name = "rsrpc-transport-ipc"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["spikehd"]
 description = "Discord IPC transport: framed protocol, Unix socket and Windows pipe servers with JoinSet lifecycle"
 license = "MIT"
