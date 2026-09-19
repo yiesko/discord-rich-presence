@@ -231,11 +231,13 @@ impl AcceptCtx {
               // peer at once instead of piling 10s handshake tasks.
               match self.reject_sem.clone().try_acquire_owned() {
                 Ok(reject_permit) => {
+                  let token = self.token.clone();
+                  let ws_config = self.ws_config;
                   let mut conns = self.conns.lock().await;
                   while conns.try_join_next().is_some() {}
                   conns.spawn(async move {
                     let _permit = reject_permit;
-                    reject_overloaded(stream, self.ws_config).await;
+                    reject_overloaded(stream, ws_config, token).await;
                   });
                 }
                 Err(_) => {
@@ -251,12 +253,20 @@ impl AcceptCtx {
 }
 
 /// Over-limit peer: complete the handshake, then close with 1013 (Again).
-async fn reject_overloaded(stream: TcpStream, ws_config: WebSocketConfig) {
-  let handshake = tokio::time::timeout(
-    HANDSHAKE_TIMEOUT,
-    tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)),
-  )
-  .await;
+/// Returns early on shutdown cancel instead of burning the drain budget.
+async fn reject_overloaded(
+  stream: TcpStream,
+  ws_config: WebSocketConfig,
+  token: CancellationToken,
+) {
+  let handshake = tokio::select! {
+    biased;
+    () = token.cancelled() => return,
+    handshake = tokio::time::timeout(
+      HANDSHAKE_TIMEOUT,
+      tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)),
+    ) => handshake,
+  };
   let mut ws = match handshake {
     Ok(Ok(ws)) => ws,
     _ => return,
@@ -303,19 +313,24 @@ impl ConnTask {
 
     let mut uri: Option<String> = None;
     let mut headers = None;
-    let handshake = tokio::time::timeout(
-      HANDSHAKE_TIMEOUT,
-      accept_hdr_async_with_config(
-        stream,
-        |request: &tungstenite::http::Request<()>, response| {
-          uri = Some(request.uri().to_string());
-          headers = Some(request.headers().clone());
-          Ok(response)
-        },
-        Some(ws_config),
-      ),
-    )
-    .await;
+    // Shutdown cancels the handshake wait: a silent peer must not burn
+    // the drain budget (nor the 10s timeout) on the way out.
+    let handshake = tokio::select! {
+      biased;
+      () = token.cancelled() => return,
+      handshake = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        accept_hdr_async_with_config(
+          stream,
+          |request: &tungstenite::http::Request<()>, response| {
+            uri = Some(request.uri().to_string());
+            headers = Some(request.headers().clone());
+            Ok(response)
+          },
+          Some(ws_config),
+        ),
+      ) => handshake,
+    };
     let ws_stream = match handshake {
       Ok(Ok(ws)) => ws,
       // Invalid handshake / timeout / non-WS client: silent, no event.

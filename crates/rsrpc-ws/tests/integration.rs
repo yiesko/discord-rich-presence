@@ -357,6 +357,26 @@ async fn rejection_backlog_does_not_pile_handshake_tasks() {
     .expect("shutdown completes with rejections in flight");
 }
 
+/// Shutdown cancels pending handshakes instead of burning the drain budget.
+#[tokio::test]
+async fn shutdown_cancels_pending_handshakes() {
+  let (server, _hub) = Server::bind(test_config()).await.unwrap();
+  let addr = server.local_addr();
+
+  // Half-open: TCP completes, handshake bytes never arrive (10s timeout).
+  let _silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+  tokio::time::sleep(Duration::from_millis(200)).await;
+
+  let started = std::time::Instant::now();
+  tokio::time::timeout(Duration::from_secs(15), server.shutdown())
+    .await
+    .expect("shutdown completes");
+  assert!(
+    started.elapsed() < Duration::from_secs(3),
+    "pending handshakes must cancel, not burn the 5s drain"
+  );
+}
+
 /// Unread outboxes report `Full` under flood (never grow, never block).
 #[tokio::test]
 async fn slow_consumer_try_send_reports_full() {
