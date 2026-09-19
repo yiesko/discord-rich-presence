@@ -396,6 +396,19 @@ async fn on_connect(
     responder.close(CloseCode::Normal).await;
     return;
   }
+  // Origins are per-connection: refuse mismatches here, before any READY
+  // or slot registration, instead of per message downstream.
+  if !origin_allowed(
+    responder
+      .details()
+      .headers
+      .get("origin")
+      .and_then(|v| v.to_str().ok()),
+  ) {
+    tracing::warn!("[transport-ws] Refused origin for client {id}");
+    responder.close(CloseCode::Normal).await;
+    return;
+  }
 
   // Snapshot the identity under a short lock; the guard never crosses await.
   let ready = user
@@ -472,17 +485,6 @@ async fn on_message(
       return;
     }
   };
-  if !origin_allowed(
-    slot
-      .responder
-      .details()
-      .headers
-      .get("origin")
-      .and_then(|v| v.to_str().ok()),
-  ) {
-    tracing::warn!("[transport-ws] Refused origin for client {id}");
-    return;
-  }
 
   // Every arm reports liveness: `false` means the game client died without
   // a clean `Disconnect` and its slot must be released now.

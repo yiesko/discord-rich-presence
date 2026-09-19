@@ -435,3 +435,49 @@ async fn close_while_reply_is_undeliverable_clears_publication() {
 
   transport.shutdown().await;
 }
+
+#[tokio::test]
+async fn disallowed_origin_is_refused_before_ready() {
+  use tokio_tungstenite::tungstenite::http::Request;
+
+  let (transport, _rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+  let request = Request::builder()
+    .uri(format!(
+      "ws://127.0.0.1:{port}/?v=1&encoding=json&client_id=evil"
+    ))
+    .header("origin", "https://evil.example")
+    .header("host", format!("127.0.0.1:{port}"))
+    .header("upgrade", "websocket")
+    .header("connection", "Upgrade")
+    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+    .header("sec-websocket-version", "13")
+    .body(())
+    .expect("request builds");
+  let (mut ws, _) = tokio_tungstenite::connect_async(request)
+    .await
+    .expect("connect");
+  // No READY may arrive: a disallowed origin is closed at connect, and
+  // the client must never be registered.
+  match tokio::time::timeout(TIMEOUT, ws.next()).await.unwrap() {
+    Some(Ok(tungstenite::Message::Close(_))) => {}
+    other => panic!("expected close for disallowed origin, got {other:?}"),
+  }
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  loop {
+    if transport
+      .client_total()
+      .load(std::sync::atomic::Ordering::Relaxed)
+      == 0
+    {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "disallowed origin must never register a client"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+
+  transport.shutdown().await;
+}
