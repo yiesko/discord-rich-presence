@@ -74,6 +74,78 @@ fn rss_bytes_reports_live_process() {
 }
 
 /// The census line carries reason, RSS and every count field.
+/// Capacity-checked sends shed (counted) past the cap instead of growing.
+#[test]
+fn checked_send_sheds_past_cap_and_counts() {
+  use rsrpc_telemetry::SendChecked;
+  const CAP: usize = 8;
+  let (tx, _rx) = QueueGauge::pair::<u64>();
+  for _ in 0..CAP {
+    assert_eq!(tx.send_checked(1, CAP), SendChecked::Sent);
+  }
+  assert_eq!(tx.send_checked(1, CAP), SendChecked::Shed);
+  assert_eq!(tx.gauge().dropped_total(), 1);
+}
+
+/// A full queue with a dead receiver reports `Closed`, not `Shed`:
+/// otherwise producers would spin forever instead of exiting.
+#[test]
+fn checked_send_prefers_closed_over_shed() {
+  use rsrpc_telemetry::SendChecked;
+  const CAP: usize = 4;
+  let (tx, rx) = QueueGauge::pair::<u64>();
+  for _ in 0..CAP {
+    assert_eq!(tx.send_checked(1, CAP), SendChecked::Sent);
+  }
+  drop(rx);
+  assert_eq!(tx.send_checked(1, CAP), SendChecked::Closed);
+}
+
+/// Concurrent cloned senders never jointly exceed cap: exactly `CAP`
+/// sends land, the rest shed counted — regardless of scheduling.
+#[test]
+fn checked_send_never_exceeds_cap_with_cloned_senders() {
+  use rsrpc_telemetry::SendChecked;
+  use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  };
+  const CAP: usize = 16;
+  const THREADS: usize = 32;
+  const PER_THREAD: usize = 500;
+  let (tx, _rx) = QueueGauge::pair::<u64>();
+  let sent = Arc::new(AtomicUsize::new(0));
+  let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+  std::thread::scope(|scope| {
+    for _ in 0..THREADS {
+      let tx = tx.clone();
+      let sent = Arc::clone(&sent);
+      let barrier = Arc::clone(&barrier);
+      scope.spawn(move || {
+        // Aligned waves maximize check/send interleaving across threads.
+        for _ in 0..PER_THREAD {
+          barrier.wait();
+          if tx.send_checked(1, CAP) == SendChecked::Sent {
+            sent.fetch_add(1, Ordering::Relaxed);
+          }
+        }
+      });
+    }
+  });
+  assert_eq!(sent.load(Ordering::Relaxed), CAP);
+  assert_eq!(tx.gauge().dropped_total(), THREADS * PER_THREAD - CAP);
+}
+
+/// A gone receiver reports `Closed` (callers exit), never `Shed`.
+#[test]
+fn checked_send_reports_closed_receiver() {
+  use rsrpc_telemetry::SendChecked;
+  let (tx, rx) = QueueGauge::pair::<u64>();
+  drop(rx);
+  assert_eq!(tx.send_checked(1, 8), SendChecked::Closed);
+  assert_eq!(tx.gauge().dropped_total(), 0);
+}
+
 #[test]
 fn format_resource_stats_mentions_reason_and_fields() {
   // 40 MiB exactly: deterministic rendering check.

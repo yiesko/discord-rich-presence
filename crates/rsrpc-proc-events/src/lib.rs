@@ -38,7 +38,14 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 #[cfg(target_os = "linux")]
-use rsrpc_telemetry::GaugeSender;
+use rsrpc_telemetry::{GaugeSender, SendChecked};
+
+/// Cap on watcher-to-dispatch backlog: bursts of hundreds of EXECs under
+/// load (build storms) fit comfortably; a sustained flood past this sheds
+/// (counted) instead of growing memory without bound. Shed EXECs are
+/// best-effort hints only — the periodic scan backstops every one, so no
+/// presence state depends on them.
+pub const MAX_WATCH_BACKLOG: usize = 1024;
 
 /// Netlink family for the kernel connector multiplexer.
 #[cfg(target_os = "linux")]
@@ -583,11 +590,15 @@ pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
     let bytes = &buf[..received as usize];
     let mut gone = false;
     forward_proc_events(bytes, &mut seqs, &mut |event| {
-      if events.send(event).is_err() {
-        gone = true;
-        return false;
+      // Shed under burst load stays subscribed (counted upstream, polling
+      // backstops it); only a gone receiver ends the watch.
+      match events.send_checked(event, MAX_WATCH_BACKLOG) {
+        SendChecked::Closed => {
+          gone = true;
+          false
+        }
+        SendChecked::Sent | SendChecked::Shed => true,
       }
-      true
     });
     if gone {
       // Receiver gone (daemon shutting down): quiet exit.

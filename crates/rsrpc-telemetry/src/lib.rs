@@ -8,7 +8,7 @@
 //! behavior — sends and receives behave exactly like `std::mpsc`.
 
 use std::sync::{
-  atomic::{AtomicUsize, Ordering},
+  atomic::{AtomicBool, AtomicUsize, Ordering},
   mpsc,
 };
 
@@ -16,9 +16,25 @@ use std::sync::{
 /// on every successful send, decremented on every successful receive.
 /// `Relaxed` is the weakest correct ordering here (diagnostic counter only:
 /// no data is synchronized through it).
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct QueueGauge {
   depth: std::sync::Arc<AtomicUsize>,
+  /// Capacity-checked sheds since creation (diagnostic only).
+  dropped: std::sync::Arc<AtomicUsize>,
+  /// Receiver liveness: cleared when the receiver drops (`std::mpsc` has
+  /// no `is_closed` probe, so the gauge tracks it instead).
+  live: std::sync::Arc<AtomicBool>,
+}
+
+impl Default for QueueGauge {
+  /// Fresh zeroed gauge with a live receiver slot.
+  fn default() -> Self {
+    Self {
+      depth: std::sync::Arc::new(AtomicUsize::new(0)),
+      dropped: std::sync::Arc::new(AtomicUsize::new(0)),
+      live: std::sync::Arc::new(AtomicBool::new(true)),
+    }
+  }
 }
 
 impl QueueGauge {
@@ -46,6 +62,43 @@ impl QueueGauge {
     self.depth.fetch_sub(1, Ordering::Relaxed);
   }
 
+  /// Sheds since creation (capacity-checked sends only; plain `send`
+  /// never sheds by construction).
+  #[must_use]
+  pub fn dropped_total(&self) -> usize {
+    self.dropped.load(Ordering::Relaxed)
+  }
+
+  /// Count one capacity-checked shed.
+  fn shed(&self) {
+    self.dropped.fetch_add(1, Ordering::Relaxed);
+  }
+
+  /// Reserve one backlog slot when below `cap` (CAS loop): concurrent
+  /// cloned senders can never jointly exceed cap — a loser re-reads and
+  /// sheds instead of racing past the check. `Relaxed` suffices: the CAS
+  /// itself serializes reservations, staleness only costs a retry.
+  fn try_reserve(&self, cap: usize) -> bool {
+    loop {
+      let depth = self.depth.load(Ordering::Relaxed);
+      if depth >= cap {
+        return false;
+      }
+      if self
+        .depth
+        .compare_exchange_weak(depth, depth + 1, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+      {
+        return true;
+      }
+    }
+  }
+
+  /// Whether the receiver is still alive (see `Drop` above).
+  fn is_live(&self) -> bool {
+    self.live.load(Ordering::Relaxed)
+  }
+
   /// A fresh unbounded channel with both ends sharing one gauge.
   pub fn pair<T>() -> (GaugeSender<T>, GaugeReceiver<T>) {
     let (tx, rx) = mpsc::channel();
@@ -58,6 +111,17 @@ impl QueueGauge {
       GaugeReceiver { inner: rx, gauge },
     )
   }
+}
+
+/// Outcome of a capacity-checked send (see [`GaugeSender::send_checked`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendChecked {
+  /// Accepted by the channel.
+  Sent,
+  /// Backlog at cap: dropped and counted, by design.
+  Shed,
+  /// Receiver gone: the consumer is shutting down.
+  Closed,
 }
 
 /// `mpsc::Sender` that counts its backlog. `Clone` shares the gauge, so
@@ -113,6 +177,37 @@ impl<T> GaugeSender<T> {
   pub fn gauge(&self) -> QueueGauge {
     self.gauge.clone()
   }
+
+  /// Capacity-checked send: sheds (counted) past `cap` instead of growing
+  /// without bound. Single-producer exact where only this sender feeds the
+  /// channel (concurrent receives can only undercount, i.e. shed early —
+  /// never overflow). Channels carrying clears must NOT use this: a shed
+  /// clear ghosts. Reserved for best-effort fast paths (proc-events),
+  /// where the periodic scan backstops every shed event.
+  pub fn send_checked(&self, value: T, cap: usize) -> SendChecked {
+    // Reserve-first: the reservation IS the backlog increment (the receiver
+    // releases it), so concurrent senders serialize here instead of racing
+    // a separate check-then-send.
+    if !self.gauge.try_reserve(cap) {
+      // A dead receiver with a full backlog must read `Closed` (callers
+      // exit on it): `Shed` here would spin them forever, since no receive
+      // will ever free space again.
+      if !self.gauge.is_live() {
+        return SendChecked::Closed;
+      }
+      self.gauge.shed();
+      return SendChecked::Shed;
+    }
+    match self.inner.send(value) {
+      Ok(()) => SendChecked::Sent,
+      // Reserved but undeliverable: release the reservation, no phantom
+      // backlog may stick (same discipline as `send` above).
+      Err(_) => {
+        self.gauge.dec();
+        SendChecked::Closed
+      }
+    }
+  }
 }
 
 /// Common blocking-receive shape for the raw bounded receiver and the
@@ -165,6 +260,14 @@ impl<T> GaugeReceiver<T> {
     self.inner.recv().inspect(|_| {
       self.gauge.dec();
     })
+  }
+}
+
+impl<T> Drop for GaugeReceiver<T> {
+  /// Mark the receiver gone so capacity-checked sends read `Closed`
+  /// instead of shedding forever against a dead consumer.
+  fn drop(&mut self) {
+    self.gauge.live.store(false, Ordering::Relaxed);
   }
 }
 
