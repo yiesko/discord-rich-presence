@@ -155,11 +155,16 @@ fn from_root_matches_install_prefix() {
 #[test]
 fn refresh_drops_libraries_of_vanished_roots() {
   let root = fake_steam_root("vanish", &[("12345", "Vdf Game")]);
+  // Hermetic cache: refresh persistence must land in scratch, never the
+  // real user cache dir.
+  let cache_scratch = Scratch::new("cache");
+  let cache_file = cache_scratch.join("cache.json");
   let query = format!(
     "{}/steamapps/common/vdf game/game.exe",
     root.path.to_string_lossy().to_lowercase()
   );
   let mut libraries = SteamLibraries::from_root(&root.path);
+  libraries.set_cache_file(cache_file.clone());
   assert_eq!(libraries.match_prefix(&query), Some("12345"));
 
   // The whole disk goes away: re-resolution must drop the install dir
@@ -169,6 +174,10 @@ fn refresh_drops_libraries_of_vanished_roots() {
   let _ = std::fs::remove_dir_all(&path);
   libraries.refresh_if_stale();
   assert_eq!(libraries.match_prefix(&query), None);
+  assert!(
+    cache_file.exists(),
+    "refresh persistence must land in the scratch cache file"
+  );
 }
 
 /// Off-root libraries surface via the mount table; pseudo-fs never do.

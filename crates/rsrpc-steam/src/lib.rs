@@ -345,6 +345,11 @@ pub struct SteamLibraries {
   /// expensive discovery source; installs still surface immediately via
   /// the folders-file marker).
   ticks: u64,
+  /// Override for the on-disk cache file (hermetic-test seam: refresh
+  /// persistence lands here instead of the real user cache dir; `None`
+  /// keeps production behavior). Loading (`discover`) always uses the
+  /// real cache — the override scopes the write path tests exercise.
+  cache_override: Option<PathBuf>,
 }
 
 impl SteamLibraries {
@@ -1060,8 +1065,16 @@ fn load_cache() -> HashMap<String, CachedLibrary> {
 }
 
 /// Persist the library cache best-effort; failures only cost a rescan.
+impl SteamLibraries {
+  /// Point refresh persistence at a test-local file (hermetic tests).
+  /// Production leaves this unset and uses the platform cache dir.
+  pub fn set_cache_file(&mut self, path: PathBuf) {
+    self.cache_override = Some(path);
+  }
+}
+
 fn save_cache(libraries: &SteamLibraries) {
-  let Some(path) = cache_path() else {
+  let Some(path) = libraries.cache_override.clone().or_else(cache_path) else {
     return;
   };
   if let Some(parent) = path.parent()
