@@ -282,7 +282,12 @@ async fn shutdown_with_open_conns_completes() {
       other => panic!("expected ServerShutdown disconnect, got {other:?}"),
     }
   }
-  assert!(hub.next_event().await.is_none());
+  assert!(
+    tokio::time::timeout(TIMEOUT, hub.next_event())
+      .await
+      .expect("hub must close after shutdown drains")
+      .is_none()
+  );
 }
 
 /// Zero bounds are rejected with a config error, never a channel panic.

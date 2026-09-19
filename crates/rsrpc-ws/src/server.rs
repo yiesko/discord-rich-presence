@@ -59,9 +59,23 @@ pub const MAX_PENDING_REJECTS: usize = 8;
 /// connection task. [`shutdown`](Self::shutdown) terminates all of them.
 pub struct Server {
   token: CancellationToken,
-  accept_task: tokio::task::JoinHandle<()>,
+  accept_task: Option<tokio::task::JoinHandle<()>>,
   conns: Arc<Mutex<JoinSet<()>>>,
   local_addr: SocketAddr,
+}
+
+impl Drop for Server {
+  /// Best-effort shutdown without awaiting: cancel first so token-aware
+  /// loops observe it, then abort the accept task. Connection tasks end
+  /// through cancellation (or already have, via their disconnect paths);
+  /// graceful drain stays in [`shutdown`](Self::shutdown), which owners
+  /// must prefer — Rust forbids `await` here.
+  fn drop(&mut self) {
+    self.token.cancel();
+    if let Some(accept_task) = self.accept_task.take() {
+      accept_task.abort();
+    }
+  }
 }
 
 impl std::fmt::Debug for Server {
@@ -133,7 +147,7 @@ impl Server {
     Ok((
       Self {
         token,
-        accept_task,
+        accept_task: Some(accept_task),
         conns,
         local_addr,
       },
@@ -151,9 +165,11 @@ impl Server {
   ///
   /// Bounded by a fixed drain timeout; stragglers are aborted. After
   /// this returns, the [`EventHub`] yields its remaining events then `None`.
-  pub async fn shutdown(self) {
+  pub async fn shutdown(mut self) {
     self.token.cancel();
-    let _ = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, self.accept_task).await;
+    if let Some(accept_task) = self.accept_task.take() {
+      let _ = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, accept_task).await;
+    }
     // Take the set out under a short lock; join without holding it
     // (never hold a lock across `.await` on task completion).
     let mut owned = {
