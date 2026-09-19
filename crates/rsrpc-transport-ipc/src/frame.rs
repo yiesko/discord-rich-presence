@@ -55,6 +55,15 @@ pub trait IpcFacilitator: Send {
   /// implementors; the current pid is still cleared via [`send_empty`]).
   fn note_published_pid(&mut self, _pid: u64) {}
 
+  /// Check (and record) a published pid before forwarding: unknown pids
+  /// past the tracking bound are refused so every forwarded pid stays
+  /// covered by disconnect cleanup.
+  ///
+  /// Default: always admit (external implementors keep today's behavior).
+  fn admit_published_pid(&mut self, _pid: u64) -> bool {
+    true
+  }
+
   /// Drain tracked pids for disconnect clears, oldest first.
   ///
   /// Default: none (external implementors keep today's exact behavior).
@@ -94,18 +103,37 @@ pub const MAX_IPC_PAYLOAD: u32 = 1024 * 1024;
 /// same as today's single-pid behavior for it.
 pub(crate) const MAX_TRACKED_PIDS: usize = 16;
 
+/// Check (and record) a published pid for disconnect-clear coverage:
+/// known pids refresh as most recent, unknown pids fit only with room.
+/// Returns whether the caller may forward — refused pids must not reach
+/// the sink, keeping every forwarded pid tracked (and therefore covered
+/// by disconnect cleanup).
+pub fn admit_pid(history: &mut Vec<u64>, pid: u64) -> bool {
+  if let Some(pos) = history.iter().position(|known| *known == pid) {
+    history.remove(pos);
+    history.push(pid);
+    true
+  } else if history.len() >= MAX_TRACKED_PIDS {
+    false
+  } else {
+    history.push(pid);
+    true
+  }
+}
+
 /// Record a published pid, refreshing re-published pids as most recent
 /// and dropping the oldest beyond the per-connection cap.
 ///
 /// Public so custom [`IpcFacilitator`] implementors share the exact
 /// disconnect-clear semantics instead of reimplementing the bound.
+/// Legacy evicting behavior, kept for compatibility: prefer [`admit_pid`],
+/// which refuses instead of silently dropping tracked history (dropped
+/// pids ghost, since disconnect cleanup can no longer clear them).
 pub fn track_pid(history: &mut Vec<u64>, pid: u64) {
-  if let Some(pos) = history.iter().position(|known| *known == pid) {
-    history.remove(pos);
-  } else if history.len() >= MAX_TRACKED_PIDS {
+  if !admit_pid(history, pid) {
     history.remove(0);
+    history.push(pid);
   }
-  history.push(pid);
 }
 
 /// Pids needing clears on connection loss: tracked history (oldest
@@ -514,9 +542,16 @@ fn handle_set_activity(
   activity_cmd.application_id = Some(ipc.client_id());
   let pid = args.pid.unwrap_or_default();
   ipc.set_pid(pid);
-  ipc.note_published_pid(pid);
+  // Refused pids never reach the sink (echo below still flows, so
+  // lock-step clients never hang); recording stays limited to forwarded
+  // commands, keeping disconnect cleanup complete by construction.
+  if !ipc.admit_published_pid(pid) {
+    tracing::debug!("[ipc] Past {MAX_TRACKED_PIDS} tracked pids, refusing pid {pid}");
+  } else {
+    ipc.note_published_pid(pid);
+    ipc.send_event(activity_cmd.clone());
+  }
   ipc.set_nonce(activity_cmd.nonce.to_string());
-  ipc.send_event(activity_cmd.clone());
 
   // "IPC will echo back every command you send as a response.
   //  Use this as a lock-step feature to avoid flooding messages.

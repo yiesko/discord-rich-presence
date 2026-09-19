@@ -97,7 +97,6 @@ async fn drop_without_shutdown_still_clears_presence() {
     r#"{"v":1,"client_id":"game-1"}"#,
   );
   let (packet_type, body) = read_frame(&mut client);
-  eprintln!("MARK ready read");
   assert_eq!(packet_type, 1);
   assert!(body.contains("READY"), "expected READY, got: {body}");
 
@@ -126,6 +125,7 @@ async fn drop_without_shutdown_still_clears_presence() {
   );
 }
 
+/// Regular files squatting an index are reclaimed for the socket.
 #[tokio::test]
 async fn stale_regular_file_is_reclaimed() {
   let scratch = Scratch::new("stale");

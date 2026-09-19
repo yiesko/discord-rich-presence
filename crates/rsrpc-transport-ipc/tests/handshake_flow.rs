@@ -75,6 +75,10 @@ impl IpcFacilitator for TestFacilitator {
   fn note_published_pid(&mut self, pid: u64) {
     rsrpc_transport_ipc::frame::track_pid(&mut self.published_pids, pid);
   }
+  /// Test history shares the production admission bound.
+  fn admit_published_pid(&mut self, pid: u64) -> bool {
+    rsrpc_transport_ipc::frame::admit_pid(&mut self.published_pids, pid)
+  }
   /// Test history drain for disconnect-clear assertions.
   fn take_published_pids(&mut self) -> Vec<u64> {
     std::mem::take(&mut self.published_pids)
@@ -304,6 +308,7 @@ fn malformed_activity_disturbs_no_presence() {
   server.join().expect("server thread");
 }
 
+/// Oversize frames close with 1003 and still clear the presence.
 #[test]
 fn oversize_frame_close_still_clears_presence() {
   use std::io::Write;
@@ -438,7 +443,22 @@ fn abrupt_close_clears_every_published_pid() {
   server.join().expect("server thread");
 }
 
-/// Beyond 16 pids only the most recent clear on disconnect.
+/// Publish one pid, asserting only the lock-step echo (used past the
+/// bound, where refused publishes never reach the sink).
+fn publish_pid_echo_only(client: &mut UnixStream, pid: u64) {
+  write_frame(
+    client,
+    PacketType::Frame,
+    &format!(
+      r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":{pid},"activity":{{"name":"G{pid}","type":0}}}},"nonce":"n{pid}"}}"#
+    ),
+  );
+  let (_, echo) = read_frame(client);
+  assert!(echo.contains("SET_ACTIVITY"), "expected echo, got: {echo}");
+}
+
+/// Beyond 16 pids, extras are refused before forwarding: disconnect
+/// clears exactly the tracked 1..=16, and nothing ghosts.
 #[test]
 fn published_pid_history_is_bounded() {
   let (server_stream, mut client) = UnixStream::pair().expect("socketpair");
@@ -465,10 +485,13 @@ fn published_pid_history_is_bounded() {
   let (_, body) = read_frame(&mut client);
   assert!(body.contains("READY"));
 
-  // 20 distinct pids: only the 16 most recent may produce clears
-  // (MAX_TRACKED_PIDS); older history drops.
-  for pid in 1u64..=20 {
+  // 20 distinct pids: the first 16 track, 17..=20 are refused before
+  // forwarding (echoes still flow, so lock-step clients never hang).
+  for pid in 1u64..=16 {
     publish_pid(&mut client, &mut rx, pid);
+  }
+  for pid in 17u64..=20 {
+    publish_pid_echo_only(&mut client, pid);
   }
   drop(client);
 
@@ -477,7 +500,15 @@ fn published_pid_history_is_bounded() {
     pids.push(recv_clear_pid(&mut rx));
   }
   pids.sort_unstable();
-  assert_eq!(pids, (5u64..=20).collect::<Vec<_>>());
+  assert_eq!(pids, (1u64..=16).collect::<Vec<_>>());
+  // Plus the close path's current-pid clear (pid 20, refused and never
+  // shown — a harmless no-op downstream kept for the external-implementor
+  // contract that clears exactly `[current_pid]`): then drained.
+  assert_eq!(recv_clear_pid(&mut rx), 20);
+  assert!(
+    rx.try_recv().is_err(),
+    "refused pids must leave no further sink traffic behind"
+  );
 
   server.join().expect("server thread");
 }

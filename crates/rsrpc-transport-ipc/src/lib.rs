@@ -1,8 +1,10 @@
 //! Discord IPC transport: framed protocol plus platform servers.
 //!
 //! [`frame`] is platform-independent (any synchronous duplex byte stream);
-//! [`unix`] and `windows` own their listeners with a shared JoinSet
-//! lifecycle. Transports await a Tokio runtime from the caller.
+//! `unix` and `windows` own their listeners with a shared JoinSet
+//! lifecycle (`unix` is cfg-gated, so no intra-doc link here — it would
+//! break the Windows doc build). Transports await a Tokio runtime from
+//! the caller.
 //!
 //! Behavioral differences from the legacy transport:
 //! - No mid-connection listener rebind: the bound socket/pipe serves for

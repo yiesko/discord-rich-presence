@@ -109,6 +109,11 @@ impl IpcFacilitator for ConnFacilitator {
   fn note_published_pid(&mut self, pid: u64) {
     crate::frame::track_pid(&mut self.published_pids, pid);
   }
+  /// Admit before forwarding: unknown pids past the bound are refused so
+  /// every forwarded pid stays covered by disconnect cleanup.
+  fn admit_published_pid(&mut self, pid: u64) -> bool {
+    crate::frame::admit_pid(&mut self.published_pids, pid)
+  }
   /// Drain the published-pid history for disconnect clears.
   fn take_published_pids(&mut self) -> Vec<u64> {
     std::mem::take(&mut self.published_pids)
@@ -161,6 +166,7 @@ impl IpcTransport {
       stream_rx,
       token: token.clone(),
       conns: Arc::clone(&conns),
+      pump_sem: Arc::new(tokio::sync::Semaphore::new(MAX_PUMPS)),
       user,
       sink: sink.clone(),
     }));
@@ -315,10 +321,18 @@ fn accept_loop(
   }
 }
 
+/// Cap on concurrent Windows IPC pumps: each parks a `spawn_blocking`
+/// thread in a blocking pump, and the CLI runtime allows 32 blocking
+/// threads — past this, peers are dropped at once instead of starving
+/// the pool (or the process) under connection floods.
+const MAX_PUMPS: usize = 32;
+
 struct DispatchCtx {
   stream_rx: mpsc::Receiver<interprocess::local_socket::Stream>,
   token: CancellationToken,
   conns: Arc<tokio::sync::Mutex<JoinSet<()>>>,
+  /// Bounds concurrent pumps (see `MAX_PUMPS`).
+  pump_sem: Arc<tokio::sync::Semaphore>,
   user: Arc<Mutex<RpcUser>>,
   sink: EventSink,
 }
@@ -329,6 +343,7 @@ async fn dispatch_loop(
     mut stream_rx,
     token,
     conns,
+    pump_sem,
     user,
     sink,
   }: DispatchCtx,
@@ -340,12 +355,20 @@ async fn dispatch_loop(
       stream = stream_rx.recv() => {
         let Some(mut stream) = stream else { break };
         let facil = ConnFacilitator::fresh(user.clone(), sink.clone());
+        // Bounded pumps: past the cap the peer is dropped at once instead
+        // of parking another blocking thread. The permit rides into the
+        // closure and releases when the pump returns.
+        let Ok(pump_permit) = pump_sem.clone().try_acquire_owned() else {
+          tracing::warn!("[ipc] Pump cap reached, dropping peer");
+          continue;
+        };
         // Short critical section: spawn_blocking is synchronous. Exited
         // tasks are reaped here so connection churn cannot pin JoinSet
         // entries for the transport lifetime.
         let mut conns = conns.lock().await;
         while conns.try_join_next().is_some() {}
         conns.spawn_blocking(move || {
+          let _permit = pump_permit;
           let mut facil = facil;
           handle_stream(&mut facil, &mut stream);
         });

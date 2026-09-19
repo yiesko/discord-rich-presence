@@ -122,6 +122,11 @@ impl IpcFacilitator for ConnFacilitator {
   fn note_published_pid(&mut self, pid: u64) {
     crate::frame::track_pid(&mut self.published_pids, pid);
   }
+  /// Admit before forwarding: unknown pids past the bound are refused so
+  /// every forwarded pid stays covered by disconnect cleanup.
+  fn admit_published_pid(&mut self, pid: u64) -> bool {
+    crate::frame::admit_pid(&mut self.published_pids, pid)
+  }
   /// Drain the published-pid history for disconnect clears.
   fn take_published_pids(&mut self) -> Vec<u64> {
     std::mem::take(&mut self.published_pids)
