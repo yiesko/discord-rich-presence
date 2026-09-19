@@ -284,7 +284,7 @@ pub fn handle_stream(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Wri
         }
       }
       PacketType::Frame => {
-        if on_frame(ipc, buffer.get_mut(), &message, current_pid) {
+        if on_frame(ipc, buffer.get_mut(), &message) {
           break;
         }
       }
@@ -377,12 +377,7 @@ fn on_ping(stream: &mut (impl Read + Write), message: &str) {
 }
 /// Dispatch one `Frame` packet: sub-command handlers plus presence
 /// forwarding. Returns whether the pump must stop (`true` = break).
-fn on_frame(
-  ipc: &mut dyn IpcFacilitator,
-  stream: &mut (impl Read + Write),
-  message: &str,
-  current_pid: u64,
-) -> bool {
+fn on_frame(ipc: &mut dyn IpcFacilitator, stream: &mut (impl Read + Write), message: &str) -> bool {
   if !ipc.handshake() {
     tracing::debug!("[ipc] Did not handshake yet, ignoring frame");
     return false;
@@ -414,7 +409,7 @@ fn on_frame(
       }
     }
     "SET_ACTIVITY" => {
-      handle_set_activity(ipc, stream, message, &mut activity_cmd, current_pid);
+      handle_set_activity(ipc, stream, message, &mut activity_cmd);
     }
     "GET_USER" => {
       // Official response: the user object, or null when the id
@@ -489,15 +484,16 @@ fn handle_set_activity(
   stream: &mut (impl Read + Write),
   raw: &str,
   activity_cmd: &mut ActivityCmd,
-  current_pid: u64,
 ) {
   let args = match activity_cmd.args {
     Some(ref args) => args,
+    // No `args` at all is malformed input, not a clear: a genuine clear
+    // carries `args: {pid, activity: null}` through the normal path below.
+    // Like the WS invalid-message path, warn and change nothing — clearing
+    // tracked pids for garbage would kill live cards on a connection that
+    // stays open (Discord/arRPC never mutate presence on invalid input).
     None => {
       tracing::warn!("[ipc] Invalid activity command, skipping");
-      for pid in clear_pids(ipc, current_pid) {
-        send_empty(ipc.sink(), pid);
-      }
       return;
     }
   };

@@ -260,6 +260,40 @@ fn spawn_server() -> (
 }
 
 /// Oversize frames close with 1003 and still clear the presence.
+/// Malformed activity (no args) changes nothing: no clears ship, the
+/// connection stays alive and later disconnect clears everything tracked.
+#[test]
+fn malformed_activity_disturbs_no_presence() {
+  let (mut client, mut rx, server) = spawn_server();
+  publish_presence(&mut client, &mut rx);
+
+  // No `args` at all: warn-and-skip, exactly like an invalid WS message.
+  write_frame(
+    &mut client,
+    PacketType::Frame,
+    r#"{"cmd":"SET_ACTIVITY","nonce":"n-bad"}"#,
+  );
+  // Drain window: nothing may arrive (no clear for any pid).
+  let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+  while std::time::Instant::now() < deadline {
+    assert!(
+      rx.try_recv().is_err(),
+      "malformed input must not disturb presence"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(10));
+  }
+
+  // Connection alive and history intact: a new publish forwards, and the
+  // abrupt close below clears every tracked pid (9 and 10).
+  publish_pid(&mut client, &mut rx, 10);
+  drop(client);
+  let mut pids = vec![recv_clear_pid(&mut rx), recv_clear_pid(&mut rx)];
+  pids.sort_unstable();
+  assert_eq!(pids, vec![9, 10]);
+
+  server.join().expect("server thread");
+}
+
 #[test]
 fn oversize_frame_close_still_clears_presence() {
   use std::io::Write;
