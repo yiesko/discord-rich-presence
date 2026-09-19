@@ -608,6 +608,7 @@ async fn stats_task(shared: Arc<Shared>, token: CancellationToken) {
   }
 }
 
+/// Translate scanner reports into bridge events until shutdown.
 async fn proc_pump(
   mut rx: mpsc::Receiver<ProcInput>,
   shared: Arc<Shared>,
@@ -725,6 +726,8 @@ async fn refresh_task(shared: Arc<Shared>, interval: Duration, token: Cancellati
   }
 }
 
+/// Re-broadcast cached activities so late joiners converge; always marks
+/// the snapshot dirty, even when there is nothing to send.
 fn refresh_once(shared: &Arc<Shared>) {
   let payloads: Vec<Arc<CachedActivity>> = shared
     .cache
@@ -768,6 +771,7 @@ async fn persist_task(shared: Arc<Shared>, interval: Duration, token: Cancellati
 }
 
 impl Shared {
+  /// Client map for one bridge encoding.
   fn clients_for(&self, protocol: BridgeProtocol) -> &Mutex<FxHashMap<ClientId, Responder>> {
     match protocol {
       BridgeProtocol::Json => &self.json_clients,

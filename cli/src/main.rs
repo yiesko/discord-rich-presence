@@ -439,6 +439,8 @@ fn cmd_list_database(daemon: &Daemon) -> Result<(), Box<dyn std::error::Error>> 
   Ok(())
 }
 
+/// CLI entry: parse args, handle one-shot modes, otherwise run the daemon
+/// until Ctrl+C.
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
   install_panic_hook();
 

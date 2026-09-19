@@ -982,6 +982,7 @@ struct CachedLibrary {
   dirs: HashMap<String, String>,
 }
 
+/// Cache file location under the platform cache dir, if one is known.
 fn cache_path() -> Option<PathBuf> {
   let base = std::env::var_os("XDG_CACHE_HOME")
     .map(PathBuf::from)
@@ -1013,6 +1014,8 @@ fn fingerprint_from_json(value: &serde_json::Value) -> Option<Fingerprint> {
   })
 }
 
+/// Read the on-disk library cache, tolerating absence and corruption as
+/// an empty cache (rediscovery covers the gap).
 fn load_cache() -> HashMap<String, CachedLibrary> {
   let mut cached = HashMap::new();
   let Some(path) = cache_path() else {
@@ -1056,6 +1059,7 @@ fn load_cache() -> HashMap<String, CachedLibrary> {
   cached
 }
 
+/// Persist the library cache best-effort; failures only cost a rescan.
 fn save_cache(libraries: &SteamLibraries) {
   let Some(path) = cache_path() else {
     return;

@@ -103,6 +103,8 @@ pub(crate) struct Sink {
 }
 
 impl Sink {
+  /// Queue one command downstream, shedding (counted) instead of stalling
+  /// the pump when the bridge stops draining.
   pub(crate) async fn emit(&self, cmd: ActivityCmd) {
     match self.tx.send_timeout(cmd, SINK_SEND_TIMEOUT).await {
       Ok(()) => {}
@@ -379,6 +381,8 @@ async fn pump_loop(
   }
 }
 
+/// Validate a new game client (version, encoding, origin), send READY and
+/// register its slot. Rejected clients are closed before registration.
 async fn on_connect(
   id: ClientId,
   responder: Responder,
@@ -452,6 +456,8 @@ async fn remove_and_clear(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Dispatch one client message; `false` means the client died and its slot
+/// must be pruned (disconnect clears follow downstream).
 async fn on_message(
   id: ClientId,
   message: Message,

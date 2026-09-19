@@ -496,6 +496,8 @@ impl ProcessServer {
     }
   }
 
+  /// Stage custom entries, rebuilding the shared generation so the scan
+  /// loop and diagnostics observe them.
   pub fn append_detectables(&self, detectable: Vec<DetectableActivity>) {
     // Append to the custom list, since that's what is actually scanned.
     // Full public entries convert once to the slim scanner form here,
@@ -955,6 +957,8 @@ impl ProcessServer {
   }
 
   #[hotpath::measure]
+  /// One full process sweep, classifying every process against the current
+  /// generation bundle.
   pub fn scan_for_processes(&self) -> rsrpc_protocol::error::Result<Vec<ScannedHit>> {
     #[cfg(not(target_os = "linux"))]
     let processes = self.process_list()?;
