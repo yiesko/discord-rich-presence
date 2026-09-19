@@ -927,6 +927,7 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 mod tests {
   use super::*;
 
+  /// A briefly-full sink still delivers via retry (no shed on transients).
   #[tokio::test]
   async fn clear_retry_survives_a_briefly_full_sink() {
     // Cap-1 sink held full: the retry lands once space frees inside the
@@ -964,6 +965,7 @@ mod tests {
     drain.abort();
   }
 
+  /// A closed sink fails fast-ish and counts the shed clear.
   #[tokio::test]
   async fn clear_retry_gives_up_past_the_budget() {
     // Closed sink: no capacity will ever return — fail fast-ish, counted.
@@ -983,6 +985,7 @@ mod tests {
     assert_eq!(sink.dropped.load(Ordering::Relaxed), 1);
   }
 
+  /// Staged clears never exceed the bound; every shed is counted.
   #[test]
   fn staged_clears_stay_bounded_and_counted() {
     let (tx, _rx) = mpsc::channel::<ActivityCmd>(1);
@@ -1006,6 +1009,7 @@ mod tests {
     assert_eq!(sink.dropped.load(Ordering::Relaxed), 5);
   }
 
+  /// Flush delivers oldest-first and stops at the first full queue.
   #[tokio::test]
   async fn flush_preserves_order_and_stops_when_full() {
     // Cap-1 sink held full by a filler: flush delivers nothing, staged intact.
@@ -1049,6 +1053,7 @@ mod tests {
     assert_eq!(sink.dropped.load(Ordering::Relaxed), 0);
   }
 
+  /// Expiry removes only lapsed entries, keeping fresh retry windows.
   #[test]
   fn expiry_sheds_only_lapsed_entries() {
     let (tx, _rx) = mpsc::channel::<ActivityCmd>(1);
