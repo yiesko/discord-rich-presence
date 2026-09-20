@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- The `lib/` monolith is now a 12-crate workspace plus the thin `cli`
+  binary (`rsrpc-ws`, `rsrpc-types`, `rsrpc-protocol`, `rsrpc-transport-ws`,
+  `rsrpc-transport-ipc`, `rsrpc-state`, `rsrpc-bridge`, `rsrpc-telemetry`,
+  `rsrpc-proc-events`, `rsrpc-steam`, `rsrpc-detect`, `rsrpc-core`): one
+  Tokio runtime owned by the caller, `[workspace.lints]` on every member,
+  fuzz targets under `fuzz/`, benches under `rsrpc-detect` /
+  `rsrpc-protocol`. The old `rsrpc` library name is gone: embedders use
+  `rsrpc-core::Daemon` / `RPCConfig::builder()`. `Message::Text(String)`
+  is now `Text(Utf8Bytes)` and bridge payloads are `Arc<CachedActivity>`
+  (`json: Utf8Bytes, msgpack: Bytes, is_clear: bool`).
+
+### Fixed
+- `Shared::broadcast_raw` now prunes dead bridge clients the same
+  way `send_to_all` already did: when `Responder::send` returns `false` the
+  client is removed and a `Pruning dead consumer` warning is emitted.
+  Previously a bridge client that died without a clean disconnect (killed
+  process, closed browser tab) and only received `INVITE_BROWSER` /
+  `DEEP_LINK` events would keep its `Responder` and queued frames pinned in
+  memory forever (`Shared::broadcast_raw` in `crates/rsrpc-bridge/src/bridge.rs`).
+- WebSocket game-client handlers (`handle_browser_command`,
+  `handle_deep_link`, `handle_connections_callback`, `handle_set_activity`)
+  now report whether their reply was delivered and the pump
+  (`Event::Disconnect` in `crates/rsrpc-transport-ws/src/transport.rs:324`)
+  removes the client and clears every published pid when delivery fails,
+  freeing the per-client slots the same way a clean `Disconnect` does
+  (`crates/rsrpc-transport-ws/src/handlers.rs:33`). Verified with real
+  `Responder` tests (RFC6455 handshake + killed-connection simulation with
+  condition-wait for `send==false` and `Disconnect`).
+
+### Added
+- Read-only resource census for long-session memory diagnosis (no behavior
+  change): `QueueGauge` / `GaugeSender` / `GaugeReceiver` wrappers around
+  the three previously unbounded channels sharing an `AtomicUsize` depth,
+  plus a `StatsSnapshot` census (`rss` via `/proc/self/statm` on Linux,
+  `n/a` elsewhere) with bridge `json`/`msgpack` and `ws` client counts and
+  all three queue depths
+  (`crates/rsrpc-telemetry/src/lib.rs:206`). Helpers, rendering and the
+  daemon wiring are covered by `crates/rsrpc-telemetry/tests/telemetry.rs`
+  (gauge sharing, `rss_bytes`, snapshot shape) and the bridge census
+  suite (live counts, session-boundary lines): the bridge logs the
+  census hourly plus `game-start`/`game-end` on process-table
+  transitions, with consumer counts and input queue depths sampled live.
+- Tests `crates/rsrpc-ws/tests/integration.rs` and
+  `crates/rsrpc-transport-ws/tests/integration.rs` (dead vs live
+  `Responder` liveness).
+
+### Changed
+- Cheaper `SET_ACTIVITY` pipeline: the activity fingerprint is computed
+  first and flood-dropped publishes return before the JSON + MessagePack
+  envelope is ever built (~0.76µs vs ~2.5µs per dropped publish); accepted
+  publishes compare stored fingerprint bytes instead of re-serializing and
+  re-parsing (`CachedActivity.activity_json`, same pattern as `is_clear`).
+  No behavior change (covered by the flood/change/replay suites plus a
+  `publish_flood_drop` bench).
+
 ## [0.35.0] - 2026-09-15
 
 ### Breaking

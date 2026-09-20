@@ -1,0 +1,279 @@
+//! Per-command handlers: protocol replies plus sink forwarding.
+//!
+//! Every handler returns whether the client is still alive; `false` prunes
+//! the slot immediately instead of waiting for a `Disconnect` that may lag
+//! behind under flood. Replies go through the private `reply` helper, a
+//! bounded wait: the shared pump must never park behind one reader that
+//! stopped draining.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use rsrpc_protocol::commands;
+use rsrpc_types::cmd::{ActivityCmd, ActivityCmdArgs};
+use rsrpc_types::user::RpcUser;
+use rsrpc_ws::{Message, Responder};
+use serde_json::Value;
+
+use crate::transport::{PendingClear, Sink};
+
+/// Upper bound a handler waits for outbox space before treating the client
+/// as stalled (pruned, freeing the pump for everyone else).
+const REPLY_SEND_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Queue one reply with a bounded wait. `false` means the client is gone
+/// or stalled past the budget: the caller prunes it.
+async fn reply(responder: &Responder, message: Message) -> bool {
+  responder
+    .send_timeout(message, REPLY_SEND_TIMEOUT)
+    .await
+    .is_ok()
+}
+
+/// Serialize command args to a string map, preserving value types.
+/// Borrows: `to_value` already produces an owned `Value`, so cloning the
+/// args first would copy the whole subtree twice.
+fn event_args_as_hashmap(args: Option<&ActivityCmdArgs>) -> HashMap<String, Value> {
+  let args = match args {
+    Some(args) => serde_json::to_value(args).unwrap_or(Value::Null),
+    None => Value::Null,
+  };
+  match args {
+    Value::Object(map) => map.into_iter().collect(),
+    _ => HashMap::new(),
+  }
+}
+
+/// Forward an invite/template/gift command after validating its code.
+pub(crate) async fn handle_browser_command(
+  event: &ActivityCmd,
+  responder: &Responder,
+  sink: &Sink,
+) -> bool {
+  // Discord error codes for unusable invite/template/gift ids.
+  let (code, message) = if event.cmd == "GUILD_TEMPLATE_BROWSER" {
+    (4017_u16, "Invalid guild template id")
+  } else if event.cmd == "GIFT_CODE_BROWSER" {
+    (4016_u16, "Invalid gift code")
+  } else {
+    (4011_u16, "Invalid invite id")
+  };
+  let has_code = event
+    .args
+    .as_ref()
+    .and_then(|args| args.code.as_ref())
+    .is_some_and(|code| !code.trim().is_empty());
+  if !has_code {
+    tracing::warn!("[transport-ws] {} without code", event.cmd);
+    return reply(
+      responder,
+      Message::Text(commands::rpc_error(&event.cmd, &event.nonce, code, message).into()),
+    )
+    .await;
+  }
+
+  // Optimistic forward; the outcome lives downstream.
+  let response = ActivityCmd {
+    application_id: event.application_id.clone(),
+    cmd: event.cmd.clone(),
+    args: None,
+    data: Some(event_args_as_hashmap(event.args.as_ref())),
+    evt: None,
+    nonce: event.nonce.clone(),
+  };
+  sink.emit(event.clone()).await;
+
+  // Client-supplied `data` may hold non-finite floats, which JSON cannot
+  // encode: drop loudly instead of ending the pump. Nothing was sent, so
+  // the client is still considered alive.
+  let Ok(response) = serde_json::to_string(&response) else {
+    tracing::warn!(
+      "[transport-ws] Dropping unserializable response for {}",
+      event.cmd
+    );
+    return true;
+  };
+  reply(responder, Message::Text(response.into())).await
+}
+
+/// Acknowledge a deep link (forwarded downstream).
+pub(crate) async fn handle_deep_link(event: &ActivityCmd, responder: &Responder) -> bool {
+  let response = ActivityCmd {
+    application_id: event.application_id.clone(),
+    cmd: event.cmd.clone(),
+    args: None,
+    data: None,
+    evt: None,
+    nonce: event.nonce.clone(),
+  };
+  let Ok(response) = serde_json::to_string(&response) else {
+    tracing::warn!("[transport-ws] Dropping unserializable deep-link response");
+    return true;
+  };
+  reply(responder, Message::Text(response.into())).await
+}
+
+/// Answer `CONNECTIONS_CALLBACK` with the official-shaped error.
+pub(crate) async fn handle_connections_callback(
+  event: &ActivityCmd,
+  responder: &Responder,
+) -> bool {
+  let mut data = HashMap::new();
+  data.insert("code".to_string(), Value::Number(1000.into()));
+  let response = ActivityCmd {
+    application_id: event.application_id.clone(),
+    cmd: event.cmd.clone(),
+    args: None,
+    data: Some(data),
+    evt: Some("ERROR".to_string()),
+    nonce: event.nonce.clone(),
+  };
+  // `data` is locally built (no client floats): encode failure would be a
+  // coding bug, but the pump must not die on it.
+  let Ok(response) = serde_json::to_string(&response) else {
+    tracing::warn!("[transport-ws] Dropping unserializable connections response");
+    return true;
+  };
+  reply(responder, Message::Text(response.into())).await
+}
+
+/// Blind-ACK a subscription (no voice/guild backend exists; clients wait
+/// for the lock-step reply).
+pub(crate) async fn handle_subscribe(event: &ActivityCmd, responder: &Responder) -> bool {
+  reply(
+    responder,
+    Message::Text(commands::subscribe_ack(event).into()),
+  )
+  .await
+}
+
+/// Answer `GET_USER` with the current identity, or null for strangers.
+pub(crate) async fn handle_get_user(
+  event: &ActivityCmd,
+  user: &RpcUser,
+  responder: &Responder,
+) -> bool {
+  let wanted = event.args.as_ref().and_then(|args| args.user_id.as_ref());
+  let matched = wanted.is_none_or(|id| *id == user.id);
+  reply(
+    responder,
+    Message::Text(commands::user_response(event, matched.then_some(user)).into()),
+  )
+  .await
+}
+
+/// Answer unknown commands from the shared unbacked-command table.
+pub(crate) async fn handle_unknown(cmd: &str, event: &ActivityCmd, responder: &Responder) -> bool {
+  let unsupported = commands::unsupported_command(cmd);
+  if unsupported.is_none() {
+    tracing::warn!("[transport-ws] Unknown command: {cmd}");
+  }
+  let (code, message) = unsupported.unwrap_or((1000, "Unknown command"));
+  reply(
+    responder,
+    Message::Text(commands::rpc_error(&event.cmd, &event.nonce, code, message).into()),
+  )
+  .await
+}
+
+/// How a `SET_ACTIVITY` command reaches the sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Forward {
+  /// Normal path: bounded-wait enqueue straight into the sink.
+  Direct,
+  /// Wedge recovery: queue behind older staged clears (never waits, never
+  /// overtakes them). Used when the staged queue is still non-empty after
+  /// the per-message flush, i.e. the sink is still full.
+  Staged,
+  /// Refused: reply only, never forwarded (over the tracking bound, or a
+  /// pruned slot). Lock-step clients must receive *some* reply or hang.
+  Refused,
+}
+
+/// Forward `SET_ACTIVITY` and confirm with the arRPC-shaped reply.
+///
+/// Returns `(alive, delivered)`: `alive` prunes the slot when `false`;
+/// `delivered` tells the caller whether the card reached (or is queued
+/// behind older clears toward) the sink, so shed publishes stay untracked
+/// (nothing shown, nothing to clear). The fixed command (with the
+/// connect-query `client_id` fallback applied) goes to the sink; the
+/// caller records the slim [`PublishedSlot`] itself, so no second deep
+/// clone happens here.
+pub(crate) async fn handle_set_activity(
+  event: &ActivityCmd,
+  query_client_id: Option<&str>,
+  responder: &Responder,
+  sink: &Sink,
+  pending_clears: &Mutex<Vec<PendingClear>>,
+  forward: Forward,
+) -> (bool, bool) {
+  // Fall back to the client_id provided on connect (query param) when the
+  // command itself does not carry an application_id.
+  let mut event = event.clone();
+  if event.application_id.is_none() {
+    event.application_id = query_client_id.map(str::to_string);
+  }
+
+  // Apply field fixes so the confirmation reply carries labels/urls (fix is
+  // idempotent, so a downstream fix pass is harmless).
+  event.fix();
+  let delivered = match forward {
+    Forward::Direct => sink.emit(event.clone()).await,
+    // Staged publishes stay tracked: the disconnect path flushes them
+    // before its own clears, so a never-delivered publish degrades to a
+    // harmless clear of an unshown card (ignored downstream).
+    Forward::Staged => {
+      sink.stage_clear(pending_clears, event.clone());
+      sink.flush_pending(pending_clears);
+      true
+    }
+    Forward::Refused => false,
+  };
+
+  // Confirm to the game client; some RPC libraries wait for this before
+  // considering the presence set. No confirm to send means the client is
+  // still considered alive.
+  let alive = match commands::set_activity_response(&event) {
+    Some(response) => reply(responder, Message::Text(response.into())).await,
+    None => true,
+  };
+  (alive, delivered)
+}
+
+/// Slim per-pid publication record: everything a disconnect clear needs,
+/// without retaining the full command. A connection normally publishes
+/// one pid; companions multiplexing several stay covered up to
+/// [`MAX_TRACKED_PIDS`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublishedSlot {
+  pub app_id: Option<String>,
+  pub pid: u64,
+  pub nonce: Value,
+}
+
+/// Cap on tracked pids per connection: bounds memory against pathological
+/// publishers while covering every realistic multiplexer. Beyond the cap
+/// new pids are refused before forwarding (see `note_published`), so every
+/// forwarded card stays tracked and disconnect cleanup stays complete —
+/// nothing ghosts, nothing is ever cleared while live.
+pub(crate) const MAX_TRACKED_PIDS: usize = 16;
+
+/// Build the clear command emitted when a published pid dies.
+pub(crate) fn clear_for_slot(published: &PublishedSlot) -> ActivityCmd {
+  ActivityCmd {
+    application_id: published.app_id.clone(),
+    cmd: "SET_ACTIVITY".to_string(),
+    data: None,
+    evt: None,
+    args: Some(ActivityCmdArgs {
+      // pid 0 is never a genuine clear, so it is safely ignored
+      // downstream — same convention as the old whole-command clear.
+      pid: Some(published.pid),
+      activity: None,
+      code: None,
+      user_id: None,
+    }),
+    nonce: published.nonce.clone(),
+  }
+}

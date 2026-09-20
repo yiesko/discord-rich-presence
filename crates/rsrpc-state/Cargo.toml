@@ -1,0 +1,21 @@
+[package]
+name = "rsrpc-state"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["spikehd"]
+description = "rsRPC presence snapshot slots for external tooling"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["discord", "rich-presence", "rpc"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"

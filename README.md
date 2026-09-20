@@ -22,8 +22,6 @@
 * Bundled offline detectable snapshot with optional automatic database refresh (fetch the detectable list every hour, like pog5-rsrpc)
 * `plugin/rsrpc.js` - optional Vencord plugin / userscript / Node client that receives activity from the bridge (not embedded in the Rust binary)
 * Custom overrides via `overrides.json` and/or `overrides.d/*.json` (arrays or single objects; added on the fly, bypass the OS filter so win32 entries work under Proton/Wine)
-* Adding new processes on the fly
-* Manually triggering scans
 * Single-shot diagnostics via `--list-detected` (staged overrides + ignore-list apply, exactly what running would publish) and `--list-database`
 * IPC-wins handoff: generic process detection shows immediately, yields
   to live game-SDK presence, and resumes when it clears (see below)
@@ -48,7 +46,7 @@ caches and backups). Details: `docs/systemd-user-units.md`.
 
 ## Requirements
 
-- [Cargo and Rust](https://www.rust-lang.org/) 1.88+ (edition 2024 + let-chains)
+- [Cargo and Rust](https://www.rust-lang.org/) 1.95+ (edition 2024 + let-chains)
 
 ## Testing it out
 
@@ -123,14 +121,14 @@ Every option also has a corresponding environment variable (e.g. `RSRPC_BRIDGE_P
 
 ### Logging
 
-Severities, chattiest first: `DEBUG` (per-tick internals, needs `--debug`/`RSRPC_DEBUG=1`), `INFO` (one line per state change: detects, clears, connects, hourly DB checks), `WARN` (degraded but continuing: fallbacks, retries, pruned clients), `ERROR` (failed operations). `RSRPC_LOGS_ENABLED=1` (set by the binary) gates everything; `RSRPC_LOG_LEVEL=debug|info|warn|error` (default `info`) sets the floor. `INFO` keeps the historical untagged shape; other levels print `[DEBUG]`/`[WARN]`/`[ERROR]` tags.
+Logs go to stderr through `tracing` (`tracing_subscriber`). `RUST_LOG` takes precedence when set; otherwise `--debug` / `RSRPC_DEBUG=1` selects `debug`, and the default is `info`. Severities, chattiest first: `DEBUG` (per-tick internals), `INFO` (one line per state change: detects, clears, connects, hourly DB checks), `WARN` (degraded but continuing: fallbacks, retries, pruned clients), `ERROR` (failed operations). Module targets are omitted from the output.
 
 ### Detectable database (offline snapshot & refresh)
 
-* Without flags the CLI uses the bundled snapshot (`lib/resources/detectable.json`, embedded via `detection::BUNDLED_DETECTABLE`), so it works offline.
+* Without flags the CLI uses the bundled snapshot (`crates/rsrpc-detect/resources/detectable.json`, embedded via `rsrpc_detect::db::BUNDLED_DETECTABLE`), so it works offline.
 * `--db-url <URL>` fetches and trims the list at startup (keeps only `id/name/hook/aliases`, `executables{name,is_launcher,os,arguments}` and `third_party_skus{distributor,id}`), with fallback to the bundled snapshot on failure.
 * `--enable-db-update` keeps refreshing that list every hour in the background. Without `--db-url` it defaults to `https://discord.com/api/v9/applications/detectable`.
-* Regenerate the snapshot with: `cargo run --manifest-path tools/updater/Cargo.toml` (writes `lib/resources/detectable.json`).
+* Regenerate the snapshot with: `cargo run --manifest-path tools/updater/Cargo.toml` (writes `crates/rsrpc-detect/resources/detectable.json`).
 
 ### Self-update (OTA)
 
@@ -153,7 +151,7 @@ Severities, chattiest first: `DEBUG` (per-tick internals, needs `--debug`/`RSRPC
 
 ### Custom overrides (`overrides.json`, `overrides.d/`)
 
-Files contain a JSON array (or a single object) of `DetectableActivity` objects. File resolution order: `--overrides-file` > `$RSRPC_OVERRIDES_FILE` > `$XDG_CONFIG_HOME/rsrpc/overrides.json` > `~/.config/rsrpc/overrides.json`; directory resolution: `--overrides-dir` > `$RSRPC_OVERRIDES_DIR` > `$XDG_CONFIG_HOME/rsrpc/overrides.d` > `~/.config/rsrpc/overrides.d`. Missing paths mean no overrides; corrupt directory files are skipped with a warning. Loaded before any branch (staged pre-start, applied to the live scanner on `start()` and to `--list-detected`).
+Files contain a JSON array (or a single object) of `DetectableActivity` objects. File resolution order: `--overrides-file` > `$RSRPC_OVERRIDES_FILE` > `$XDG_CONFIG_HOME/rsrpc/overrides.json` > `~/.config/rsrpc/overrides.json`; directory resolution: `--overrides-dir` > `$RSRPC_OVERRIDES_DIR` > `$XDG_CONFIG_HOME/rsrpc/overrides.d` > `~/.config/rsrpc/overrides.d`. Missing paths mean no overrides; corrupt directory files are skipped with a warning. Staged in the daemon before any branch: `--list-detected` sees them, and `run_until` applies them when the scanner starts.
 
 ### Diagnostics
 
@@ -187,12 +185,11 @@ the existing `socketId = pid` convention.
 
 * The `DISPATCH`/`READY` identity defaults to arRPC's (`arRPC/1045800378228281345`); override at startup with `RSRPC_USER_ID`, `RSRPC_USER_USERNAME`, `RSRPC_USER_GLOBAL_NAME`, `RSRPC_USER_DISCRIMINATOR`, `RSRPC_USER_AVATAR`.
 * Bridge clients can patch it at runtime with `SET_USER` (`{"type":"SET_USER","patch":{...}}`, whitelisted keys only) and restore it with `RESET_USER`; both are ACKed (`SET_USER_ACK`/`RESET_USER_ACK`), and identity changes fan out as the official `CURRENT_USER_UPDATE` DISPATCH to bridge clients (IPC/WS game clients learn it on their next handshake).
-* `RSRPC_STATE_FILE=1` writes an arRPC-layout snapshot to `<tmpdir>/rsrpc-state-{0..9}` (`servers` + `activities`), rewritten on every broadcast and every 30s refresh tick; removed on graceful shutdown (SIGINT), reclaimed by mtime otherwise.
 
 ### Known limitations
 
 * **No OAuth/`AUTHORIZE` flow**: the bridge forwards `SET_ACTIVITY` (and a few browser/deeplink commands) but cannot complete authorization — that needs a route game → real Discord client plus the app's `client_secret`, which only the game developer has. Games that log in via RPC need direct access to the Discord client socket (stop rsRPC while playing them).
-* **`detect_once` on a started server** returns nothing: `start()` moves the database to the scanner (single ownership, no duplicated generations). One-shot users (CLI `--list-detected`, per-tick scanners that never start) are unaffected.
+* **`run_until` consumes the daemon**: it moves the database into the scanner (single ownership, no duplicated generations), so run `detect_once`/`database_summary` before it — the CLI's `--list-detected`/`--list-database` do exactly that. One-shot use never needs `run_until`.
 
 ## Building the binary
 
@@ -200,7 +197,7 @@ the existing `socketId = pid` convention.
 2. `cargo build -p rsrpc-cli --release`
 3. Your file will be in `target/release/`
 
-The offline snapshot `lib/resources/detectable.json` is committed, so a
+The offline snapshot `crates/rsrpc-detect/resources/detectable.json` is committed, so a
 fresh clone builds without network access to Discord. To refresh it, run
 `cargo run --manifest-path tools/updater/Cargo.toml`.
 
@@ -210,43 +207,47 @@ fresh clone builds without network access to Discord. To refresh it, run
 
 ```toml
 [dependencies]
-rsrpc = { git = "https://www.github.com/yiesko/rsRPC", tag = "VERSION_NUMBER_HERE" }
+rsrpc-core = { git = "https://www.github.com/yiesko/rsRPC", tag = "VERSION_NUMBER_HERE" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
 ```
 
-2. Use the library in your code:
+2. Use the daemon in your code:
 
 ```rust
-use rsrpc::{RPCServer, RPCConfig};
+use rsrpc_core::{Daemon, RPCConfig};
 
-fn main() {
-  let mut server = RPCServer::from_file("./detectable.json", RPCConfig::default())
-    .expect("Failed to create RPCServer");
-  server.start();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let daemon = Daemon::from_file(std::path::Path::new("./detectable.json"), RPCConfig::default())?;
+  daemon.run_until(async {
+    let _ = tokio::signal::ctrl_c().await;
+  }).await?;
+  Ok(())
 }
 ```
 
 You can also grab the `detectable.json` programmatically and pass it via string:
 ```rust
-use rsrpc::{RPCServer, RPCConfig};
+use rsrpc_core::{Daemon, RPCConfig};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let detectable = reqwest::blocking::get("https://raw.githubusercontent.com/OpenAsar/arrpc/main/src/process/detectable.json")?.text()?;
-  let mut server = RPCServer::from_json_str(detectable, RPCConfig::default())?;
-
-  server.start();
+async fn run(detectable: String) -> Result<(), Box<dyn std::error::Error>> {
+  let daemon = Daemon::from_json_str(detectable, RPCConfig::default())?;
+  daemon.run_until(async {
+    let _ = tokio::signal::ctrl_c().await;
+  }).await?;
   Ok(())
 }
 ```
 
 Works fully offline with the bundled snapshot (no file/network needed):
 ```rust
-let mut server = RPCServer::from_bundled(RPCConfig::default())
-  .expect("Failed to create RPCServer");
-server.start();
+let mut daemon = Daemon::from_bundled(RPCConfig::default())
+  .expect("Failed to create daemon");
 ```
 
 If you already parsed the list yourself, skip the second parse with
-`RPCServer::from_parsed(vec, config)` (infallible).
+`Daemon::from_parsed(vec, config)` (infallible). Prefer
+`RPCConfig::builder()` over the struct literal for forward compatibility.
 
 ### `RPCConfig` fields (defaults)
 
@@ -264,24 +265,22 @@ If you already parsed the list yourself, skip the second parse with
 ### Runtime API
 
 ```rust
-use rsrpc::DetectedGame;
+use rsrpc_core::DetectedGame;
 
 // Single scan without threads (staged overrides + ignore-list apply,
 // returns id/name/pid).
-let games: Vec<DetectedGame> = server.detect_once()?;
+let games: Vec<DetectedGame> = daemon.detect_once()?;
 
 // Database summary without threads (entry/executable counts + names).
-let summary: Vec<rsrpc::DetectableSummary> = server.database_summary()?;
+let summary: Vec<rsrpc_core::DetectableSummary> = daemon.database_summary();
 
-// Add/remove entries after start() (bypass the OS filter, win over main DB).
-server.append_detectables(overrides);
-server.remove_detectable_by_name("Game Name".to_string());
+// Stage entries before run_until() (bypass the OS filter, win over main DB);
+// diagnostics below see exactly what running would publish.
+daemon.append_detectables(overrides);
+daemon.remove_detectable_by_name("Game Name");
 
-// Manual rescan after start().
-server.scan_for_processes();
-
-// OBS/streaming flag callback (must be set before start()).
-server.on_process_scan_complete(|state| {
+// OBS/streaming flag callback (must be set before run_until()).
+daemon.on_scan_complete(|state| {
   println!("obs open: {}", state.obs_open);
 });
 ```
@@ -317,8 +316,10 @@ Notes:
 * Unit and integration tests: `cargo test`
 * Benchmarks (JSON vs MessagePack): `cargo bench`
 
-Unit tests live in `lib/src/tests/` (one module per area), integration
-tests in `lib/tests/`, benchmarks in `lib/benches/`.
+Unit tests live beside each crate (`crates/*/src/`, `crates/*/tests/`),
+integration tests in `crates/*/tests/`, benchmarks in
+`crates/rsrpc-detect/benches/` (hash maps) and
+`crates/rsrpc-protocol/benches/` (JSON vs MessagePack).
 
 ## Credits
 

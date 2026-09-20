@@ -1,0 +1,31 @@
+[package]
+name = "rsrpc-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["spikehd"]
+description = "rsRPC daemon wiring: config, database loading, one-shot diagnostics, async run"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["discord", "rich-presence", "rpc", "daemon"]
+categories = ["network-programming", "asynchronous"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rsrpc-types = { path = "../rsrpc-types" }
+rsrpc-protocol = { path = "../rsrpc-protocol" }
+rsrpc-detect = { path = "../rsrpc-detect" }
+rsrpc-telemetry = { path = "../rsrpc-telemetry" }
+rsrpc-transport-ipc = { path = "../rsrpc-transport-ipc" }
+rsrpc-transport-ws = { path = "../rsrpc-transport-ws" }
+rsrpc-bridge = { path = "../rsrpc-bridge" }
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+serde_json = "1.0"
+ureq = { version = "3", default-features = false, features = ["rustls", "charset"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+serde_json = "1.0"

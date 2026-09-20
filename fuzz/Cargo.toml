@@ -1,0 +1,42 @@
+[package]
+name = "rsrpc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+
+[dependencies.rsrpc-detect]
+path = "../crates/rsrpc-detect"
+[dependencies.rsrpc-types]
+path = "../crates/rsrpc-types"
+[dependencies.rsrpc-protocol]
+path = "../crates/rsrpc-protocol"
+
+[[bin]]
+name = "activity_full"
+path = "fuzz_targets/activity_full.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trim_db"
+path = "fuzz_targets/trim_db.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "db_parse"
+path = "fuzz_targets/db_parse.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

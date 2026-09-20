@@ -1,0 +1,30 @@
+[package]
+name = "rsrpc-ws"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["spikehd"]
+description = "Modern async WebSocket server: bounded queues, keepalive, graceful shutdown"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["websocket", "server", "async"]
+categories = ["network-programming", "asynchronous"]
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-tungstenite = "0.30"
+tungstenite = "0.30"
+bytes = "1.12"
+futures-util = "0.3"
+thiserror = "2"
+tokio-util = { version = "0.7", features = ["full"] }
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-tungstenite = "0.30"
+tungstenite = "0.30"
+futures-util = "0.3"
+bytes = "1.12"

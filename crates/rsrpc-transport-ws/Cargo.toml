@@ -1,0 +1,30 @@
+[package]
+name = "rsrpc-transport-ws"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["spikehd"]
+description = "Discord-facing game WebSocket transport over rsrpc-ws: validation, dispatch, bounded sink"
+license = "MIT"
+repository = "https://github.com/yiesko/rsRPC"
+keywords = ["discord", "rich-presence", "rpc", "websocket"]
+categories = ["network-programming", "asynchronous"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rsrpc-types = { path = "../rsrpc-types" }
+rsrpc-protocol = { path = "../rsrpc-protocol" }
+rsrpc-ws = { path = "../rsrpc-ws" }
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+serde_json = "1.0"
+tracing = "0.1"
+rustc-hash = "2.1"
+
+[dev-dependencies]
+tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-tungstenite = "0.30"
+tungstenite = "0.30"
+futures-util = "0.3"
+serde_json = "1.0"

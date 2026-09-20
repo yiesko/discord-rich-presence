@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/code_quality.yml'
-      - 'lib/**'
+      - 'crates/**'
       - 'cli/**'
       - 'tools/**'
       - 'plugin/**'
@@ -16,7 +16,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/code_quality.yml'
-      - 'lib/**'
+      - 'crates/**'
       - 'cli/**'
       - 'tools/**'
       - 'plugin/**'
@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   shell:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
@@ -41,7 +41,7 @@ jobs:
         run: bash -n scripts/install.sh && bash -n scripts/uninstall.sh
 
   rustfmt:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
@@ -79,7 +79,7 @@ jobs:
         run: cargo clippy --manifest-path ./Cargo.toml --workspace --all-targets --locked -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
@@ -95,7 +95,7 @@ jobs:
         run: cargo test --manifest-path ./Cargo.toml --workspace --locked
 
   doc:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
@@ -113,23 +113,33 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # audit-check@v2 targets Node 20 (deprecated runner treadmill);
+      # cargo-audit directly has no Node dependency. Installed version
+      # is cached above, so only the first run pays the build.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
 
       - name: Security audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo audit
 
   msrv:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@1.88
+      # Pinned SHA of the 1.95 branch: this revision predates the
+      # `toolchain` input, so the version comes from the branch itself.
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95
 
       - name: Generate detectable snapshot
         run: cargo run --manifest-path tools/updater/Cargo.toml

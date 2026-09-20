@@ -1,6 +1,20 @@
 [workspace]
-members = ["lib", "cli"]
+members = ["cli", "crates/rsrpc-ws", "crates/rsrpc-types", "crates/rsrpc-protocol", "crates/rsrpc-transport-ws", "crates/rsrpc-transport-ipc", "crates/rsrpc-state", "crates/rsrpc-bridge", "crates/rsrpc-telemetry", "crates/rsrpc-proc-events", "crates/rsrpc-steam", "crates/rsrpc-detect", "crates/rsrpc-core"]
 resolver = "2"
+
+# Shared lint gates (each member opts in with `lints.workspace = true`):
+# correctness denies landmines, the rest warn. Deliberately NOT pedantic
+# or `warnings = "deny"`: those break across toolchain/MSRV skew, while CI
+# already runs `clippy -- -D warnings` for the strict gate.
+[workspace.lints.rust]
+unexpected_cfgs = "warn"
+
+[workspace.lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
 
 [profile.release]
 opt-level = 3
