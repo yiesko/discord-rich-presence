@@ -70,3 +70,57 @@ fn exclusions_tolerate_garbage() {
   assert!(partial.is_excluded("game.exe"));
   assert!(!partial.is_excluded("other.exe"));
 }
+
+use rsrpc_detect::db::entry_projection_hash;
+use rsrpc_detect::db::{
+  hash_entry_aliases, hash_entry_exes, hash_entry_identity, hash_entry_steam,
+};
+
+/// Minimal entry fixture: only match-relevant fields set.
+fn probe_entry(id: &str, exe_os: &str) -> rsrpc_detect::db::DetectableActivity {
+  serde_json::from_value(serde_json::json!({
+    "id": id,
+    "name": format!("Game {id}"),
+    "hook": false,
+    "executables": [{"name": format!("{id}.exe"), "is_launcher": false, "os": exe_os}],
+    "third_party_skus": [],
+    "aliases": []
+  }))
+  .expect("fixture parses")
+}
+
+/// Per-entry projection hashes fold into the canonical whole-list hash:
+/// refactoring `canonical_content_hash` around `entry_projection_hash`
+/// must not change the canonical value.
+#[test]
+fn entry_projection_hash_fold_matches_canonical() {
+  use std::hash::{DefaultHasher, Hash, Hasher};
+  let entries = vec![probe_entry("1", "win32"), probe_entry("2", "linux")];
+  let canonical = rsrpc_detect::db::canonical_content_hash(&entries);
+  let mut folded = DefaultHasher::new();
+  entries.len().hash(&mut folded);
+  for entry in &entries {
+    entry_projection_hash(entry, &mut folded);
+  }
+  assert_eq!(canonical, folded.finish());
+}
+
+/// Field sub-hashes fold back into the per-entry hash: splitting the
+/// stream must not change any value.
+#[test]
+fn field_hashes_fold_into_entry_hash() {
+  use std::hash::{DefaultHasher, Hasher};
+  let entries = vec![probe_entry("1", "win32"), probe_entry("2", "linux")];
+  for entry in &entries {
+    let mut whole = DefaultHasher::new();
+    entry_projection_hash(entry, &mut whole);
+    // Same portions, same order, same running hasher: the fold must
+    // reproduce the whole-entry value byte-for-byte.
+    let mut folded = DefaultHasher::new();
+    hash_entry_identity(entry, &mut folded);
+    hash_entry_exes(entry, &mut folded);
+    hash_entry_steam(entry, &mut folded);
+    hash_entry_aliases(entry, &mut folded);
+    assert_eq!(whole.finish(), folded.finish());
+  }
+}

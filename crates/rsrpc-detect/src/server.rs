@@ -378,6 +378,26 @@ fn release_parse_arenas() {
   release_platform_arenas();
 }
 
+/// Live vs free heap bytes from the allocator (glibc `mallinfo2`):
+/// distinguishes live objects from retained arenas (`live` growing vs
+/// `free` growing with a flat RSS floor).
+/// `None` off glibc-Linux (musl, macOS, Windows), where the post-retrim
+/// line simply carries no suffix. Permanent telemetry, not DIAG: one
+/// line per installed rebuild, zero retained state.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn allocator_numbers() -> Option<(u64, u64)> {
+  // SAFETY: `mallinfo2` only reads allocator statistics; it neither
+  // allocates nor mutates anything.
+  let info = unsafe { libc::mallinfo2() };
+  #[allow(clippy::cast_possible_truncation)]
+  Some((info.uordblks as u64, info.fordblks as u64))
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn allocator_numbers() -> Option<(u64, u64)> {
+  None
+}
+
 /// Linux (glibc/musl).
 #[cfg(target_os = "linux")]
 fn release_platform_arenas() {
@@ -799,6 +819,31 @@ impl ProcessServer {
                 etag = new_tag;
                 content_hash = Some(new_hash);
                 trimmed_hash = Some(new_trimmed);
+                // The pre-swap generation is typically still pinned by an
+                // in-flight tick at swap time, so the trim inside
+                // `update_main_detectables` cannot release it. Trim once
+                // more past any tick: production measurement showed the
+                // second trim recovering ~30MB the first could not.
+                // Delays the next refresh by one tick length; negligible
+                // on the hourly cadence.
+                std::thread::sleep(Duration::from_secs(60));
+                release_parse_arenas();
+                match allocator_numbers() {
+                  Some((live, free)) => tracing::info!(
+                    "[Process Scanner] post-retrim rss={:.1}MB (alloc live={:.1}MB free={:.1}MB)",
+                    rsrpc_telemetry::rss_bytes().unwrap_or(0) as f64 / 1_048_576.0,
+                    live as f64 / 1_048_576.0,
+                    free as f64 / 1_048_576.0
+                  ),
+                  None => {
+                    if let Some(rss) = rsrpc_telemetry::rss_bytes() {
+                      tracing::info!(
+                        "[Process Scanner] post-retrim rss={:.1}MB",
+                        rss as f64 / 1_048_576.0
+                      );
+                    }
+                  }
+                }
               }
             }
             Err(err) => {

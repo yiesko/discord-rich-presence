@@ -47,46 +47,82 @@ pub fn canonical_content_hash(parsed: &[DetectableActivity]) -> u64 {
   let mut hasher = DefaultHasher::new();
   parsed.len().hash(&mut hasher);
   for entry in parsed {
-    // `None` and `[]` hash identically on purpose: the direct struct
-    // parse yields `None` for missing lists while the trim fallback
-    // yields `Some([])` — same scanner input either way, so they must
-    // not diverge the hash (this bit us in test).
-    0x01u8.hash(&mut hasher);
-    entry.id.hash(&mut hasher);
-    0x02u8.hash(&mut hasher);
-    entry.name.hash(&mut hasher);
-    let executables = entry.executables.as_deref().unwrap_or(&[]);
-    executables.len().hash(&mut hasher);
-    for exe in executables {
-      0x03u8.hash(&mut hasher);
-      exe.name.hash(&mut hasher);
-      exe.os.hash(&mut hasher);
-      exe.is_launcher.hash(&mut hasher);
-      exe.arguments.hash(&mut hasher);
-    }
-    // Steam-distributor ids only: the only SKUs any matcher reads.
-    let mut steam = 0usize;
-    if let Some(skus) = entry.third_party_skus.as_ref() {
-      for sku in skus {
-        if sku.distributor == "steam"
-          && let Some(id) = sku.id.as_ref()
-          && !id.is_empty()
-        {
-          steam += 1;
-          0x04u8.hash(&mut hasher);
-          id.hash(&mut hasher);
-        }
-      }
-    }
-    steam.hash(&mut hasher);
-    let aliases = entry.aliases.as_deref().unwrap_or(&[]);
-    aliases.len().hash(&mut hasher);
-    for alias in aliases {
-      0x05u8.hash(&mut hasher);
-      alias.hash(&mut hasher);
-    }
+    entry_projection_hash(entry, &mut hasher);
   }
   hasher.finish()
+}
+
+/// Hash one entry's scanner-visible projection into a running hasher.
+/// Factored per entry (same tags, same order) so the canonical stream
+/// stays easy to review piece by piece; the fold test pins the value.
+pub fn entry_projection_hash(entry: &DetectableActivity, hasher: &mut impl std::hash::Hasher) {
+  hash_entry_identity(entry, hasher);
+  hash_entry_exes(entry, hasher);
+  hash_entry_steam(entry, hasher);
+  hash_entry_aliases(entry, hasher);
+}
+
+/// Identity portion of the entry projection (`0x01` id, `0x02` name).
+/// Split out of [`entry_projection_hash`] verbatim, keeping each portion
+/// independently testable.
+pub fn hash_entry_identity(entry: &DetectableActivity, hasher: &mut impl std::hash::Hasher) {
+  use std::hash::Hash;
+  // `None` and `[]` hash identically on purpose: the direct struct
+  // parse yields `None` for missing lists while the trim fallback
+  // yields `Some([])` — same scanner input either way, so they must
+  // not diverge the hash (this bit us in test).
+  0x01u8.hash(hasher);
+  entry.id.hash(hasher);
+  0x02u8.hash(hasher);
+  entry.name.hash(hasher);
+}
+
+/// Executables portion of the entry projection (`0x03` per exe).
+/// Split out of [`entry_projection_hash`] verbatim.
+pub fn hash_entry_exes(entry: &DetectableActivity, hasher: &mut impl std::hash::Hasher) {
+  use std::hash::Hash;
+  let executables = entry.executables.as_deref().unwrap_or(&[]);
+  executables.len().hash(hasher);
+  for exe in executables {
+    0x03u8.hash(hasher);
+    exe.name.hash(hasher);
+    exe.os.hash(hasher);
+    exe.is_launcher.hash(hasher);
+    exe.arguments.hash(hasher);
+  }
+}
+
+/// Steam-SKU portion of the entry projection (`0x04` per steam id).
+/// Split out of [`entry_projection_hash`] verbatim: the only SKUs any
+/// matcher reads.
+pub fn hash_entry_steam(entry: &DetectableActivity, hasher: &mut impl std::hash::Hasher) {
+  use std::hash::Hash;
+  let mut steam = 0usize;
+  if let Some(skus) = entry.third_party_skus.as_ref() {
+    for sku in skus {
+      if sku.distributor == "steam"
+        && let Some(id) = sku.id.as_ref()
+        && !id.is_empty()
+      {
+        steam += 1;
+        0x04u8.hash(hasher);
+        id.hash(hasher);
+      }
+    }
+  }
+  steam.hash(hasher);
+}
+
+/// Aliases portion of the entry projection (`0x05` per alias).
+/// Split out of [`entry_projection_hash`] verbatim.
+pub fn hash_entry_aliases(entry: &DetectableActivity, hasher: &mut impl std::hash::Hasher) {
+  use std::hash::Hash;
+  let aliases = entry.aliases.as_deref().unwrap_or(&[]);
+  aliases.len().hash(hasher);
+  for alias in aliases {
+    0x05u8.hash(hasher);
+    alias.hash(hasher);
+  }
 }
 
 /// Trimmed database as a JSON value: same content as [`trim_detectable`]
