@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::bundle::{DetectablesBundle, SortedIndex, bare_exe, dedot, path_variants_into};
+use crate::bundle::{DetectablesBundle, SortedIndex, bare_exe, path_variants_into};
 use crate::server::ProcessServer;
 use crate::types::{Exec, ScannedEntry, ScannedHit};
 
@@ -20,42 +20,91 @@ use crate::types::{Exec, ScannedEntry, ScannedHit};
 /// megabyte-cmdlines would otherwise multiply per process per tick.
 #[cfg(target_os = "linux")]
 pub fn read_exec(pid: u64) -> Option<Exec> {
+  let mut exec = Exec::default();
+  let mut scratch = ExecScratch::default();
+  read_exec_into(pid, &mut exec, &mut scratch).then_some(exec)
+}
+
+/// Reusable intermediates for [`read_exec_into`]: one set per thread,
+/// owned by the calling loop (scan thread, EXEC dispatch). The path
+/// buffer, cmdline read buffer and args join buffer are allocated once
+/// and cleared per pid, replacing the per-process-per-tick temporaries
+/// (previously ~400 allocations every 5s).
+#[derive(Default)]
+pub struct ExecScratch {
+  path: String,
+  cmdline: Vec<u8>,
+  args: String,
+}
+
+// Per-pid allocation reuse for the scan tick: `read_exec` intermediates
+// live in caller-owned `ExecScratch` buffers (one set per thread) and
+// output strings reuse the destination `Exec` slot's capacity.
+#[cfg(target_os = "linux")]
+pub fn read_exec_into(pid: u64, exec: &mut Exec, scratch: &mut ExecScratch) -> bool {
   const MAX_CMDLINE_BYTES: u64 = 64 * 1024;
-  let path = format!("/proc/{pid}/cmdline");
+  use std::fmt::Write as _;
+  scratch.path.clear();
+  // `write!` into a cleared buffer reuses it; the only failure mode is
+  // OOM (fmt::Error), matching the old `format!` behavior if allocation
+  // fails.
+  if write!(scratch.path, "/proc/{pid}/cmdline").is_err() {
+    return false;
+  }
   // NOTE: no metadata size check here — /proc files report st_size 0
   // despite having content; an early `len() == 0` return would skip
   // EVERY process (total detection blindness).
-  let file = std::fs::File::open(&path).ok()?;
-  let mut cmdline = Vec::new();
+  let Ok(file) = std::fs::File::open(&scratch.path) else {
+    return false;
+  };
+  scratch.cmdline.clear();
   use std::io::Read;
-  file
+  if file
     .take(MAX_CMDLINE_BYTES + 1)
-    .read_to_end(&mut cmdline)
-    .ok()?;
-  if cmdline.is_empty() {
-    return None;
+    .read_to_end(&mut scratch.cmdline)
+    .is_err()
+  {
+    return false;
   }
-  cmdline.truncate(usize::try_from(MAX_CMDLINE_BYTES).unwrap_or(usize::MAX));
+  if scratch.cmdline.is_empty() {
+    return false;
+  }
+  scratch
+    .cmdline
+    .truncate(usize::try_from(MAX_CMDLINE_BYTES).unwrap_or(usize::MAX));
   // Truncation may split a multibyte char: back off to the boundary
   // in one step (never rescan: `valid_up_to` is the split point).
-  if let Err(err) = std::str::from_utf8(&cmdline) {
-    cmdline.truncate(err.valid_up_to());
+  if let Err(err) = std::str::from_utf8(&scratch.cmdline) {
+    scratch.cmdline.truncate(err.valid_up_to());
   }
-  let cmdline = String::from_utf8(cmdline).ok()?;
-  let mut cmd_iter = cmdline.split('\0');
-  let (cmd_path, cmd_args) = (
-    cmd_iter.next().unwrap_or("").to_string(),
-    cmd_iter.collect::<Vec<_>>().join(" "),
-  );
-  Some(Exec {
-    pid,
-    path: cmd_path,
-    arguments: if cmd_args.is_empty() {
-      None
-    } else {
-      Some(cmd_args)
-    },
-  })
+  let Ok(text) = std::str::from_utf8(&scratch.cmdline) else {
+    return false;
+  };
+  let mut cmd_iter = text.split('\0');
+  let cmd_path = cmd_iter.next().unwrap_or("");
+  // Output strings reuse the destination slot's capacity: `path` is
+  // cleared and refilled in place; the old args buffer (if any) is
+  // returned to the scratch for the next pid, so the two buffers trade
+  // places instead of reallocating.
+  exec.pid = pid;
+  exec.path.clear();
+  exec.path.push_str(cmd_path);
+  scratch.args.clear();
+  for (index, arg) in cmd_iter.enumerate() {
+    if index > 0 {
+      scratch.args.push(' ');
+    }
+    scratch.args.push_str(arg);
+  }
+  let previous = exec.arguments.take();
+  if !scratch.args.is_empty() {
+    exec.arguments = Some(std::mem::take(&mut scratch.args));
+  }
+  if let Some(mut old) = previous {
+    old.clear();
+    scratch.args = old;
+  }
+  true
 }
 
 /// Whether a database `os` tag applies on this build (unknown platforms match all).
@@ -200,6 +249,71 @@ pub fn normalize_name(name: &str) -> String {
     .join(" ")
 }
 
+/// Punctuation forbidden in Windows filenames (see [`normalize_name`]).
+/// Shared by the allocating original and the reuse variants below.
+const FORBIDDEN_NAME_CHARS: [char; 9] = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// Reusable buffers for the match path (see `tick2_tests`): `lowered`
+/// holds the lowercased process path per miss, `norm_out` the normalized
+/// folder per component. One set per thread, owned by the calling loop
+/// (scan loop, EXEC dispatch) — cleared and refilled, never rebuilt per
+/// process. Borrowing contract: `lowered` and `norm_out` are disjoint
+/// fields, so a shared `lowered` borrow coexists with an exclusive
+/// `norm_out` refill across the folder loops.
+#[derive(Default)]
+pub struct MatchScratch {
+  pub lowered: String,
+  pub norm_out: String,
+}
+
+/// Refill `out` with the normalized form of `name`, reusing both
+/// buffers: byte-identical to [`normalize_name`]. Single pass —
+/// lowercase into `lower`, then split on forbidden/whitespace (runs
+/// collapse, leading/trailing trimmed by construction) straight into
+/// `out`, with no temporaries — no `replace` String, no pieces `Vec`,
+/// no join.
+pub fn normalize_name_into(name: &str, lower: &mut String, out: &mut String) {
+  lower.clear();
+  lower.extend(name.trim().chars().map(|c| c.to_ascii_lowercase()));
+  normalize_lowered_into(lower, out);
+}
+
+/// Refill `out` with the normalized form of already-lowercase `name`
+/// (the hot path feeds `&lowered`): skips the lowercase stage entirely.
+/// Byte-identical to [`normalize_name`] on lowercase input.
+pub fn normalize_lowered_into(name: &str, out: &mut String) {
+  out.clear();
+  let mut first = true;
+  for word in name
+    .split(|c: char| c.is_whitespace() || FORBIDDEN_NAME_CHARS.contains(&c))
+    .filter(|word| !word.is_empty())
+  {
+    if !first {
+      out.push(' ');
+    }
+    first = false;
+    out.push_str(word);
+  }
+}
+
+/// Refill `out` with the de-dotted normalized form of already-lowercase
+/// `name`: byte-identical to [`normalize_name`] applied to `dedot(name)`
+/// (dots become spaces before the same collapse).
+pub fn normalize_lowered_dedotted_into(name: &str, out: &mut String) {
+  out.clear();
+  let mut first = true;
+  for word in name
+    .split(|c: char| c.is_whitespace() || c == '.' || FORBIDDEN_NAME_CHARS.contains(&c))
+    .filter(|word| !word.is_empty())
+  {
+    if !first {
+      out.push(' ');
+    }
+    first = false;
+    out.push_str(word);
+  }
+}
+
 /// Conservative gate for the exe-stem fallback: exact, multi-word names with
 /// a minimum length. Keeps generic stems (`fish`, `steam`, `game`, `reaper`)
 /// from ever matching same-named DB entries.
@@ -240,13 +354,17 @@ fn live_or_none(obj: &Arc<ScannedEntry>, pid: u64) -> Option<ScannedHit> {
 /// (which is updated in place). The scan loop logs these at INFO so a
 /// silent daemon is distinguishable from a blind one without a debug
 /// build; the bridge still owns publish/dedup logging downstream.
+/// Capped: beyond `MAX_SEEN_IDS` distinct ids the set stops growing (first
+/// sightings are no longer reported — detection itself is unaffected).
+pub const MAX_SEEN_IDS: usize = 1024;
+
 pub fn first_sightings<'a>(
   seen: &mut HashSet<String>,
   detected: &'a [ScannedHit],
 ) -> Vec<&'a ScannedHit> {
   detected
     .iter()
-    .filter(|game| seen.insert(game.entry.id.to_string()))
+    .filter(|game| seen.len() < MAX_SEEN_IDS && seen.insert(game.entry.id.to_string()))
     .collect()
 }
 
@@ -360,6 +478,7 @@ pub fn match_name_or_folder(
   name_map: &SortedIndex,
   name_map_nodot: &SortedIndex,
   detectable_list: &[Arc<ScannedEntry>],
+  norm_out: &mut String,
 ) -> Option<ScannedHit> {
   let stem = exe_stem(process_path);
   if name_matchable(stem)
@@ -385,9 +504,12 @@ pub fn match_name_or_folder(
     if component.contains('.') {
       continue;
     }
-    let folder = normalize_name(component);
-    if name_matchable(&folder)
-      && let Some(&idx) = name_map.get(&folder)
+    // Hot path input is already lowercase (`&lowered` at both call
+    // sites): skip the lowercase stage, refill the shared buffer.
+    normalize_lowered_into(component, norm_out);
+    let folder = norm_out.as_str();
+    if name_matchable(folder)
+      && let Some(&idx) = name_map.get(folder)
       && let Some(obj) = detectable_list.get(idx)
     {
       tracing::debug!(
@@ -408,9 +530,13 @@ pub fn match_name_or_folder(
     if !component.contains('.') {
       continue;
     }
-    let folder = normalize_name(&dedot(component));
-    if name_matchable(&folder)
-      && let Some(&idx) = name_map_nodot.get(&folder)
+    // De-dot + normalize in one pass into the shared buffer (see above
+    // for the borrowing contract: lookups must end before the next
+    // refill).
+    normalize_lowered_dedotted_into(component, norm_out);
+    let folder = norm_out.as_str();
+    if name_matchable(folder)
+      && let Some(&idx) = name_map_nodot.get(folder)
       && let Some(obj) = detectable_list.get(idx)
     {
       tracing::debug!(
@@ -541,6 +667,7 @@ impl ProcessServer {
     variant_bufs: &mut [String; 5],
     reversed_path: &mut String,
     obs_open: &mut bool,
+    match_scratch: &mut MatchScratch,
   ) -> Option<ScannedHit> {
     // Process path with consistent slashes (original case: the
     // automata match ASCII case-insensitively). Borrowed until a
@@ -614,8 +741,13 @@ impl ProcessServer {
       None => {
         // Lowercase copy for the case-sensitive tail below (store-id
         // maps, stem/folder heuristics). Paid only on misses — the hot
-        // AC path above never allocates it.
-        let lowered = process_path.to_ascii_lowercase();
+        // AC path above never allocates it. Reuses the caller's buffer:
+        // char-wise ASCII fold, byte-identical to `to_ascii_lowercase`.
+        match_scratch.lowered.clear();
+        match_scratch
+          .lowered
+          .extend(process_path.chars().map(|c| c.to_ascii_lowercase()));
+        let lowered = match_scratch.lowered.as_str();
         // The AppId comes memoized (one environ read per process
         // lifetime); cmdline fallback when environ is unreadable
         // (sandboxed Proton runtimes hide it from service contexts).
@@ -657,11 +789,12 @@ impl ProcessServer {
         let non_steam = app_id.as_deref().is_some_and(is_shortcut_id);
         if non_steam
           && let Some(hit) = match_name_or_folder(
-            &lowered,
+            lowered,
             process.pid,
             &bundle.name_map,
             &bundle.name_map_nodot,
             &bundle.list,
+            &mut match_scratch.norm_out,
           )
         {
           return Some(hit);
@@ -677,7 +810,7 @@ impl ProcessServer {
         // Steam's own word: the process runs under a known install dir,
         // so it inherits that entry's AppId. Beats name guessing below,
         // loses to a DB-declared path above.
-        if let Some(library_appid) = self.steam_prefix_app_id(&lowered)
+        if let Some(library_appid) = self.steam_prefix_app_id(lowered)
           && let Some(hit) = match_steam_id(
             Some(&library_appid),
             process.pid,
@@ -699,11 +832,12 @@ impl ProcessServer {
           return None;
         }
         return match_name_or_folder(
-          &lowered,
+          lowered,
           process.pid,
           &bundle.name_map,
           &bundle.name_map_nodot,
           &bundle.list,
+          &mut match_scratch.norm_out,
         );
       }
     };
@@ -729,5 +863,228 @@ impl ProcessServer {
     self
       .main_probe(reversed_path, bundle)
       .or_else(|| self.custom_probe(reversed_path, bundle))
+  }
+}
+
+// Per-pid allocation reuse for the scan tick: `read_exec_into` refills
+// caller-owned buffers and `process_list_into` reuses every `Exec` slot
+// across ticks. Parity + no-realloc regression tests.
+#[cfg(test)]
+mod reuse_tests {
+  use super::*;
+  use crate::server::ProcessServer;
+
+  /// Own pid is always readable: deterministic fixture, no /proc guessing.
+  fn self_pid() -> u64 {
+    u64::from(std::process::id())
+  }
+
+  /// `read_exec_into` classifies exactly like `read_exec`: same presence,
+  /// same pid, same path, same arguments.
+  #[test]
+  fn read_exec_into_matches_read_exec() {
+    for pid in [self_pid(), 1] {
+      let mut slot = Exec::default();
+      let mut scratch = ExecScratch::default();
+      let present = read_exec_into(pid, &mut slot, &mut scratch);
+      match read_exec(pid) {
+        None => assert!(!present, "into() must agree on unreadable pid {pid}"),
+        Some(expected) => {
+          assert!(present, "into() must agree on readable pid {pid}");
+          assert_eq!(slot.pid, expected.pid);
+          assert_eq!(slot.path, expected.path);
+          assert_eq!(slot.arguments, expected.arguments);
+        }
+      }
+    }
+    // Out-of-range pid: both agree on absence without touching buffers.
+    let mut slot = Exec::default();
+    let mut scratch = ExecScratch::default();
+    assert!(!read_exec_into(u64::MAX, &mut slot, &mut scratch));
+    assert!(read_exec(u64::MAX).is_none());
+  }
+
+  /// A second call with the same pid must not reallocate: scratch pointers
+  /// and capacities are stable, slot strings keep their buffers.
+  #[test]
+  fn read_exec_into_reuses_buffers() {
+    let pid = self_pid();
+    let mut slot = Exec::default();
+    let mut scratch = ExecScratch::default();
+    assert!(read_exec_into(pid, &mut slot, &mut scratch));
+    let path_ptr = slot.path.as_ptr();
+    let path_cap = slot.path.capacity();
+    let cmd_ptr = scratch.cmdline.as_ptr();
+    let cmd_cap = scratch.cmdline.capacity();
+    assert!(read_exec_into(pid, &mut slot, &mut scratch));
+    assert!(
+      std::ptr::eq(path_ptr, slot.path.as_ptr()),
+      "path buffer moved"
+    );
+    assert!(
+      std::ptr::eq(cmd_ptr, scratch.cmdline.as_ptr()),
+      "cmdline buffer moved"
+    );
+    assert!(slot.path.capacity() >= path_cap);
+    assert!(scratch.cmdline.capacity() >= cmd_cap);
+  }
+
+  /// `process_list_into` reuses the Vec backing and every slot across
+  /// ticks: same allocation, refreshed contents. The first-slot pointer
+  /// check is conditional on pid stability: if a process exits between
+  /// the two back-to-back sweeps, readdir order may shift and the slot
+  /// legitimately holds another pid.
+  #[test]
+  fn process_list_into_reuses_slots_across_ticks() {
+    let mut processes = Vec::new();
+    let mut scratch = ExecScratch::default();
+    ProcessServer::process_list_into(&mut processes, &mut scratch).expect("first tick lists");
+    assert!(!processes.is_empty(), "some process must be visible");
+    assert!(processes.iter().all(|e| e.pid > 0 && !e.path.is_empty()));
+    let backing_ptr = processes.as_ptr();
+    let (first_pid, first_path_ptr, first_path_cap) = (
+      processes[0].pid,
+      processes[0].path.as_ptr(),
+      processes[0].path.capacity(),
+    );
+    ProcessServer::process_list_into(&mut processes, &mut scratch).expect("second tick lists");
+    assert!(!processes.is_empty());
+    assert!(
+      std::ptr::eq(backing_ptr, processes.as_ptr()),
+      "Vec backing moved"
+    );
+    if processes[0].pid == first_pid {
+      assert!(
+        std::ptr::eq(first_path_ptr, processes[0].path.as_ptr()),
+        "slot string buffer moved"
+      );
+      assert!(processes[0].path.capacity() >= first_path_cap);
+    }
+  }
+}
+
+// Match-path allocation reuse: the into-variants refill caller-owned
+// buffers with byte-identical outputs (corpus below covers case,
+// punctuation, dots, whitespace, empties and non-ASCII).
+#[cfg(test)]
+mod tick2_tests {
+  use super::*;
+
+  /// Corpus covering case, forbidden punctuation, dots, whitespace
+  /// runs, empties, separators, `>` prefix and non-ASCII.
+  const CORPUS: &[&str] = &[
+    "Game Name",
+    "Name: Subtitle",
+    "R.E.P.O. Ghost Haul",
+    "Q.U.B.E.",
+    "Mr. Bomber",
+    "a  b   c",
+    "",
+    "   ",
+    "a/b\\c",
+    ">game",
+    "/",
+    "fish",
+    "École: LÉGENDE",
+    "MECCHA CHAMELEON",
+    "PenguinHotel-Win64-Shipping.exe",
+    "  padded  ",
+    "a.b.c",
+    "...",
+  ];
+
+  /// `normalize_name_into` reproduces `normalize_name` byte-for-byte.
+  #[test]
+  fn normalize_into_matches_normalize() {
+    let mut lower = String::new();
+    let mut out = String::new();
+    for input in CORPUS {
+      normalize_name_into(input, &mut lower, &mut out);
+      assert_eq!(&out, &normalize_name(input), "mismatch for {input:?}");
+    }
+  }
+
+  /// On already-lowercase input, the lowered variant (no lowercase
+  /// stage) matches too — this is the hot path (`&lowered`).
+  #[test]
+  fn normalize_lowered_into_matches_on_lowercase_input() {
+    let mut out = String::new();
+    for input in CORPUS {
+      let lowered = input.to_ascii_lowercase();
+      normalize_lowered_into(&lowered, &mut out);
+      assert_eq!(&out, &normalize_name(input), "mismatch for {input:?}");
+    }
+  }
+
+  /// The dedotted variant matches `normalize_name(&dedot(_))`: dots
+  /// become spaces, runs collapse, same as replace-then-normalize.
+  #[test]
+  fn normalize_lowered_dedotted_into_matches_dedot_then_normalize() {
+    use crate::bundle::dedot;
+    let mut out = String::new();
+    for input in CORPUS {
+      let lowered = input.to_ascii_lowercase();
+      normalize_lowered_dedotted_into(&lowered, &mut out);
+      assert_eq!(
+        &out,
+        &normalize_name(&dedot(input)),
+        "mismatch for {input:?}"
+      );
+    }
+  }
+
+  /// `first_sightings` stops growing the set past the cap: detection
+  /// results still flow, only the "new this boot" report stops.
+  #[test]
+  fn first_sightings_stops_at_cap() {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    let hit = |id: &str| {
+      ScannedHit::stamp(
+        Arc::new(ScannedEntry {
+          id: id.into(),
+          name: id.into(),
+          executables: Vec::new(),
+          steam_ids: Vec::new(),
+          aliases: Vec::new(),
+        }),
+        1,
+      )
+    };
+    let mut seen = HashSet::new();
+    let many: Vec<ScannedHit> = (0..MAX_SEEN_IDS + 5)
+      .map(|i| hit(&format!("g{i:04}")))
+      .collect();
+    let reported = first_sightings(&mut seen, &many);
+    assert_eq!(reported.len(), MAX_SEEN_IDS);
+    assert_eq!(seen.len(), MAX_SEEN_IDS);
+    // At cap, even a brand-new id is no longer reported (nor stored).
+    let fresh = vec![hit("brand-new")];
+    assert!(first_sightings(&mut seen, &fresh).is_empty());
+    assert_eq!(seen.len(), MAX_SEEN_IDS);
+    // Below cap, novelty still reports.
+    let mut small_seen = HashSet::new();
+    assert_eq!(first_sightings(&mut small_seen, &fresh).len(), 1);
+  }
+
+  /// Scratch buffers are stable across calls: no reallocations on
+  /// repeated use.
+  #[test]
+  fn match_scratch_buffers_are_stable() {
+    let mut scratch = MatchScratch::default();
+    let mut lower = String::new();
+    normalize_name_into("Some Game: Title", &mut lower, &mut scratch.norm_out);
+    normalize_lowered_into("some game title", &mut scratch.norm_out);
+    let out_ptr = scratch.norm_out.as_ptr();
+    let out_cap = scratch.norm_out.capacity();
+    let lower_ptr = lower.as_ptr();
+    normalize_name_into("Other: Name Here", &mut lower, &mut scratch.norm_out);
+    normalize_lowered_into("other name here", &mut scratch.norm_out);
+    assert!(
+      std::ptr::eq(out_ptr, scratch.norm_out.as_ptr()),
+      "norm_out moved"
+    );
+    assert!(std::ptr::eq(lower_ptr, lower.as_ptr()), "lower moved");
+    assert!(scratch.norm_out.capacity() >= out_cap);
   }
 }

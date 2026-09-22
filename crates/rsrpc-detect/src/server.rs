@@ -11,8 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use crate::scan::MatchScratch;
 #[cfg(target_os = "linux")]
-use crate::scan::read_exec;
+use crate::scan::{ExecScratch, read_exec_into};
 use arc_swap::ArcSwap;
 use rsrpc_steam::SteamLibraries;
 #[cfg(not(target_os = "linux"))]
@@ -244,13 +245,20 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
   std::thread::spawn(move || {
     let mut variant_bufs: [String; 5] = Default::default();
     let mut reversed_path = String::with_capacity(256);
+    // EXEC reuse buffers, owned by this loop: one `Exec` slot plus the
+    // read scratch, refilled per event instead of allocated per event.
+    // `match_scratch` same idea for the classification tail.
+    let mut exec_slot = Exec::default();
+    let mut exec_scratch = ExecScratch::default();
+    let mut match_scratch = MatchScratch::default();
     while let Ok(event) = rx.recv() {
       match event {
         ProcEvent::Exec(pid) => {
-          let Some(exec) = read_exec(pid) else {
+          if !read_exec_into(pid, &mut exec_slot, &mut exec_scratch) {
             tracing::debug!("[Process Scanner] exec event: pid {pid} unreadable, skipping");
             continue;
-          };
+          }
+          let exec = &exec_slot;
           // Same pid, new image: the memoized AppId may be stale.
           dispatch.drop_appid(pid);
           // One generation for the whole classification: a refresh
@@ -259,11 +267,12 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
           let bundle = dispatch.bundle();
           let mut obs_open = false;
           if let Some(hit) = dispatch.match_process(
-            &exec,
+            exec,
             &bundle,
             &mut variant_bufs,
             &mut reversed_path,
             &mut obs_open,
+            &mut match_scratch,
           ) {
             // Coexistence parity with the polling path: ignored IDs never
             // publish, even on the event-driven fast path.
@@ -877,10 +886,22 @@ impl ProcessServer {
       // completes tick one is otherwise indistinguishable from an idle
       // one without a debug build.
       let mut first_tick = true;
+      // Tick reuse buffers, owned by this loop: the process list backing,
+      // every `Exec` slot and the read scratch survive across ticks, so a
+      // warm tick allocates nothing per process (see `read_exec_into`).
+      // `match_scratch` follows the same pattern one level down: the lowercased path and
+      // the normalized folder refill per classification.
+      let mut tick_processes: Vec<Exec> = Vec::new();
+      let mut tick_scratch = ExecScratch::default();
+      let mut match_scratch = MatchScratch::default();
       // Run the process scan repeatedly (base cadence, stretched while idle)
       loop {
         *clone.last_scan.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
-        let mut detected = match clone.scan_for_processes() {
+        let mut detected = match clone.scan_for_processes(
+          &mut tick_processes,
+          &mut tick_scratch,
+          &mut match_scratch,
+        ) {
           Ok(detected) => detected,
           Err(err) => {
             tracing::warn!(
@@ -1089,9 +1110,17 @@ impl ProcessServer {
     Ok(processes)
   }
 
-  /// Enumerate processes via `/proc` (Linux: one `read_exec` per pid, skips unreadable).
+  /// Enumerate processes via `/proc` into caller-owned buffers (Linux):
+  /// the `Vec` backing and every `Exec` slot survive across ticks
+  /// (in-place refill, never rebuilt), so a warm tick
+  /// allocates nothing per process. Unreadable pids (kernel threads,
+  /// zombies, races) are skipped without leaving holes: only successful
+  /// reads advance, then the tail is truncated (capacity retained).
   #[cfg(target_os = "linux")]
-  fn process_list() -> rsrpc_protocol::error::Result<Vec<Exec>> {
+  pub(crate) fn process_list_into(
+    processes: &mut Vec<Exec>,
+    scratch: &mut ExecScratch,
+  ) -> rsrpc_protocol::error::Result<()> {
     use std::fs;
 
     let proc_list = fs::read_dir("/proc")?.filter(|e| {
@@ -1103,7 +1132,11 @@ impl ProcessServer {
 
       false
     });
-    let mut processes = Vec::new();
+    // No `clear`: the previous length IS the slot count. Slots are
+    // refilled in place below, so a warm tick reuses every string
+    // buffer; `push` only grows past the high-water mark, `truncate`
+    // only drops dead tail slots (capacity retained either way).
+    let mut filled = 0usize;
 
     for entry in proc_list {
       let entry = entry?;
@@ -1117,14 +1150,19 @@ impl ProcessServer {
       else {
         continue;
       };
-      // Same single-pid reader as the EXEC fast path: unreadable pids
-      // (kernel threads, zombies, races) are skipped, never fatal.
-      if let Some(exec) = read_exec(pid) {
-        processes.push(exec);
+      // Same single-pid reader as the EXEC fast path, refilling a reused
+      // slot: unreadable pids are skipped, never fatal, never a hole.
+      if filled == processes.len() {
+        processes.push(Exec::default());
+      }
+      // `filled <= len` always: slots refill in place, `push` only grows
+      // past the high-water mark.
+      if read_exec_into(pid, &mut processes[filled], scratch) {
+        filled += 1;
       }
     }
-
-    Ok(processes)
+    processes.truncate(filled);
+    Ok(())
   }
 
   /// Current detection generation, shared lock-free after the clone.
@@ -1138,12 +1176,23 @@ impl ProcessServer {
 
   #[hotpath::measure]
   /// One full process sweep, classifying every process against the current
-  /// generation bundle.
-  pub fn scan_for_processes(&self) -> rsrpc_protocol::error::Result<Vec<ScannedHit>> {
+  /// generation bundle. `processes` + `exec_scratch` are caller-owned
+  /// reuse buffers (the scan loop keeps them across ticks; one-shot
+  /// callers pass throwaways): a warm tick allocates nothing per process.
+  /// On non-Linux the list still comes from `sysinfo` (scratch unused).
+  pub fn scan_for_processes(
+    &self,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] processes: &mut Vec<Exec>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] exec_scratch: &mut ExecScratch,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] match_scratch: &mut MatchScratch,
+  ) -> rsrpc_protocol::error::Result<Vec<ScannedHit>> {
     #[cfg(not(target_os = "linux"))]
     let processes = self.process_list()?;
     #[cfg(target_os = "linux")]
-    let processes = ProcessServer::process_list()?;
+    let processes = {
+      ProcessServer::process_list_into(processes, exec_scratch)?;
+      &*processes
+    };
 
     tracing::debug!("[Process Scanner] Process scan triggered");
 
@@ -1169,7 +1218,7 @@ impl ProcessServer {
     // Drop memoized AppIds of dead pids (pid reuse must never serve a
     // stale id): one set build + retain per tick, replacing hundreds of
     // kilobyte environ re-reads.
-    self.sweep_dead_appids(&processes);
+    self.sweep_dead_appids(processes);
 
     let mut reversed_path = String::with_capacity(256);
     // Variant scratch space, reused for every process: the scan allocates
@@ -1185,6 +1234,7 @@ impl ProcessServer {
           &mut variant_bufs,
           &mut reversed_path,
           &mut obs_open,
+          &mut *match_scratch,
         )
       })
       .collect();

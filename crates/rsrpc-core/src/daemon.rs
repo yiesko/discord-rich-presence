@@ -137,7 +137,12 @@ impl Daemon {
         }
       }
     }
-    let mut found = server.scan_for_processes()?;
+    // One-shot diagnostic: throwaway reuse buffers (no hot loop here,
+    // so nothing is retained — diagnostics observe production behavior).
+    let mut processes = Vec::new();
+    let mut scratch = rsrpc_detect::scan::ExecScratch::default();
+    let mut match_scratch = rsrpc_detect::scan::MatchScratch::default();
+    let mut found = server.scan_for_processes(&mut processes, &mut scratch, &mut match_scratch)?;
     let ignored: HashSet<String> = self.config.ignored_ids.iter().cloned().collect();
     found = rsrpc_detect::scan::apply_ignore_list(found, &ignored);
     Ok(

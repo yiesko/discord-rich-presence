@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use rsrpc_detect::db::DetectableActivity;
 use rsrpc_detect::refresh::RefreshConfig;
+use rsrpc_detect::scan::MatchScratch;
 use rsrpc_detect::server::ProcessServer;
 use rsrpc_detect::types::{Exec, ProcessEventListeners};
 
@@ -46,6 +47,7 @@ fn append_swaps_in_a_new_classifying_generation() {
   let mut variant_bufs: [String; 5] = Default::default();
   let mut reversed = String::with_capacity(256);
   let mut obs_open = false;
+  let mut match_scratch = MatchScratch::default();
   let hit = server
     .match_process(
       &Exec {
@@ -57,6 +59,7 @@ fn append_swaps_in_a_new_classifying_generation() {
       &mut variant_bufs,
       &mut reversed,
       &mut obs_open,
+      &mut match_scratch,
     )
     .expect("fresh generation classifies");
   assert_eq!(&*hit.entry.id, "424242");
@@ -72,6 +75,7 @@ fn remove_by_name_drops_the_generation_entry() {
   let mut variant_bufs: [String; 5] = Default::default();
   let mut reversed = String::with_capacity(256);
   let mut obs_open = false;
+  let mut match_scratch = MatchScratch::default();
   assert!(
     server
       .match_process(
@@ -84,8 +88,70 @@ fn remove_by_name_drops_the_generation_entry() {
         &mut variant_bufs,
         &mut reversed,
         &mut obs_open,
+        &mut match_scratch,
       )
       .is_none(),
     "removed entry must not classify"
   );
+}
+
+/// Match scratch buffers survive across classifications: the lowercased
+/// path buffer is refilled in place, never reallocated.
+#[test]
+fn match_scratch_reuses_lowered_buffer() {
+  let server = server();
+  server.append_detectables(custom_db());
+  let bundle = server.bundle();
+  let mut variant_bufs: [String; 5] = Default::default();
+  let mut reversed = String::with_capacity(256);
+  let mut obs_open = false;
+  let mut match_scratch = MatchScratch::default();
+  let exec = Exec {
+    pid: 1,
+    path: "/games/swapgame.exe".to_string(),
+    arguments: None,
+  };
+  let classify = |server: &ProcessServer,
+                  exec: &Exec,
+                  bundle: &std::sync::Arc<rsrpc_detect::bundle::DetectablesBundle>,
+                  variant_bufs: &mut [String; 5],
+                  reversed: &mut String,
+                  obs_open: &mut bool,
+                  match_scratch: &mut MatchScratch| {
+    server
+      .match_process(
+        exec,
+        bundle,
+        variant_bufs,
+        reversed,
+        obs_open,
+        match_scratch,
+      )
+      .is_some()
+  };
+  assert!(classify(
+    &server,
+    &exec,
+    &bundle,
+    &mut variant_bufs,
+    &mut reversed,
+    &mut obs_open,
+    &mut match_scratch
+  ));
+  let lowered_ptr = match_scratch.lowered.as_ptr();
+  let lowered_cap = match_scratch.lowered.capacity();
+  assert!(classify(
+    &server,
+    &exec,
+    &bundle,
+    &mut variant_bufs,
+    &mut reversed,
+    &mut obs_open,
+    &mut match_scratch
+  ));
+  assert!(
+    std::ptr::eq(lowered_ptr, match_scratch.lowered.as_ptr()),
+    "lowered moved"
+  );
+  assert!(match_scratch.lowered.capacity() >= lowered_cap);
 }
