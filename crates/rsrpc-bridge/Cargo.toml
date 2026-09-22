@@ -20,7 +20,7 @@ rsrpc-state = { path = "../rsrpc-state" }
 rsrpc-telemetry = { path = "../rsrpc-telemetry" }
 rsrpc-ws = { path = "../rsrpc-ws" }
 tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
-tokio-util = { version = "0.7", features = ["full"] }
+tokio-util = { version = "0.7", default-features = false }
 bytes = "1.12"
 tungstenite = "0.30"
 serde_json = "1.0"
