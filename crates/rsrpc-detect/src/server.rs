@@ -1115,12 +1115,14 @@ impl ProcessServer {
   /// (in-place refill, never rebuilt), so a warm tick
   /// allocates nothing per process. Unreadable pids (kernel threads,
   /// zombies, races) are skipped without leaving holes: only successful
-  /// reads advance, then the tail is truncated (capacity retained).
+  /// reads advance. Returns the filled prefix length; surplus high-water
+  /// slots past it are kept (not truncated) so their string buffers
+  /// survive count dips. Callers must use only `&processes[..filled]`.
   #[cfg(target_os = "linux")]
   pub(crate) fn process_list_into(
     processes: &mut Vec<Exec>,
     scratch: &mut ExecScratch,
-  ) -> rsrpc_protocol::error::Result<()> {
+  ) -> rsrpc_protocol::error::Result<usize> {
     use std::fs;
 
     let proc_list = fs::read_dir("/proc")?.filter(|e| {
@@ -1132,10 +1134,10 @@ impl ProcessServer {
 
       false
     });
-    // No `clear`: the previous length IS the slot count. Slots are
-    // refilled in place below, so a warm tick reuses every string
-    // buffer; `push` only grows past the high-water mark, `truncate`
-    // only drops dead tail slots (capacity retained either way).
+    // No `clear` and no `truncate`: the Vec length is the high-water
+    // slot count. Slots refill in place below, so a warm tick reuses
+    // every string buffer; `push` only grows past the high-water mark.
+    // Tail slots past `filled` keep their buffers for the next rise.
     let mut filled = 0usize;
 
     for entry in proc_list {
@@ -1161,8 +1163,7 @@ impl ProcessServer {
         filled += 1;
       }
     }
-    processes.truncate(filled);
-    Ok(())
+    Ok(filled)
   }
 
   /// Current detection generation, shared lock-free after the clone.
@@ -1195,8 +1196,8 @@ impl ProcessServer {
     let processes = processes.as_slice();
     #[cfg(target_os = "linux")]
     let processes = {
-      ProcessServer::process_list_into(processes, exec_scratch)?;
-      &*processes
+      let filled = ProcessServer::process_list_into(processes, exec_scratch)?;
+      &processes[..filled]
     };
 
     tracing::debug!("[Process Scanner] Process scan triggered");

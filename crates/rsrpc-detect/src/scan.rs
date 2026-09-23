@@ -934,14 +934,22 @@ mod reuse_tests {
   /// the two back-to-back sweeps, readdir order may shift and the slot
   /// legitimately holds another pid. The backing-pointer check is
   /// conditional on capacity: growth past the first high-water mark may
-  /// reallocate, which is correct, not a reuse bug.
+  /// reallocate, which is correct, not a reuse bug. Surplus slots past
+  /// `filled` are retained (high-water), so assertions only read the
+  /// filled prefix.
   #[test]
   fn process_list_into_reuses_slots_across_ticks() {
     let mut processes = Vec::new();
     let mut scratch = ExecScratch::default();
-    ProcessServer::process_list_into(&mut processes, &mut scratch).expect("first tick lists");
-    assert!(!processes.is_empty(), "some process must be visible");
-    assert!(processes.iter().all(|e| e.pid > 0 && !e.path.is_empty()));
+    let filled =
+      ProcessServer::process_list_into(&mut processes, &mut scratch).expect("first tick lists");
+    assert!(filled > 0, "some process must be visible");
+    assert!(filled <= processes.len());
+    assert!(
+      processes[..filled]
+        .iter()
+        .all(|e| e.pid > 0 && !e.path.is_empty())
+    );
     let backing_ptr = processes.as_ptr();
     let backing_cap = processes.capacity();
     let (first_pid, first_path_ptr, first_path_cap) = (
@@ -949,8 +957,10 @@ mod reuse_tests {
       processes[0].path.as_ptr(),
       processes[0].path.capacity(),
     );
-    ProcessServer::process_list_into(&mut processes, &mut scratch).expect("second tick lists");
-    assert!(!processes.is_empty());
+    let filled2 =
+      ProcessServer::process_list_into(&mut processes, &mut scratch).expect("second tick lists");
+    assert!(filled2 > 0);
+    assert!(filled2 <= processes.len());
     if processes.len() <= backing_cap {
       assert!(
         std::ptr::eq(backing_ptr, processes.as_ptr()),
@@ -964,6 +974,10 @@ mod reuse_tests {
       );
       assert!(processes[0].path.capacity() >= first_path_cap);
     }
+    // High-water retention: the second sweep never shrinks the Vec, so a
+    // later rise reuses surplus slot buffers instead of reallocating.
+    assert!(processes.len() >= filled);
+    assert!(processes.len() >= filled2);
   }
 }
 
