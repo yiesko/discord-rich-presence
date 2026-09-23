@@ -932,7 +932,9 @@ mod reuse_tests {
   /// ticks: same allocation, refreshed contents. The first-slot pointer
   /// check is conditional on pid stability: if a process exits between
   /// the two back-to-back sweeps, readdir order may shift and the slot
-  /// legitimately holds another pid.
+  /// legitimately holds another pid. The backing-pointer check is
+  /// conditional on capacity: growth past the first high-water mark may
+  /// reallocate, which is correct, not a reuse bug.
   #[test]
   fn process_list_into_reuses_slots_across_ticks() {
     let mut processes = Vec::new();
@@ -941,6 +943,7 @@ mod reuse_tests {
     assert!(!processes.is_empty(), "some process must be visible");
     assert!(processes.iter().all(|e| e.pid > 0 && !e.path.is_empty()));
     let backing_ptr = processes.as_ptr();
+    let backing_cap = processes.capacity();
     let (first_pid, first_path_ptr, first_path_cap) = (
       processes[0].pid,
       processes[0].path.as_ptr(),
@@ -948,10 +951,12 @@ mod reuse_tests {
     );
     ProcessServer::process_list_into(&mut processes, &mut scratch).expect("second tick lists");
     assert!(!processes.is_empty());
-    assert!(
-      std::ptr::eq(backing_ptr, processes.as_ptr()),
-      "Vec backing moved"
-    );
+    if processes.len() <= backing_cap {
+      assert!(
+        std::ptr::eq(backing_ptr, processes.as_ptr()),
+        "Vec backing moved"
+      );
+    }
     if processes[0].pid == first_pid {
       assert!(
         std::ptr::eq(first_path_ptr, processes[0].path.as_ptr()),

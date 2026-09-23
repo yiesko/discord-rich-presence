@@ -566,12 +566,21 @@ mod tests {
     ];
     let split = collect_split_patterns(&entries);
     let native_at = |pair: &[usize; 2]| entries[pair[0]].executables[pair[1]].name.to_string();
-    // No launcher, no match-all `/` in either pass, ever.
+    // No launcher in either pass, ever. Match-all `/` is checked on the
+    // normalized patterns below (raw names can differ from what the
+    // automaton stores).
     for pair in split.native_idx.iter().chain(split.proton_idx.iter()) {
       let exe = &entries[pair[0]].executables[pair[1]];
       assert!(!exe.is_launcher, "launcher leaked into patterns");
-      assert_ne!(native_at(pair), "/");
     }
+    assert!(
+      !split.native_patterns.iter().any(|p| p == "/"),
+      "match-all `/` leaked into native patterns"
+    );
+    assert!(
+      !split.proton_patterns.iter().any(|p| p == "/"),
+      "match-all `/` leaked into proton patterns"
+    );
     // Proton (Linux only) carries exactly the win32 non-launcher exes.
     #[cfg(target_os = "linux")]
     {
