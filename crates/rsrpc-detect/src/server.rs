@@ -11,9 +11,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use crate::scan::MatchScratch;
 #[cfg(target_os = "linux")]
-use crate::scan::{ExecScratch, read_exec_into};
+use crate::scan::read_exec_into;
+use crate::scan::{ExecScratch, MatchScratch};
 use arc_swap::ArcSwap;
 use rsrpc_steam::SteamLibraries;
 #[cfg(not(target_os = "linux"))]
@@ -1182,12 +1182,17 @@ impl ProcessServer {
   /// On non-Linux the list still comes from `sysinfo` (scratch unused).
   pub fn scan_for_processes(
     &self,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] processes: &mut Vec<Exec>,
+    // Linux needs the Vec (in-place refill); elsewhere the list is built
+    // fresh and this param is only carried for a uniform signature.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables, clippy::ptr_arg))]
+    processes: &mut Vec<Exec>,
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] exec_scratch: &mut ExecScratch,
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] match_scratch: &mut MatchScratch,
   ) -> rsrpc_protocol::error::Result<Vec<ScannedHit>> {
     #[cfg(not(target_os = "linux"))]
     let processes = self.process_list()?;
+    #[cfg(not(target_os = "linux"))]
+    let processes = processes.as_slice();
     #[cfg(target_os = "linux")]
     let processes = {
       ProcessServer::process_list_into(processes, exec_scratch)?;

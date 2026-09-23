@@ -95,20 +95,31 @@ fn remove_by_name_drops_the_generation_entry() {
   );
 }
 
-/// Match scratch buffers survive across classifications: the lowercased
-/// path buffer is refilled in place, never reallocated.
+/// Match scratch buffers survive across classifications: a path that
+/// misses the automaton still reaches the lowered-path branch, where the
+/// lowercased copy is refilled in place — never reallocated.
 #[test]
 fn match_scratch_reuses_lowered_buffer() {
-  let server = server();
-  server.append_detectables(custom_db());
+  let (tx, _rx) = rsrpc_telemetry::QueueGauge::pair();
+  let server = ProcessServer::new_with_custom(
+    custom_db().into_iter().map(Arc::new).collect(),
+    vec![],
+    tx,
+    ProcessEventListeners::default(),
+    RefreshConfig::default(),
+    vec![],
+  );
   let bundle = server.bundle();
   let mut variant_bufs: [String; 5] = Default::default();
   let mut reversed = String::with_capacity(256);
   let mut obs_open = false;
   let mut match_scratch = MatchScratch::default();
+  // AC misses (`othergame.exe` ≠ `swapgame.exe`); the folder fallback
+  // still classifies via `Swap Game`, so both the miss-path lowering and
+  // a real hit are exercised across the two calls below.
   let exec = Exec {
     pid: 1,
-    path: "/games/swapgame.exe".to_string(),
+    path: "/games/Swap Game/othergame.exe".to_string(),
     arguments: None,
   };
   let classify = |server: &ProcessServer,
@@ -138,6 +149,9 @@ fn match_scratch_reuses_lowered_buffer() {
     &mut obs_open,
     &mut match_scratch
   ));
+  // Miss path lowercases the whole path into the scratch buffer before
+  // the folder heuristic runs.
+  assert_eq!(match_scratch.lowered, "/games/swap game/othergame.exe");
   let lowered_ptr = match_scratch.lowered.as_ptr();
   let lowered_cap = match_scratch.lowered.capacity();
   assert!(classify(
@@ -149,6 +163,7 @@ fn match_scratch_reuses_lowered_buffer() {
     &mut obs_open,
     &mut match_scratch
   ));
+  assert_eq!(match_scratch.lowered, "/games/swap game/othergame.exe");
   assert!(
     std::ptr::eq(lowered_ptr, match_scratch.lowered.as_ptr()),
     "lowered moved"

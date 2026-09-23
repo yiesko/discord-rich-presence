@@ -261,20 +261,18 @@ struct SplitPatterns {
 /// `build_ac_patterns_with_os_filter(enforce_os=true)` and the old
 /// `build_proton_ac_patterns` exactly; the two sets are disjoint on
 /// every platform, so each exe normalizes at most once — the same total
-/// work as two walks, half the passes. Vectors are pre-sized from the
-/// exe count so growth never copies mid-build.
+/// work as two walks, half the passes. Vectors start empty and grow with
+/// eligible pushes only (launcher/OS/`/` filters reject most exes up
+/// front); `build_bundle` shrinks the index vectors before they outlive
+/// the build.
 fn collect_split_patterns(detectables: &[Arc<ScannedEntry>]) -> SplitPatterns {
   // Proton collection is unneeded off Linux: leave it unallocated.
   let want_proton = cfg!(target_os = "linux");
-  let total_exes: usize = detectables
-    .iter()
-    .map(|activity| activity.executables.len())
-    .sum();
   let mut split = SplitPatterns {
-    native_patterns: Vec::with_capacity(total_exes),
-    native_idx: Vec::with_capacity(total_exes),
-    proton_patterns: Vec::with_capacity(if want_proton { total_exes } else { 0 }),
-    proton_idx: Vec::with_capacity(if want_proton { total_exes } else { 0 }),
+    native_patterns: Vec::new(),
+    native_idx: Vec::new(),
+    proton_patterns: Vec::new(),
+    proton_idx: Vec::new(),
   };
   for (activity_index, activity) in detectables.iter().enumerate() {
     for (exe_index, executable) in activity.executables.iter().enumerate() {
@@ -333,9 +331,9 @@ pub(crate) fn build_bundle(
   // pattern vectors beside a live automaton.
   let split = collect_split_patterns(&detectable);
   let ac = build_ac_automaton(&split.native_patterns)?;
-  let idx = split.native_idx;
+  let mut idx = split.native_idx;
   drop(split.native_patterns);
-  let (proton_ac, proton_idx) = if split.proton_patterns.is_empty() {
+  let (proton_ac, mut proton_idx) = if split.proton_patterns.is_empty() {
     (None, split.proton_idx)
   } else {
     tracing::info!(
@@ -346,6 +344,10 @@ pub(crate) fn build_bundle(
     drop(split.proton_patterns);
     (Some(automaton), split.proton_idx)
   };
+  // Indexes outlive the build inside the bundle: release growth slack
+  // (amortized doubling) so the stored tables are exactly `len`.
+  idx.shrink_to_fit();
+  proton_idx.shrink_to_fit();
   tracing::info!(
     "[Process Scanner] Automata heap: native {} bytes, proton {} bytes",
     ac.memory_usage(),
@@ -586,8 +588,10 @@ mod tests {
           .any(|name| name == "win.exe" || name == "mac.app")
       );
     }
-    // Pre-sized, so this fixture size grows without reallocation.
-    assert!(split.native_patterns.capacity() >= split.native_patterns.len());
-    assert!(split.native_idx.capacity() >= split.native_idx.len());
+    // Contents above are the real check: capacity claims on empty-start
+    // vectors would only restate the `Vec` invariant.
+    assert_eq!(split.native_patterns.len(), split.native_idx.len());
+    #[cfg(target_os = "linux")]
+    assert_eq!(split.proton_patterns.len(), split.proton_idx.len());
   }
 }

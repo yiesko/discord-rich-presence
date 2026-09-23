@@ -29,8 +29,10 @@ pub fn read_exec(pid: u64) -> Option<Exec> {
 /// owned by the calling loop (scan thread, EXEC dispatch). The path
 /// buffer, cmdline read buffer and args join buffer are allocated once
 /// and cleared per pid, replacing the per-process-per-tick temporaries
-/// (previously ~400 allocations every 5s).
+/// (previously ~400 allocations every 5s). Fields are only touched by
+/// the Linux reader; the type itself is part of every target's API.
 #[derive(Default)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct ExecScratch {
   path: String,
   cmdline: Vec<u8>,
@@ -354,17 +356,13 @@ fn live_or_none(obj: &Arc<ScannedEntry>, pid: u64) -> Option<ScannedHit> {
 /// (which is updated in place). The scan loop logs these at INFO so a
 /// silent daemon is distinguishable from a blind one without a debug
 /// build; the bridge still owns publish/dedup logging downstream.
-/// Capped: beyond `MAX_SEEN_IDS` distinct ids the set stops growing (first
-/// sightings are no longer reported — detection itself is unaffected).
-pub const MAX_SEEN_IDS: usize = 1024;
-
 pub fn first_sightings<'a>(
   seen: &mut HashSet<String>,
   detected: &'a [ScannedHit],
 ) -> Vec<&'a ScannedHit> {
   detected
     .iter()
-    .filter(|game| seen.len() < MAX_SEEN_IDS && seen.insert(game.entry.id.to_string()))
+    .filter(|game| seen.insert(game.entry.id.to_string()))
     .collect()
 }
 
@@ -868,8 +866,9 @@ impl ProcessServer {
 
 // Per-pid allocation reuse for the scan tick: `read_exec_into` refills
 // caller-owned buffers and `process_list_into` reuses every `Exec` slot
-// across ticks. Parity + no-realloc regression tests.
-#[cfg(test)]
+// across ticks. Parity + no-realloc regression tests. Both helpers are
+// Linux-only (`/proc`), so the module is too.
+#[cfg(all(test, target_os = "linux"))]
 mod reuse_tests {
   use super::*;
   use crate::server::ProcessServer;
@@ -1031,40 +1030,6 @@ mod tick2_tests {
         "mismatch for {input:?}"
       );
     }
-  }
-
-  /// `first_sightings` stops growing the set past the cap: detection
-  /// results still flow, only the "new this boot" report stops.
-  #[test]
-  fn first_sightings_stops_at_cap() {
-    use std::collections::HashSet;
-    use std::sync::Arc;
-    let hit = |id: &str| {
-      ScannedHit::stamp(
-        Arc::new(ScannedEntry {
-          id: id.into(),
-          name: id.into(),
-          executables: Vec::new(),
-          steam_ids: Vec::new(),
-          aliases: Vec::new(),
-        }),
-        1,
-      )
-    };
-    let mut seen = HashSet::new();
-    let many: Vec<ScannedHit> = (0..MAX_SEEN_IDS + 5)
-      .map(|i| hit(&format!("g{i:04}")))
-      .collect();
-    let reported = first_sightings(&mut seen, &many);
-    assert_eq!(reported.len(), MAX_SEEN_IDS);
-    assert_eq!(seen.len(), MAX_SEEN_IDS);
-    // At cap, even a brand-new id is no longer reported (nor stored).
-    let fresh = vec![hit("brand-new")];
-    assert!(first_sightings(&mut seen, &fresh).is_empty());
-    assert_eq!(seen.len(), MAX_SEEN_IDS);
-    // Below cap, novelty still reports.
-    let mut small_seen = HashSet::new();
-    assert_eq!(first_sightings(&mut small_seen, &fresh).len(), 1);
   }
 
   /// Scratch buffers are stable across calls: no reallocations on
