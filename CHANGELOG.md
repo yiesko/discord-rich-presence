@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-09-23
+
 ### Breaking
 - The `lib/` monolith is now a 12-crate workspace plus the thin `cli`
   binary (`rsrpc-ws`, `rsrpc-types`, `rsrpc-protocol`, `rsrpc-transport-ws`,
@@ -36,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`crates/rsrpc-transport-ws/src/handlers.rs:33`). Verified with real
   `Responder` tests (RFC6455 handshake + killed-connection simulation with
   condition-wait for `send==false` and `Disconnect`).
+- Hourly bundle-swap RSS floor ratchet: the swap ran `malloc_trim` while
+  the old generation was still pinned by an in-flight tick, stranding
+  ~10 MB per rebuild in allocator arenas (production floor ratcheted
+  52→104 MB). The swap now trims once more 60 s past any tick and
+  reports the result (six consecutive recounts showed the old
+  generation always releases within 30 s); the post-retrim line also
+  reports live vs free heap bytes from `mallinfo2` (glibc-only,
+  cfg-gated) (`crates/rsrpc-detect/src/db.rs`, `server.rs`). The
+  canonical content hash is factored per entry (byte-identical stream,
+  pinned by a fold test).
+- First-sighting `INFO` logs report every new id again: the
+  `MAX_SEEN_IDS` cap is dropped, restoring main-branch log parity.
 
 ### Added
 - Read-only resource census for long-session memory diagnosis (no behavior
@@ -62,6 +76,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-parsing (`CachedActivity.activity_json`, same pattern as `is_clear`).
   No behavior change (covered by the flood/change/replay suites plus a
   `publish_flood_drop` bench).
+- Per-tick buffer reuse in the scan and match paths: ~400 processes ×
+  fresh `String`/`Vec` temporaries every 5 s tick become caller-owned
+  reuse buffers — `ExecScratch` + `read_exec_into` (path, cmdline and
+  args buffers allocated once per thread), `process_list_into`
+  refilling every `Exec` slot across ticks with high-water retention
+  (no `truncate`: surplus slots keep their string buffers, only the
+  filled prefix is classified), and `MatchScratch` for the lowered
+  path and normalized folders (lowercase stage skipped on the
+  already-lowercase hot path). Behavior is byte-identical, covered by
+  parity and no-realloc regression tests
+  (`crates/rsrpc-detect/src/scan.rs`, `server.rs`).
+- Single-pass automaton build: entries are walked once, partitioning
+  executables into native and Proton pattern vectors (identical
+  contents, order and filters as the two walks), with pattern, index
+  and aux-map vectors pre-sized from the entry counts and each source
+  vector dropped right after its automaton compiles — peak is one
+  automaton plus one vector plus builder scratch
+  (`crates/rsrpc-detect/src/bundle.rs`).
+- `tokio-util` trimmed to default features workspace-wide: only
+  `sync::CancellationToken` is used, so the explicit full features
+  pulled codec, compat, io, net, rt and time machinery for nothing
+  (`crates/rsrpc-bridge/Cargo.toml`, `crates/rsrpc-ws/Cargo.toml`).
 
 ## [0.35.0] - 2026-09-15
 
@@ -504,7 +540,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Stuck presence after game close.
 
-[Unreleased]: https://github.com/yiesko/rsRPC/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/yiesko/rsRPC/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/yiesko/rsRPC/releases/tag/v0.36.0
 [0.35.0]: https://github.com/yiesko/rsRPC/releases/tag/v0.35.0
 [0.34.0]: https://github.com/yiesko/rsRPC/releases/tag/v0.34.0
 [0.33.1]: https://github.com/yiesko/rsRPC/releases/tag/v0.33.1
