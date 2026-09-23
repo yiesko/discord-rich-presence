@@ -565,7 +565,6 @@ mod tests {
       launcher_entry("setup"),
     ];
     let split = collect_split_patterns(&entries);
-    let native_at = |pair: &[usize; 2]| entries[pair[0]].executables[pair[1]].name.to_string();
     // No launcher in either pass, ever. Match-all `/` is checked on the
     // normalized patterns below (raw names can differ from what the
     // automaton stores).
@@ -584,6 +583,8 @@ mod tests {
     // Proton (Linux only) carries exactly the win32 non-launcher exes.
     #[cfg(target_os = "linux")]
     {
+      let native_at =
+        |pair: &[usize; 2]| entries[pair[0]].executables[pair[1]].name.to_string();
       assert_eq!(split.proton_idx.len(), 1);
       assert_eq!(native_at(&split.proton_idx[0]), "win.exe");
       // Native keeps linux + empty-OS, in walk order, excluding `/` drops.
