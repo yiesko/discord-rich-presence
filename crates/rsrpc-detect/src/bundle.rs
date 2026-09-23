@@ -10,7 +10,7 @@ use aho_corasick::AhoCorasick;
 
 use crate::db::DetectableActivity;
 use crate::scan::{name_matchable, normalize_name, os_matches};
-use crate::types::ScannedEntry;
+use crate::types::{OsName, ScannedEntry};
 
 /// Sorted key→index table replacing a `HashMap` for the aux lookups: no
 /// buckets (~33B each in SwissTable), no hashing, no per-key `String`
@@ -140,8 +140,11 @@ impl DetectablesBundle {
 /// conservative gate — exact, multi-word only — so a generic alias can
 /// never collide; canonical names are inserted first and win ties.
 pub fn build_aux_maps(detectables: &[Arc<ScannedEntry>]) -> (SortedIndex, SortedIndex) {
-  let mut steam: Vec<(Box<str>, usize)> = Vec::new();
-  let mut names: Vec<(Box<str>, usize)> = Vec::new();
+  // Pre-sized from the entry count (steam ids ≤ entries in practice;
+  // names get one slot per entry plus room for aliases): no growth
+  // copies mid-build.
+  let mut steam: Vec<(Box<str>, usize)> = Vec::with_capacity(detectables.len());
+  let mut names: Vec<(Box<str>, usize)> = Vec::with_capacity(detectables.len() * 2);
 
   for (index, activity) in detectables.iter().enumerate() {
     for id in &activity.steam_ids {
@@ -242,11 +245,67 @@ pub fn bare_exe(normalized_path: &str) -> Option<&str> {
   Some(trimmed)
 }
 
-/// Native patterns with the OS filter on (production main database).
-fn build_ac_patterns(
-  detectables: &[Arc<ScannedEntry>],
-) -> Result<(AhoCorasick, Vec<[usize; 2]>), aho_corasick::BuildError> {
-  build_ac_patterns_with_os_filter(detectables, true)
+/// Native + Proton pattern vectors from ONE walk over the entries (see
+/// `collect_split_patterns`): same contents, same order, same filters as
+/// the two separate walks this replaces — one normalization per exe.
+struct SplitPatterns {
+  native_patterns: Vec<String>,
+  native_idx: Vec<[usize; 2]>,
+  proton_patterns: Vec<String>,
+  proton_idx: Vec<[usize; 2]>,
+}
+
+/// Walk the entries once, partitioning executables into the native set
+/// (non-launcher, empty-OS or `os_matches`) and the Proton set (Linux
+/// only: non-launcher `win32`). Eligibility mirrors
+/// `build_ac_patterns_with_os_filter(enforce_os=true)` and the old
+/// `build_proton_ac_patterns` exactly; the two sets are disjoint on
+/// every platform, so each exe normalizes at most once — the same total
+/// work as two walks, half the passes. Vectors start empty and grow with
+/// eligible pushes only (launcher/OS/`/` filters reject most exes up
+/// front); `build_bundle` shrinks the index vectors before they outlive
+/// the build.
+fn collect_split_patterns(detectables: &[Arc<ScannedEntry>]) -> SplitPatterns {
+  // Proton collection is unneeded off Linux: leave it unallocated.
+  let want_proton = cfg!(target_os = "linux");
+  let mut split = SplitPatterns {
+    native_patterns: Vec::new(),
+    native_idx: Vec::new(),
+    proton_patterns: Vec::new(),
+    proton_idx: Vec::new(),
+  };
+  for (activity_index, activity) in detectables.iter().enumerate() {
+    for (exe_index, executable) in activity.executables.iter().enumerate() {
+      if executable.is_launcher {
+        continue;
+      }
+      // Native eligibility: empty OS or this platform's tag.
+      let native = executable.os.is_empty() || os_matches(executable.os.as_str());
+      // Proton eligibility (Linux only): win32 exes. Disjoint from
+      // native on Linux (`win32` never `os_matches` there); unreachable
+      // elsewhere (`want_proton` is false).
+      let proton = want_proton && executable.os == OsName::Win32;
+      if !native && !proton {
+        continue;
+      }
+      // Names normalizing to `/` (empty, lone separators, bare `>`)
+      // match every reversed path: drop them instead of detecting
+      // unrelated processes.
+      let pattern = normalize_exe_pattern(&executable.name);
+      if pattern == "/" {
+        continue;
+      }
+      if native {
+        split.native_patterns.push(pattern.clone());
+        split.native_idx.push([activity_index, exe_index]);
+      }
+      if proton {
+        split.proton_patterns.push(pattern);
+        split.proton_idx.push([activity_index, exe_index]);
+      }
+    }
+  }
+  split
 }
 
 /// Custom-override patterns with no OS filter (user entries match anywhere).
@@ -266,8 +325,29 @@ pub(crate) fn build_bundle(
   detectable: Vec<Arc<ScannedEntry>>,
   custom: Vec<Arc<ScannedEntry>>,
 ) -> Result<DetectablesBundle, aho_corasick::BuildError> {
-  let (ac, idx) = build_ac_patterns(&detectable)?;
-  let (proton_ac, proton_idx) = build_proton_ac_patterns(&detectable)?;
+  // One walk feeds both automata (see `collect_split_patterns`); each
+  // source vector is dropped right after its automaton compiles, so the
+  // peak is one automaton + one vector + builder scratch — never two
+  // pattern vectors beside a live automaton.
+  let split = collect_split_patterns(&detectable);
+  let ac = build_ac_automaton(&split.native_patterns)?;
+  let mut idx = split.native_idx;
+  drop(split.native_patterns);
+  let (proton_ac, mut proton_idx) = if split.proton_patterns.is_empty() {
+    (None, split.proton_idx)
+  } else {
+    tracing::info!(
+      "[Process Scanner] Proton fallback: {} win32 patterns",
+      split.proton_patterns.len()
+    );
+    let automaton = build_ac_automaton(&split.proton_patterns)?;
+    drop(split.proton_patterns);
+    (Some(automaton), split.proton_idx)
+  };
+  // Indexes outlive the build inside the bundle: release growth slack
+  // (amortized doubling) so the stored tables are exactly `len`.
+  idx.shrink_to_fit();
+  proton_idx.shrink_to_fit();
   tracing::info!(
     "[Process Scanner] Automata heap: native {} bytes, proton {} bytes",
     ac.memory_usage(),
@@ -362,51 +442,6 @@ fn normalize_exe_pattern(name: &str) -> String {
   exec_name.chars().rev().collect::<String>()
 }
 
-/// Proton fallback automaton: `win32` executables from the main DB, for
-/// Wine/Proton games on Linux whose store id is unreadable and whose exe
-/// is too generic for the stem/folder heuristics. Linux-only: `None`
-/// (plus empty indexes) elsewhere, so the probe is a cheap miss off-Linux.
-fn build_proton_ac_patterns(
-  detectables: &[Arc<ScannedEntry>],
-) -> Result<(Option<AhoCorasick>, Vec<[usize; 2]>), aho_corasick::BuildError> {
-  #[cfg(not(target_os = "linux"))]
-  {
-    let _ = detectables;
-    Ok((None, Vec::new()))
-  }
-  #[cfg(target_os = "linux")]
-  {
-    use crate::types::OsName;
-
-    let mut exe_patterns: Vec<String> = Vec::new();
-    let mut exe_indexes: Vec<[usize; 2]> = Vec::new();
-
-    for (activity_index, activity) in detectables.iter().enumerate() {
-      for (exe_index, executable) in activity.executables.iter().enumerate() {
-        if executable.is_launcher || executable.os != OsName::Win32 {
-          continue;
-        }
-        // Same match-all hazard as the shared builder above.
-        let pattern = normalize_exe_pattern(&executable.name);
-        if pattern == "/" {
-          continue;
-        }
-        exe_patterns.push(pattern);
-        exe_indexes.push([activity_index, exe_index]);
-      }
-    }
-
-    if exe_patterns.is_empty() {
-      return Ok((None, Vec::new()));
-    }
-    tracing::info!(
-      "[Process Scanner] Proton fallback: {} win32 patterns",
-      exe_patterns.len()
-    );
-    Ok((Some(build_ac_automaton(&exe_patterns)?), exe_indexes))
-  }
-}
-
 /// Build the initial detection generation, folding `custom` overrides
 /// in: one automaton construction per boot instead of build-then-rebuild.
 pub(crate) fn initial_bundle(
@@ -496,5 +531,76 @@ mod tests {
       _bundle.proton_ac.is_none(),
       "empty name must not arm the Proton automaton"
     );
+  }
+
+  // Single-pass native+proton collection. The fused walk preserves
+  // both passes' contents, order and filters exactly (same automaton
+  // inputs as two walks, one normalization per exe).
+  /// Launcher entry fixture (the shared helper only builds non-launchers).
+  fn launcher_entry(id: &str) -> Arc<ScannedEntry> {
+    Arc::new(ScannedEntry {
+      id: id.into(),
+      name: id.into(),
+      executables: vec![ScannedExe {
+        name: "setup.exe".into(),
+        os: OsName::Win32,
+        is_launcher: true,
+        arguments: None,
+      }],
+      steam_ids: Vec::new(),
+      aliases: Vec::new(),
+    })
+  }
+
+  /// Fused collection preserves each pass's contents: launchers and `/`
+  /// names in neither pass, empty-OS in native, win32 in proton on Linux.
+  #[test]
+  fn split_collection_preserves_pass_contents() {
+    let entries = vec![
+      entry_with_exes("lin", OsName::Linux, &["lin.bin"]),
+      entry_with_exes("win", OsName::Win32, &["win.exe"]),
+      entry_with_exes("dar", OsName::Darwin, &["mac.app"]),
+      entry_with_exes("empty", OsName::Empty, &["any.bin"]),
+      entry_with_exes("slash", OsName::Linux, &["", "ok.bin"]),
+      launcher_entry("setup"),
+    ];
+    let split = collect_split_patterns(&entries);
+    // No launcher in either pass, ever. Match-all `/` is checked on the
+    // normalized patterns below (raw names can differ from what the
+    // automaton stores).
+    for pair in split.native_idx.iter().chain(split.proton_idx.iter()) {
+      let exe = &entries[pair[0]].executables[pair[1]];
+      assert!(!exe.is_launcher, "launcher leaked into patterns");
+    }
+    assert!(
+      !split.native_patterns.iter().any(|p| p == "/"),
+      "match-all `/` leaked into native patterns"
+    );
+    assert!(
+      !split.proton_patterns.iter().any(|p| p == "/"),
+      "match-all `/` leaked into proton patterns"
+    );
+    // Proton (Linux only) carries exactly the win32 non-launcher exes.
+    #[cfg(target_os = "linux")]
+    {
+      let native_at = |pair: &[usize; 2]| entries[pair[0]].executables[pair[1]].name.to_string();
+      assert_eq!(split.proton_idx.len(), 1);
+      assert_eq!(native_at(&split.proton_idx[0]), "win.exe");
+      // Native keeps linux + empty-OS, in walk order, excluding `/` drops.
+      let native_names: Vec<String> = split.native_idx.iter().map(native_at).collect();
+      assert!(native_names.contains(&"lin.bin".to_string()));
+      assert!(native_names.contains(&"any.bin".to_string()));
+      assert!(native_names.contains(&"ok.bin".to_string()));
+      assert!(
+        !native_names
+          .iter()
+          .any(|name| name == "win.exe" || name == "mac.app")
+      );
+    }
+    // Contents above are the real check: capacity claims on empty-start
+    // vectors would only restate the `Vec` invariant.
+    assert_eq!(split.native_patterns.len(), split.native_idx.len());
+    #[cfg(target_os = "linux")]
+    assert_eq!(split.proton_patterns.len(), split.proton_idx.len());
   }
 }

@@ -19,7 +19,7 @@ pub struct ProcessEventListeners {
   pub on_process_scan_complete: Option<Arc<Mutex<ProcessCallback>>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Exec {
   pub pid: u64,
   pub path: String,
