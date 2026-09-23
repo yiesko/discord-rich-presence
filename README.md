@@ -323,5 +323,6 @@ integration tests in `crates/*/tests/`, benchmarks in
 
 ## Credits
 
+* [SpikeHD / rsRPC](https://github.com/SpikeHD/rsRPC) - the original project this work builds on: SpikeHD originally developed rsRPC, and this repository continues from that foundation.
 * [OpenAsar / arRPC](https://github.com/OpenAsar/arRPC) - the original project this work is inspired by. The `detectable.json` format, the executable-matching checks, and the arRPC-shaped bridge behavior (replies, websocket protocol) follow its design.
 * [pog5 / rsrpc](https://github.com/pog5/rsrpc) - reference for process-detection parity: 64-bit executable path variants, executable argument checks, the hourly detectable-database refresh, and the integration test coverage.
