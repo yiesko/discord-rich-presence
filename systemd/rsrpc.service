@@ -48,6 +48,33 @@ ReadWritePaths=%h/.config/rsrpc %t %h/.cache/rsrpc %h/.local/bin
 # on polling (diagnose via the missing "watcher live" boot line).
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
+# Kernel, clock, hostname and control-group interfaces: the daemon reads
+# the clock but never touches any of these, so they stay read-only or
+# invisible.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectControlGroups=yes
+# No device access beyond /dev/null, /dev/zero and /dev/urandom, which
+# stay available: headless daemon, no GPU/audio/input needed.
+PrivateDevices=yes
+# No setuid/setgid binaries are ever executed; no realtime scheduling
+# or memory locking is used anywhere in the stack.
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+# Syscall allowlist: the broad @system-service set covers sockets (TCP,
+# netlink), file IO, threads, timers and signals. Verified against a live
+# boot (startup DB fetch exercises TLS); if a future dependency needs
+# more, denied calls show up in the audit trail before anything breaks
+# silently — the service fails closed instead of running crippled.
+SystemCallFilter=@system-service
+# 64-bit binary only: 32-bit compatibility syscalls can never be legitimate.
+SystemCallArchitectures=native
+# No writable-executable mappings anywhere in this stack (no JIT):
+# removes a whole exploitation primitive class outright.
+MemoryDenyWriteExecute=yes
 
 # Personal overrides live in rsrpc.service.d/override.conf (never in this
 # file), e.g.:
