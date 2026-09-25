@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Scanner threads now belong to the daemon lifecycle: `ProcessServer`
+  gained directed `shutdown()` + `join()` (plus `rsrpc-*` thread names),
+  every long sleep became an interruptible park, the netlink watcher
+  honors a stop flag (including its self-test), and `Daemon::run_until`
+  shuts down, joins and drops the scanner on success, bind failures and
+  future abandonment alike. When `run_until` returns, no rsRPC thread is
+  still running, so library callers may run another daemon afterwards
+  (`crates/rsrpc-detect/src/server.rs`,
+  `crates/rsrpc-proc-events/src/lib.rs`,
+  `crates/rsrpc-core/src/daemon.rs`).
+
 ## [0.36.1] - 2026-09-24
 
 ### Fixed

@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
 use rsrpc_telemetry::{GaugeSender, SendChecked};
@@ -50,6 +51,12 @@ pub const MAX_WATCH_BACKLOG: usize = 1024;
 /// Netlink family for the kernel connector multiplexer.
 #[cfg(target_os = "linux")]
 const NETLINK_CONNECTOR: i32 = 11;
+/// Steady-state receive deadline inside `watch()`: every expiry re-checks
+/// the shutdown flag, so a silent socket never pins the thread past
+/// shutdown (join-safe). One extra syscall per interval per daemon is
+/// unmeasurable next to the 5s scan cadence.
+#[cfg(target_os = "linux")]
+const WATCH_RECV_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 /// `nlmsghdr` size: len + type + flags (u32/u16/u16) + seq + pid (u32/u32).
 const SIZE_NLMSGHDR: usize = 16;
 /// Application message type for the subscription request.
@@ -462,7 +469,7 @@ impl SelfTestReport {
 /// nothing — without this check the watcher would idle forever claiming
 /// to be live while polling does all the work unnoticed.
 #[cfg(target_os = "linux")]
-fn self_test(fd: i32) -> SelfTestReport {
+fn self_test(fd: i32, stop: &AtomicBool) -> SelfTestReport {
   // Bound every recv below: without this, a silently non-delivering
   // kernel hangs the watcher thread forever with zero logs.
   set_recv_timeout(fd, Some(std::time::Duration::from_secs(1)));
@@ -484,6 +491,11 @@ fn self_test(fd: i32) -> SelfTestReport {
     // event proves delivery — it need not be ours, any exec on a live
     // desktop arrives within milliseconds.
     for _ in 0..10 {
+      // Directed shutdown short-circuits the ~10s probe: the caller
+      // exits quietly right after (see below).
+      if stop.load(Ordering::Acquire) {
+        break;
+      }
       let received = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
       if received <= 0 {
         // Timeout (EAGAIN/EWOULDBLOCK) or EINTR: keep waiting out the
@@ -519,19 +531,34 @@ fn self_test(fd: i32) -> SelfTestReport {
   report
 }
 
-/// Block on `cn_proc` broadcasts forever, forwarding lifecycle events.
-/// Returns only on receive errors (the caller logs once and keeps
-/// polling); the fd is closed on the way out.
-/// Block on `cn_proc` broadcasts forever, forwarding lifecycle events.
-/// Returns only on receive errors (the caller logs once and keeps
-/// polling); the fd is closed on the way out.
+/// Block on `cn_proc` broadcasts, forwarding lifecycle events. Returns on
+/// receive errors (the caller logs once and keeps polling), when the
+/// receiver is gone, or when `stop` is set (directed shutdown: the retry
+/// thread must never wait out a blocked receive); the fd is closed on
+/// the way out.
 ///
 /// Linux only: other platforms get a stub that always refuses (the
 /// periodic scan is the only path there).
 #[cfg(target_os = "linux")]
-pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
+pub fn watch(events: &GaugeSender<ProcEvent>, stop: &AtomicBool) -> Result<(), String> {
+  // Preset stop skips subscribe, self-test and the blocking receive
+  // entirely: shutdown before the first watch must not touch netlink.
+  if stop.load(Ordering::Acquire) {
+    return Ok(());
+  }
   let (fd, ack_seen) = subscribe()?;
-  let report = self_test(fd);
+  let report = self_test(fd, stop);
+  // Directed shutdown during the self-test: exit quietly instead of
+  // reporting stale liveness from a socket we are abandoning.
+  if stop.load(Ordering::Acquire) {
+    tracing::debug!("[Process Scanner] watcher stopping on shutdown (self-test cut)");
+    // SAFETY: `fd` is the netlink socket owned by this function; this
+    // return ends ownership (same discipline as the paths below).
+    unsafe {
+      libc::close(fd);
+    }
+    return Ok(());
+  }
   if !report.live() {
     unsafe {
       libc::close(fd);
@@ -553,8 +580,10 @@ pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
   tracing::info!(
     "[Process Scanner] proc-events watcher live (netlink cn_proc; best-effort, may rarely go silent — polling backstops)"
   );
-  // Back to blocking: the self-test's timeout was temporary.
-  set_recv_timeout(fd, None);
+  // Short deadline instead of blocking: every expiry re-checks the
+  // shutdown flag below, so a silent socket never pins the thread past
+  // shutdown. The self-test's longer timeout was temporary.
+  set_recv_timeout(fd, Some(WATCH_RECV_TIMEOUT));
   // 64KiB datagrams: one netlink message is ~76B, so bursts of hundreds
   // of EXECs under load (build storms) arrive intact instead of being
   // truncated and dropped wholesale by the length guard below.
@@ -565,6 +594,19 @@ pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
     if received < 0 {
       let err = std::io::Error::last_os_error();
       if err.kind() == std::io::ErrorKind::Interrupted {
+        continue;
+      }
+      // Receive deadline expiry (not an error): re-check directed
+      // shutdown, then keep watching. Without this arm a silent socket
+      // would pin the thread (and the daemon's join) indefinitely.
+      if err.kind() == std::io::ErrorKind::WouldBlock {
+        if stop.load(Ordering::Acquire) {
+          tracing::debug!("[Process Scanner] watcher stopping on shutdown");
+          unsafe {
+            libc::close(fd);
+          }
+          return Ok(());
+        }
         continue;
       }
       // Overrun under burst load drops events but the socket stays valid:
@@ -582,6 +624,18 @@ pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
     }
     if received == 0 {
       continue;
+    }
+    // Directed shutdown even under continuous event flood: without this,
+    // a busy socket would keep the loop in recv/forward while join waits
+    // (the receiver-drop chain only fires once dispatch exits).
+    if stop.load(Ordering::Acquire) {
+      tracing::debug!("[Process Scanner] watcher stopping on shutdown (flood cut)");
+      // SAFETY: `fd` is the netlink socket owned by this function; this
+      // return ends ownership (same discipline as the error paths below).
+      unsafe {
+        libc::close(fd);
+      }
+      return Ok(());
     }
     // One shared walk feeds both continuity tracking and forwarding:
     // every message advances the per-cpu sequence (even unforwarded
@@ -613,6 +667,12 @@ pub fn watch(events: &GaugeSender<ProcEvent>) -> Result<(), String> {
 /// Non-Linux stub: `cn_proc` does not exist there, so watching always
 /// refuses and the periodic scan stays the only path.
 #[cfg(not(target_os = "linux"))]
-pub fn watch(_events: &rsrpc_telemetry::GaugeSender<ProcEvent>) -> Result<(), String> {
+pub fn watch(
+  _events: &rsrpc_telemetry::GaugeSender<ProcEvent>,
+  stop: &AtomicBool,
+) -> Result<(), String> {
+  if stop.load(Ordering::Acquire) {
+    return Ok(());
+  }
   Err("proc-events unsupported on this platform".to_string())
 }

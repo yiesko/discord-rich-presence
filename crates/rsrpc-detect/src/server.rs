@@ -48,12 +48,25 @@ pub struct ProcessServer {
   /// Double-`start` guard: a second scan generation would orphan the
   /// first loop's wake handle and double-emit EXEC hits.
   pub(crate) started: Arc<AtomicBool>,
+  /// Directed shutdown, set by `shutdown`: every thread spawned by
+  /// `start` observes it and exits, so `join` returns promptly. Plain
+  /// flag (no lock needed: set once, read in loops).
+  pub(crate) shutdown: Arc<AtomicBool>,
   /// Set by the EXEC fast path whenever it publishes a hit, consumed by
   /// the scan loop: an EXEC-published game that dies before any poll
   /// observes it would otherwise never emit its clear (the delta would
   /// see two identical empty snapshots). Forcing one full emission per
   /// EXEC publication closes that hole; repeats dedup downstream.
   pub(crate) scan_dirty: Arc<AtomicBool>,
+  /// Threads registered for shutdown unpark (refresh, watcher retry):
+  /// each registers once at startup; `shutdown` unparks all so no
+  /// `park_timeout` sleeps out its full duration. The scan loop keeps
+  /// its own single-slot `scan_wake` (EXIT wakes share it), which
+  /// `shutdown` unparks too.
+  pub(crate) shutdown_wake: Arc<Mutex<Vec<std::thread::Thread>>>,
+  /// Join handles of every thread `start` spawned, taken by `join`.
+  /// Empty before `start` and after `join` (a second `join` is safe).
+  pub(crate) worker_handles: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 
   pub event_sender: rsrpc_telemetry::GaugeSender<ProcessDetectedEvent>,
 
@@ -157,6 +170,49 @@ fn wait_scan(wait_time: Duration) {
   std::thread::park_timeout(wait_time);
 }
 
+/// Cadence between dispatch receives: the only blocking wait in the
+/// dispatch loop doubles as the shutdown poll. Traffic returns at once;
+/// silence costs one cheap timeout per interval.
+const DISPATCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Whether directed shutdown was requested (checked on every loop
+/// iteration and after every blocking wait).
+fn is_shutting_down(shutdown: &Arc<AtomicBool>) -> bool {
+  shutdown.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Register the calling thread for shutdown unpark. Called once per
+/// spawned thread at startup (not per wait: the registry stays one
+/// entry per thread for the server lifetime).
+fn track_shutdown_thread(wake: &Arc<Mutex<Vec<std::thread::Thread>>>) {
+  wake
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .push(std::thread::current());
+}
+
+/// Spawn a supervised worker: the handle joins `worker_handles` for
+/// `join`, so no thread outlives a joined server. Takes the registry by
+/// value (callers pass `Arc::clone`) so the moved body closure never
+/// fights a borrow of its owner. Threads carry `rsrpc-*` names so
+/// teardown accounting (and `top`/`ps`) can observe them.
+fn spawn_worker(
+  handles: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+  name: &str,
+  body: impl FnOnce() + Send + 'static,
+) {
+  let handle = std::thread::Builder::new()
+    .name(name.to_string())
+    // Same failure semantics as `thread::spawn` (panics when the OS
+    // refuses a thread): startup cannot proceed half-supervised.
+    .spawn(body)
+    .expect("scanner worker spawn failed");
+  handles
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .push(handle);
+}
+
 /// Whether an EXEC fast-path hit must be skipped: ignored app IDs behave
 /// as absent everywhere (parity with the polling path's
 /// [`apply_ignore_list`]). One `HashSet` lookup; empty set early-outs via
@@ -242,139 +298,178 @@ fn spawn_proc_watcher(server: &ProcessServer) -> rsrpc_telemetry::QueueGauge {
   let (tx, rx) = QueueGauge::pair();
   let gauge = tx.gauge();
   let dispatch = server.clone();
-  std::thread::spawn(move || {
-    let mut variant_bufs: [String; 5] = Default::default();
-    let mut reversed_path = String::with_capacity(256);
-    // EXEC reuse buffers, owned by this loop: one `Exec` slot plus the
-    // read scratch, refilled per event instead of allocated per event.
-    // `match_scratch` same idea for the classification tail.
-    let mut exec_slot = Exec::default();
-    let mut exec_scratch = ExecScratch::default();
-    let mut match_scratch = MatchScratch::default();
-    while let Ok(event) = rx.recv() {
-      match event {
-        ProcEvent::Exec(pid) => {
-          if !read_exec_into(pid, &mut exec_slot, &mut exec_scratch) {
-            tracing::debug!("[Process Scanner] exec event: pid {pid} unreadable, skipping");
-            continue;
-          }
-          let exec = &exec_slot;
-          // Same pid, new image: the memoized AppId may be stale.
-          dispatch.drop_appid(pid);
-          // One generation for the whole classification: a refresh
-          // landing mid-probe can only swap in the next bundle, which
-          // this event simply won't see.
-          let bundle = dispatch.bundle();
-          let mut obs_open = false;
-          if let Some(hit) = dispatch.match_process(
-            exec,
-            &bundle,
-            &mut variant_bufs,
-            &mut reversed_path,
-            &mut obs_open,
-            &mut match_scratch,
-          ) {
-            // Coexistence parity with the polling path: ignored IDs never
-            // publish, even on the event-driven fast path.
-            if exec_hit_ignored(&dispatch.ignored_ids, &hit) {
-              tracing::debug!(
-                "[Process Scanner] exec event: pid {pid} ignored ({}), skipping",
-                hit.entry.id.as_ref() as &str
-              );
-              continue;
-            }
-            let game_pid = hit.pid;
-            tracing::debug!(
-              "[Process Scanner] exec event: pid {pid} matched {}",
-              hit.entry.name
-            );
-            dispatch
-              .detected_pids
-              .lock()
-              .unwrap_or_else(|e| e.into_inner())
-              .insert(game_pid);
-            // Mark the scan dirty: this publication bypasses the polling
-            // snapshot, so the next tick must emit its full table even if
-            // unchanged — otherwise a game that dies before any poll
-            // observes it would never emit its clear (see `scan_dirty`).
-            dispatch
-              .scan_dirty
-              .store(true, std::sync::atomic::Ordering::Release);
-            // Receiver gone means shutdown: end the thread, polling dies
-            // with the daemon anyway.
-            if should_exit_on_send_error(
-              &dispatch
-                .event_sender
-                .send(ProcessDetectedEvent::detected(hit)),
-            ) {
+  spawn_worker(
+    Arc::clone(&server.worker_handles),
+    "rsrpc-dispatch",
+    move || {
+      let mut variant_bufs: [String; 5] = Default::default();
+      let mut reversed_path = String::with_capacity(256);
+      // EXEC reuse buffers, owned by this loop: one `Exec` slot plus the
+      // read scratch, refilled per event instead of allocated per event.
+      // `match_scratch` same idea for the classification tail.
+      let mut exec_slot = Exec::default();
+      let mut exec_scratch = ExecScratch::default();
+      let mut match_scratch = MatchScratch::default();
+      loop {
+        // Exit at once when shutdown landed during the previous message
+        // handling: the bounded wait below would otherwise park up to a
+        // second needlessly.
+        if is_shutting_down(&dispatch.shutdown) {
+          break;
+        }
+        // Bounded wait: every expiry re-checks directed shutdown so the
+        // thread never blocks past it; a gone sender still ends the loop
+        // at once, exactly like the `while let` before.
+        let event = match rx.recv_timeout(DISPATCH_POLL_INTERVAL) {
+          Ok(event) => event,
+          Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            if is_shutting_down(&dispatch.shutdown) {
               break;
             }
+            continue;
           }
-        }
-        ProcEvent::Exit(pid) => {
-          // Only tracked games MAY wake the scan — decided in one place
-          // so the debounce is unit-testable (see below).
-          if dispatch.should_wake_on_exit(pid)
-            && let Some(thread) = dispatch
-              .scan_wake
-              .lock()
-              .unwrap_or_else(|e| e.into_inner())
-              .as_ref()
-          {
-            thread.unpark();
+          Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        match event {
+          ProcEvent::Exec(pid) => {
+            if !read_exec_into(pid, &mut exec_slot, &mut exec_scratch) {
+              tracing::debug!("[Process Scanner] exec event: pid {pid} unreadable, skipping");
+              continue;
+            }
+            let exec = &exec_slot;
+            // Same pid, new image: the memoized AppId may be stale.
+            dispatch.drop_appid(pid);
+            // One generation for the whole classification: a refresh
+            // landing mid-probe can only swap in the next bundle, which
+            // this event simply won't see.
+            let bundle = dispatch.bundle();
+            let mut obs_open = false;
+            if let Some(hit) = dispatch.match_process(
+              exec,
+              &bundle,
+              &mut variant_bufs,
+              &mut reversed_path,
+              &mut obs_open,
+              &mut match_scratch,
+            ) {
+              // Coexistence parity with the polling path: ignored IDs never
+              // publish, even on the event-driven fast path.
+              if exec_hit_ignored(&dispatch.ignored_ids, &hit) {
+                tracing::debug!(
+                  "[Process Scanner] exec event: pid {pid} ignored ({}), skipping",
+                  hit.entry.id.as_ref() as &str
+                );
+                continue;
+              }
+              let game_pid = hit.pid;
+              tracing::debug!(
+                "[Process Scanner] exec event: pid {pid} matched {}",
+                hit.entry.name
+              );
+              dispatch
+                .detected_pids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(game_pid);
+              // Mark the scan dirty: this publication bypasses the polling
+              // snapshot, so the next tick must emit its full table even if
+              // unchanged — otherwise a game that dies before any poll
+              // observes it would never emit its clear (see `scan_dirty`).
+              dispatch
+                .scan_dirty
+                .store(true, std::sync::atomic::Ordering::Release);
+              // Receiver gone means shutdown: end the thread, polling dies
+              // with the daemon anyway.
+              if should_exit_on_send_error(
+                &dispatch
+                  .event_sender
+                  .send(ProcessDetectedEvent::detected(hit)),
+              ) {
+                break;
+              }
+            }
+          }
+          ProcEvent::Exit(pid) => {
+            // Only tracked games MAY wake the scan — decided in one place
+            // so the debounce is unit-testable (see below).
+            if dispatch.should_wake_on_exit(pid)
+              && let Some(thread) = dispatch
+                .scan_wake
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+              thread.unpark();
+            }
           }
         }
       }
-    }
-  });
+    },
+  );
   // Best-effort watcher with periodic resubscribe: a failed self-test
   // (or a mid-run socket death) falls back to polling, but a transient
   // kernel stall must not pin polling until the next daemon restart —
   // delivery has been observed to resume on its own. First failure warns
   // (the documented sandbox diagnosis), later ones stay in debug so
   // genuinely unsupported systems do not log every 5 minutes forever.
-  // A sleeping retry never delays shutdown: process exit does not wait
-  // for this thread.
   let watcher_state = server.clone();
-  std::thread::spawn(move || {
-    let mut attempts = 0u32;
-    loop {
-      // Believed up while the blocking watch runs; a fast failure flips
-      // back before the retry sleep, so polling-only windows never back
-      // off (see `scan_cadence`).
-      watcher_state
-        .watcher_live
-        .store(true, std::sync::atomic::Ordering::Release);
-      match watch(&tx) {
-        // Receiver gone: daemon shutting down.
-        Ok(()) => {
-          watcher_state
-            .watcher_live
-            .store(false, std::sync::atomic::Ordering::Release);
+  spawn_worker(
+    Arc::clone(&server.worker_handles),
+    "rsrpc-watch",
+    move || {
+      // Register once: `shutdown` unparks this thread out of the retry
+      // park below, so teardown never waits out the five minutes.
+      track_shutdown_thread(&watcher_state.shutdown_wake);
+      let mut attempts = 0u32;
+      loop {
+        // Directed shutdown before blocking in `watch()`: with the flag
+        // set the call below returns at once (preset-stop fast path).
+        if is_shutting_down(&watcher_state.shutdown) {
           break;
         }
-        Err(err) => {
-          watcher_state
-            .watcher_live
-            .store(false, std::sync::atomic::Ordering::Release);
-          // Poll once now: the watcher just died, so the scan loop must
-          // not sit out its whole backoff on possibly stale state.
-          unpark_scan_wake(&watcher_state.scan_wake);
-          attempts = attempts.saturating_add(1);
-          if attempts == 1 {
-            tracing::warn!(
-              "[Process Scanner] proc-events unavailable ({err}), polling only; retrying"
-            );
-          } else {
-            tracing::debug!(
-              "[Process Scanner] proc-events still unavailable ({err}), polling only"
-            );
+        // Believed up while the blocking watch runs; a fast failure flips
+        // back before the retry sleep, so polling-only windows never back
+        // off (see `scan_cadence`).
+        watcher_state
+          .watcher_live
+          .store(true, std::sync::atomic::Ordering::Release);
+        match watch(&tx, &watcher_state.shutdown) {
+          // Receiver gone: daemon shutting down.
+          Ok(()) => {
+            watcher_state
+              .watcher_live
+              .store(false, std::sync::atomic::Ordering::Release);
+            break;
           }
-          std::thread::sleep(std::time::Duration::from_secs(5 * 60));
+          Err(err) => {
+            watcher_state
+              .watcher_live
+              .store(false, std::sync::atomic::Ordering::Release);
+            // Poll once now: the watcher just died, so the scan loop must
+            // not sit out its whole backoff on possibly stale state.
+            unpark_scan_wake(&watcher_state.scan_wake);
+            attempts = attempts.saturating_add(1);
+            if attempts == 1 {
+              tracing::warn!(
+                "[Process Scanner] proc-events unavailable ({err}), polling only; retrying"
+              );
+            } else {
+              tracing::debug!(
+                "[Process Scanner] proc-events still unavailable ({err}), polling only"
+              );
+            }
+            // Interruptible park (not `sleep`): the pre-park check exits
+            // at once when shutdown is already requested, otherwise the
+            // unpark bounds the five minutes and the loop-top check exits.
+            if is_shutting_down(&watcher_state.shutdown) {
+              break;
+            }
+            std::thread::park_timeout(std::time::Duration::from_secs(5 * 60));
+          }
         }
       }
-    }
-  });
+    },
+  );
   gauge
 }
 
@@ -462,7 +557,10 @@ impl Clone for ProcessServer {
       writer_lock: Arc::clone(&self.writer_lock),
       scanning: Arc::clone(&self.scanning),
       started: Arc::clone(&self.started),
+      shutdown: Arc::clone(&self.shutdown),
       scan_dirty: Arc::clone(&self.scan_dirty),
+      shutdown_wake: Arc::clone(&self.shutdown_wake),
+      worker_handles: Arc::clone(&self.worker_handles),
       event_sender: self.event_sender.clone(),
       event_listeners: Arc::clone(&self.event_listeners),
       refresh: self.refresh.clone(),
@@ -478,6 +576,30 @@ impl Clone for ProcessServer {
       #[cfg(not(target_os = "linux"))]
       sysinfo: Arc::clone(&self.sysinfo),
     }
+  }
+}
+
+/// Shared shutdown signaling without ownership: drop-guards and other
+/// non-owners stop the threads; joining stays with `join`. Holds no
+/// channel sender, so dropping it never keeps the event pump alive.
+#[derive(Clone)]
+pub struct ShutdownHandle {
+  shutdown: Arc<AtomicBool>,
+  wake: Arc<Mutex<Vec<std::thread::Thread>>>,
+  scan_wake: Arc<Mutex<Option<std::thread::Thread>>>,
+}
+
+impl ShutdownHandle {
+  /// Signal directed shutdown: parked threads are unparked; every loop
+  /// observes the flag on its next iteration. Idempotent.
+  pub fn signal(&self) {
+    self
+      .shutdown
+      .store(true, std::sync::atomic::Ordering::Release);
+    for thread in self.wake.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+      thread.unpark();
+    }
+    unpark_scan_wake(&self.scan_wake);
   }
 }
 
@@ -499,7 +621,10 @@ impl ProcessServer {
     let server = ProcessServer {
       scanning: Arc::new(AtomicBool::new(false)),
       started: Arc::new(AtomicBool::new(false)),
+      shutdown: Arc::new(AtomicBool::new(false)),
       scan_dirty: Arc::new(AtomicBool::new(false)),
+      shutdown_wake: Arc::new(Mutex::new(Vec::new())),
+      worker_handles: Arc::new(Mutex::new(Vec::new())),
       detectables: Arc::new(ArcSwap::new(bundle)),
       writer_lock: Arc::new(Mutex::new(())),
       event_sender,
@@ -766,110 +891,141 @@ impl ProcessServer {
         .db_url
         .clone()
         .expect("[bug] db_url checked above");
-      std::thread::spawn(move || {
-        // Seeded from the startup fetch when available: the first check
-        // is conditional like every other, instead of one guaranteed
-        // redundant full rebuild per daemon lifetime.
-        let mut etag = db_clone.refresh.etag.clone();
-        // Content hashes of the last built database: the raw hash guards
-        // against byte-identical bodies (no parse at all), the trimmed
-        // hash against volatile CDN bytes around identical games (parse,
-        // but no rebuild). Either way an unchanged hour costs ~nothing.
-        // Seeded from the startup fetch when available (see
-        // `initial_db_content_hash`): without a seed the first check
-        // always rebuilds once.
-        let mut content_hash: Option<u64> = db_clone.refresh.content_hash.map(|(raw, _)| raw);
-        let mut trimmed_hash: Option<u64> =
-          db_clone.refresh.content_hash.map(|(_, trimmed)| trimmed);
-        // Unlike the DB, exclusions are NOT fetched synchronously at
-        // startup (tiny payload, empty = current behavior), so prime them
-        // here instead of waiting an hour for the first set.
-        db_clone.refresh_exclusions();
-        loop {
-          std::thread::sleep(Duration::from_secs(3600));
+      spawn_worker(
+        Arc::clone(&db_clone.worker_handles),
+        "rsrpc-refresh",
+        move || {
+          // Seeded from the startup fetch when available: the first check
+          // is conditional like every other, instead of one guaranteed
+          // redundant full rebuild per daemon lifetime.
+          let mut etag = db_clone.refresh.etag.clone();
+          // Content hashes of the last built database: the raw hash guards
+          // against byte-identical bodies (no parse at all), the trimmed
+          // hash against volatile CDN bytes around identical games (parse,
+          // but no rebuild). Either way an unchanged hour costs ~nothing.
+          // Seeded from the startup fetch when available (see
+          // `initial_db_content_hash`): without a seed the first check
+          // always rebuilds once.
+          let mut content_hash: Option<u64> = db_clone.refresh.content_hash.map(|(raw, _)| raw);
+          let mut trimmed_hash: Option<u64> =
+            db_clone.refresh.content_hash.map(|(_, trimmed)| trimmed);
+          // Unlike the DB, exclusions are NOT fetched synchronously at
+          // startup (tiny payload, empty = current behavior), so prime them
+          // here instead of waiting an hour for the first set.
+          //
+          // Register before any blocking work: a shutdown landing during
+          // the prime fetch leaves an unpark permit, so the hourly park
+          // below returns at once instead of sleeping out the hour. A
+          // shutdown that lands before this thread even starts exits at
+          // the flag check without touching the network at all.
+          track_shutdown_thread(&db_clone.shutdown_wake);
+          if is_shutting_down(&db_clone.shutdown) {
+            return;
+          }
           db_clone.refresh_exclusions();
-          match fetch_detectable_etag(&db_url, etag.as_deref(), content_hash, trimmed_hash) {
-            Ok(FetchOutcome::Unchanged) => {
-              tracing::info!(
-                "[Process Scanner] DB check: unchanged (etag {})",
-                etag.as_deref().unwrap_or("none")
-              );
+          loop {
+            // Pre-park flag check plus the unpark permit: either one exits
+            // without waiting when shutdown is already requested.
+            if is_shutting_down(&db_clone.shutdown) {
+              break;
             }
-            Ok(FetchOutcome::SameContent {
-              etag: new_tag,
-              content_hash: new_hash,
-              trimmed_hash: new_trimmed,
-            }) => {
-              tracing::info!(
-                "[Process Scanner] DB check: same content, new tag (etag {} -> {})",
-                etag.as_deref().unwrap_or("none"),
-                new_tag.as_deref().unwrap_or("none")
-              );
-              etag = new_tag;
-              content_hash = Some(new_hash);
-              trimmed_hash = Some(new_trimmed);
+            // Hourly cadence as an interruptible park (not `sleep`): the
+            // shutdown unpark bounds the wait instead of the hour.
+            std::thread::park_timeout(Duration::from_secs(3600));
+            if is_shutting_down(&db_clone.shutdown) {
+              break;
             }
-            Ok(FetchOutcome::Updated {
-              etag: new_tag,
-              content_hash: new_hash,
-              trimmed_hash: new_trimmed,
-              detectable,
-            }) => {
-              tracing::info!(
-                "[Process Scanner] DB updated: {} entries (etag {} -> {})",
-                detectable.len(),
-                etag.as_deref().unwrap_or("none"),
-                new_tag.as_deref().unwrap_or("none")
-              );
-              // Commit validators only after the bundle is validated and
-              // installed: a refused swap must not teach the next request
-              // that never-installed data is current.
-              if db_clone.update_main_detectables(detectable) {
+            db_clone.refresh_exclusions();
+            match fetch_detectable_etag(&db_url, etag.as_deref(), content_hash, trimmed_hash) {
+              Ok(FetchOutcome::Unchanged) => {
+                tracing::info!(
+                  "[Process Scanner] DB check: unchanged (etag {})",
+                  etag.as_deref().unwrap_or("none")
+                );
+              }
+              Ok(FetchOutcome::SameContent {
+                etag: new_tag,
+                content_hash: new_hash,
+                trimmed_hash: new_trimmed,
+              }) => {
+                tracing::info!(
+                  "[Process Scanner] DB check: same content, new tag (etag {} -> {})",
+                  etag.as_deref().unwrap_or("none"),
+                  new_tag.as_deref().unwrap_or("none")
+                );
                 etag = new_tag;
                 content_hash = Some(new_hash);
                 trimmed_hash = Some(new_trimmed);
-                // The pre-swap generation is typically still pinned by an
-                // in-flight tick at swap time, so the trim inside
-                // `update_main_detectables` cannot release it. Trim once
-                // more past any tick: production measurement showed the
-                // second trim recovering ~30MB the first could not.
-                // Delays the next refresh by one tick length; negligible
-                // on the hourly cadence.
-                std::thread::sleep(Duration::from_secs(60));
-                release_parse_arenas();
-                match allocator_numbers() {
-                  Some((live, free)) => tracing::info!(
-                    "[Process Scanner] post-retrim rss={:.1}MB (alloc live={:.1}MB free={:.1}MB)",
-                    rsrpc_telemetry::rss_bytes().unwrap_or(0) as f64 / 1_048_576.0,
-                    live as f64 / 1_048_576.0,
-                    free as f64 / 1_048_576.0
-                  ),
-                  None => {
-                    if let Some(rss) = rsrpc_telemetry::rss_bytes() {
-                      tracing::info!(
-                        "[Process Scanner] post-retrim rss={:.1}MB",
-                        rss as f64 / 1_048_576.0
-                      );
+              }
+              Ok(FetchOutcome::Updated {
+                etag: new_tag,
+                content_hash: new_hash,
+                trimmed_hash: new_trimmed,
+                detectable,
+              }) => {
+                tracing::info!(
+                  "[Process Scanner] DB updated: {} entries (etag {} -> {})",
+                  detectable.len(),
+                  etag.as_deref().unwrap_or("none"),
+                  new_tag.as_deref().unwrap_or("none")
+                );
+                // Commit validators only after the bundle is validated and
+                // installed: a refused swap must not teach the next request
+                // that never-installed data is current.
+                if db_clone.update_main_detectables(detectable) {
+                  etag = new_tag;
+                  content_hash = Some(new_hash);
+                  trimmed_hash = Some(new_trimmed);
+                  // The pre-swap generation is typically still pinned by an
+                  // in-flight tick at swap time, so the trim inside
+                  // `update_main_detectables` cannot release it. Trim once
+                  // more past any tick: production measurement showed the
+                  // second trim recovering ~30MB the first could not.
+                  // Delays the next refresh by one tick length; negligible
+                  // on the hourly cadence.
+                  if is_shutting_down(&db_clone.shutdown) {
+                    break;
+                  }
+                  std::thread::park_timeout(Duration::from_secs(60));
+                  if is_shutting_down(&db_clone.shutdown) {
+                    break;
+                  }
+                  release_parse_arenas();
+                  match allocator_numbers() {
+                    Some((live, free)) => tracing::info!(
+                      "[Process Scanner] post-retrim rss={:.1}MB (alloc live={:.1}MB free={:.1}MB)",
+                      rsrpc_telemetry::rss_bytes().unwrap_or(0) as f64 / 1_048_576.0,
+                      live as f64 / 1_048_576.0,
+                      free as f64 / 1_048_576.0
+                    ),
+                    None => {
+                      if let Some(rss) = rsrpc_telemetry::rss_bytes() {
+                        tracing::info!(
+                          "[Process Scanner] post-retrim rss={:.1}MB",
+                          rss as f64 / 1_048_576.0
+                        );
+                      }
                     }
                   }
                 }
               }
-            }
-            Err(err) => {
-              tracing::warn!(
-                "[Process Scanner] Error updating detectable database, retrying in 1h: {}",
-                err
-              );
+              Err(err) => {
+                tracing::warn!(
+                  "[Process Scanner] Error updating detectable database, retrying in 1h: {}",
+                  err
+                );
+              }
             }
           }
-        }
-      });
+        },
+      );
     }
 
-    std::thread::spawn(move || {
+    spawn_worker(Arc::clone(&clone.worker_handles), "rsrpc-scan", move || {
       // Register for early wakeups: the proc-events watcher unparks us
       // the moment a tracked game exits (Linux only; elsewhere None and
-      // the cadence below is a plain sleep).
+      // the cadence below is a plain sleep). `shutdown` unparks this
+      // same slot, so teardown never waits out the cadence either.
       *clone.scan_wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current());
       // Idle backoff state: consecutive ticks with no games detected.
       let mut idle_ticks: u32 = 0;
@@ -896,6 +1052,12 @@ impl ProcessServer {
       let mut match_scratch = MatchScratch::default();
       // Run the process scan repeatedly (base cadence, stretched while idle)
       loop {
+        // Directed shutdown: the unpark below only shortens the cadence
+        // wait; the flag is the actual exit (checked here and after the
+        // wait, since EXIT wakes share the same unpark).
+        if is_shutting_down(&clone.shutdown) {
+          break;
+        }
         *clone.last_scan.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
         let mut detected = match clone.scan_for_processes(
           &mut tick_processes,
@@ -1048,7 +1210,13 @@ impl ProcessServer {
             .load(std::sync::atomic::Ordering::Acquire),
         );
         let wait_start = std::time::Instant::now();
+        if is_shutting_down(&clone.shutdown) {
+          break;
+        }
         wait_scan(cadence);
+        if is_shutting_down(&clone.shutdown) {
+          break;
+        }
         if wait_start.elapsed() < cadence.mul_f32(0.9) {
           idle_ticks = 0;
         }
@@ -1068,6 +1236,54 @@ impl ProcessServer {
       tracing::info!(
         "[Process Scanner] proc-events watcher disabled by configuration, polling only"
       );
+    }
+  }
+
+  /// A signaling-only view of this server's shutdown state, for owners
+  /// that must stop threads without joining (async drop guards): holds
+  /// no channel sender, so it can never keep the event pump alive.
+  pub fn shutdown_handle(&self) -> ShutdownHandle {
+    ShutdownHandle {
+      shutdown: Arc::clone(&self.shutdown),
+      wake: Arc::clone(&self.shutdown_wake),
+      scan_wake: Arc::clone(&self.scan_wake),
+    }
+  }
+
+  /// Signal directed shutdown: every thread spawned by `start`
+  /// observes the flag on its next iteration and exits; parked threads
+  /// are unparked so no sleep runs its full duration. Idempotent:
+  /// repeated calls only re-unpark. Pair with `join` to wait out the
+  /// exits. (The CLI relies on process exit instead and never calls
+  /// either: unchanged behavior there.)
+  ///
+  /// # Startup race
+  ///
+  /// Every worker registers and checks the flag first thing (refresh
+  /// exits before any fetch; scan and retry exit at their loop-top
+  /// checks; dispatch exits at its first receive timeout), so even a
+  /// shutdown that lands mid-startup parks nothing: the unpark permit
+  /// only shortens waits already in flight.
+  pub fn shutdown(&self) {
+    self.shutdown_handle().signal();
+  }
+
+  /// Block until every thread spawned by `start` has exited. Call after
+  /// `shutdown`: joining without it waits out sleeps (refresh hours,
+  /// watcher retry minutes). Takes the handle registry, so a second
+  /// `join` returns at once. A panicked worker logs and continues
+  /// joining the rest instead of abandoning them.
+  pub fn join(&self) {
+    let handles: Vec<std::thread::JoinHandle<()>> = std::mem::take(
+      &mut *self
+        .worker_handles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()),
+    );
+    for handle in handles {
+      if handle.join().is_err() {
+        tracing::warn!("[Process Scanner] worker thread panicked during join");
+      }
     }
   }
 
@@ -1473,5 +1689,117 @@ mod tests {
       "no override may be lost to a concurrent refresh"
     );
     assert_eq!(server.bundle().list.len(), 300, "refresh result must stick");
+  }
+
+  /// `shutdown()` before `start()` is safe; `join()` with no threads
+  /// returns at once.
+  #[test]
+  fn shutdown_before_start_is_safe() {
+    let server = fixture_server();
+    server.shutdown();
+    server.join();
+    server.shutdown();
+    server.join();
+  }
+
+  /// Join a live scan thread through a timeout channel: `shutdown()` must
+  /// unpark it and `join()` must return promptly (pre-shutdown-lifecycle
+  /// this hung: the parked loop had no directed exit).
+  #[test]
+  fn shutdown_joins_scan_thread_promptly() {
+    let mut server = fixture_server();
+    server.set_proc_events(false);
+    let watch_slot = Arc::new(Mutex::new(rsrpc_telemetry::QueueGauge::new()));
+    server.start(Duration::from_millis(50), &watch_slot);
+    // A few ticks so the thread is parked in its cadence wait, not still
+    // starting up, when shutdown lands.
+    std::thread::sleep(Duration::from_millis(200));
+    server.shutdown();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      server.join();
+      // Structural proof alongside the prompt return below: `join`
+      // drains the handle registry, so no worker is merely detached.
+      let drained = server
+        .worker_handles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty();
+      let _ = done_tx.send(drained);
+    });
+    assert!(
+      done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("join must return promptly after shutdown"),
+      "handle registry must drain on join"
+    );
+  }
+
+  /// The hourly refresh sleep is interruptible: an enabled refresh whose
+  /// URL refuses fast must still join promptly instead of sleeping out
+  /// the hour. `127.0.0.1:9` is the discard port (refused, loopback-only,
+  /// no external network); exclusions stay unset so only the DB fetch
+  /// runs before the sleep.
+  #[test]
+  fn refresh_sleep_is_interrupted_by_shutdown() {
+    let mut server = fixture_server();
+    server.set_proc_events(false);
+    server.refresh.enable = true;
+    server.refresh.db_url = Some("http://127.0.0.1:9/unreachable".to_string());
+    let watch_slot = Arc::new(Mutex::new(rsrpc_telemetry::QueueGauge::new()));
+    server.start(Duration::from_millis(50), &watch_slot);
+    // Let the refresh thread fail its first fetch and enter the hourly
+    // sleep; the scan thread ticks alongside, both must stop below.
+    std::thread::sleep(Duration::from_millis(500));
+    server.shutdown();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+      server.join();
+      let drained = server
+        .worker_handles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty();
+      let _ = done_tx.send(drained);
+    });
+    assert!(
+      done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("refresh sleep must not outlive shutdown"),
+      "handle registry must drain on join"
+    );
+  }
+
+  /// Spawned workers carry `rsrpc-*` thread names (Linux comm): join
+  /// accounting and teardown tests observe threads by name. Sibling
+  /// lifecycle tests may add their own `rsrpc-*` threads, so this
+  /// asserts presence only — absence is asserted per-server via the
+  /// drained handle registry (join tests above) and per-daemon via
+  /// task enumeration (core daemon tests).
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn worker_threads_carry_names() {
+    fn has_prefix(prefix: &str) -> bool {
+      let mut found = false;
+      if let Ok(tasks) = std::fs::read_dir("/proc/self/task") {
+        for task in tasks.flatten() {
+          if let Ok(comm) = std::fs::read_to_string(task.path().join("comm"))
+            && comm.trim().starts_with(prefix)
+          {
+            found = true;
+            break;
+          }
+        }
+      }
+      found
+    }
+    let mut server = fixture_server();
+    server.set_proc_events(false);
+    let watch_slot = Arc::new(Mutex::new(rsrpc_telemetry::QueueGauge::new()));
+    server.start(Duration::from_millis(50), &watch_slot);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(has_prefix("rsrpc-scan"), "scan thread must be named");
+    server.shutdown();
+    server.join();
   }
 }

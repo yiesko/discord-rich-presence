@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use rsrpc_bridge::{Bridge, BridgeConfig, BridgeInputs, ProcInput, ScannedGame};
 use rsrpc_detect::db::DetectableActivity;
 use rsrpc_detect::refresh::RefreshConfig;
-use rsrpc_detect::server::ProcessServer;
+use rsrpc_detect::server::{ProcessServer, ShutdownHandle};
 use rsrpc_detect::types::{ProcessCallback, ProcessEventListeners, ProcessScanState};
 use rsrpc_protocol::error::{Result, RsrpcError};
 use rsrpc_telemetry::QueueGauge;
@@ -173,13 +173,15 @@ impl Daemon {
   /// transports and the bridge on the caller's Tokio runtime, torn down
   /// in reverse order afterwards.
   ///
-  /// Must be called within a Tokio runtime. The scanner threads (scan
-  /// loop, hourly refresh, proc-events watcher) live for the process
-  /// lifetime by design: teardown stops the bridge and both transports,
-  /// and the scan/refresh loops exit once their channels close, but the
-  /// underlying threads are not joined — for the CLI this ends at
-  /// process exit, and library callers should treat one `run_until` per
-  /// process as the supported shape.
+  /// Must be called within a Tokio runtime. Teardown is total: after
+  /// the bridge and both transports stop, the scanner is shut down and
+  /// joined (directed shutdown — no orphaned scan/refresh/watcher
+  /// threads), then the server handle is dropped so the event pump's
+  /// channel closes, and the pump itself is joined. When `run_until`
+  /// returns, no rsRPC thread is still running: the CLI relies on this
+  /// implicitly at process exit, and library callers may run another
+  /// daemon afterwards. Bind failures tear the scanner down the same
+  /// way: no path after `start_scanner` leaks threads.
   ///
   /// # Errors
   ///
@@ -201,8 +203,34 @@ impl Daemon {
     // Scanner (sync threads, as today): its events cross into async via
     // a pump thread onto a bounded channel. Started first so game STARTs
     // during transport binds are still observed. The handle lives in this
-    // frame until shutdown documents the ownership.
-    let (_scanner, proc_rx, proc_tx) = self.start_scanner(db, staged).await?;
+    // frame until shutdown, when it is shut down, joined and dropped.
+    let (scanner, proc_rx, proc_tx, pump) = self.start_scanner(db, staged).await?;
+    // Abandonment guard: dropping this future (`select!`/timeout/abort)
+    // still signals scanner shutdown; normal completion disarms it and
+    // joins through `teardown_scanner` below. Every path — bind
+    // failures included — tears the scanner down: `serve` owns the bind
+    // flow, teardown always runs here.
+    let mut cancel_guard = CancelGuard::disarmed();
+    if let Some(server) = scanner.as_ref() {
+      cancel_guard.arm(server);
+    }
+    let result = self.serve(proc_rx, proc_tx, user, shutdown).await;
+    Self::teardown_scanner(scanner, pump).await;
+    cancel_guard.disarm();
+    result
+  }
+
+  /// Bind transports + bridge, serve until `shutdown`, stop the async
+  /// legs. Partial binds clean themselves on drop (transports close
+  /// sockets and abort tasks); scanner teardown is the caller's job so
+  /// it runs on success AND error.
+  async fn serve(
+    &self,
+    proc_rx: mpsc::Receiver<ProcInput>,
+    proc_tx: Option<mpsc::Sender<ProcInput>>,
+    user: Arc<Mutex<RpcUser>>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+  ) -> Result<()> {
     let mut ipc_transport = None;
     let mut game_transport = None;
 
@@ -263,9 +291,9 @@ impl Daemon {
     shutdown.await;
     tracing::info!("[daemon] Shutting down...");
 
-    // Reverse-order teardown: consumers first, producers last. Dropping
-    // the bridge ends its pumps; transports close their listeners; the
-    // scanner pump thread exits once its tokio sender fails.
+    // Reverse-order teardown of the async legs: consumers first,
+    // producers last. Dropping the bridge ends its pumps; transports
+    // close their listeners. Scanner teardown is the caller's job.
     bridge.shutdown().await;
     if let Some(transport) = game_transport {
       transport.shutdown().await;
@@ -276,10 +304,37 @@ impl Daemon {
     Ok(())
   }
 
-  /// Build and start the sync scanner, returning its handle (held by the
-  /// caller for the daemon lifetime), its async event stream, and a
-  /// sender clone for census queue-depth sampling (`None` when scanning
-  /// is off).
+  /// Stop scanner threads + pump on every `run_until` exit path
+  /// (success and bind failures): signal inline, join off the async
+  /// worker — blocking joins must never park a Tokio worker. Dropping
+  /// the server closes the pump channel; the pump drains right after.
+  async fn teardown_scanner(
+    scanner: Option<ProcessServer>,
+    pump: Option<std::thread::JoinHandle<()>>,
+  ) {
+    if let Some(scanner) = scanner {
+      scanner.shutdown();
+      let teardown = tokio::task::spawn_blocking(move || {
+        scanner.join();
+        drop(scanner);
+        if let Some(pump) = pump
+          && pump.join().is_err()
+        {
+          tracing::warn!("[daemon] scanner pump thread panicked during join");
+        }
+      });
+      if teardown.await.is_err() {
+        tracing::warn!("[daemon] scanner teardown task panicked during join");
+      }
+    }
+  }
+
+  /// Build and start the sync scanner, returning its handle (shut down,
+  /// joined and dropped by the caller during teardown), its async event
+  /// stream, a sender clone for census queue-depth sampling (`None` when
+  /// scanning is off), and the pump thread handle (joined after the
+  /// server handle drops and closes the event channel; `None` when
+  /// scanning is off).
   ///
   /// The automaton build runs in `spawn_blocking` (seconds of CPU);
   /// the pump thread translates scanner events and exits when the bridge
@@ -297,6 +352,7 @@ impl Daemon {
     Option<ProcessServer>,
     mpsc::Receiver<ProcInput>,
     Option<mpsc::Sender<ProcInput>>,
+    Option<std::thread::JoinHandle<()>>,
   )> {
     if self.config.enable_process_scanner && self.config.scan_interval_secs == 0 {
       return Err(RsrpcError::InvalidConfig(
@@ -308,7 +364,7 @@ impl Daemon {
       // No scanning: pre-closed stream, the bridge pump exits at once.
       // (The legacy no-scan path never built automata either.)
       drop(proc_tx);
-      return Ok((None, proc_rx, None));
+      return Ok((None, proc_rx, None, None));
     }
     let (scan_tx, scan_rx) = QueueGauge::pair();
     let refresh = RefreshConfig {
@@ -341,27 +397,64 @@ impl Daemon {
     // Pump: scanner events into the async world. `blocking_send` parks
     // this thread (not a worker) under backpressure, like the legacy
     // bounded queue; a closed channel means shutdown — exit quietly.
+    // The handle is joined during teardown, after the server handle
+    // drops and closes the event channel.
     let census_tx = proc_tx.clone();
-    std::thread::spawn(move || {
-      while let Ok(event) = scan_rx.recv() {
-        let input = match event {
-          rsrpc_detect::ProcessDetectedEvent::Detected(hit) => ProcInput::Detected(ScannedGame {
-            id: rsrpc_types::AppId::from(&*hit.entry.id),
-            name: hit.entry.name.to_string(),
-            pid: hit.pid,
-            start: hit.start,
-          }),
-          rsrpc_detect::ProcessDetectedEvent::Cleared => ProcInput::Cleared,
-          rsrpc_detect::ProcessDetectedEvent::Removed { id, pid } => {
-            ProcInput::Removed(rsrpc_types::AppId::from(&*id), pid)
+    let pump = std::thread::Builder::new()
+      .name("rsrpc-pump".to_string())
+      .spawn(move || {
+        while let Ok(event) = scan_rx.recv() {
+          let input = match event {
+            rsrpc_detect::ProcessDetectedEvent::Detected(hit) => ProcInput::Detected(ScannedGame {
+              id: rsrpc_types::AppId::from(&*hit.entry.id),
+              name: hit.entry.name.to_string(),
+              pid: hit.pid,
+              start: hit.start,
+            }),
+            rsrpc_detect::ProcessDetectedEvent::Cleared => ProcInput::Cleared,
+            rsrpc_detect::ProcessDetectedEvent::Removed { id, pid } => {
+              ProcInput::Removed(rsrpc_types::AppId::from(&*id), pid)
+            }
+          };
+          if proc_tx.blocking_send(input).is_err() {
+            break;
           }
-        };
-        if proc_tx.blocking_send(input).is_err() {
-          break;
         }
-      }
-    });
-    Ok((Some(server), proc_rx, Some(census_tx)))
+      })
+      .expect("scanner pump spawn failed");
+    Ok((Some(server), proc_rx, Some(census_tx), Some(pump)))
+  }
+}
+
+/// Signals scanner shutdown if `run_until`'s future is dropped before
+/// teardown (caller abandonment via `select!`/timeout/abort): threads
+/// exit on their own within one poll interval instead of leaking.
+/// Holds only the signaling handle (no channel sender), so it can never
+/// keep the event pump alive itself. Disarmed on the normal path before
+/// returning.
+struct CancelGuard {
+  handle: Option<ShutdownHandle>,
+}
+
+impl CancelGuard {
+  fn disarmed() -> Self {
+    Self { handle: None }
+  }
+
+  fn arm(&mut self, server: &ProcessServer) {
+    self.handle = Some(server.shutdown_handle());
+  }
+
+  fn disarm(&mut self) {
+    self.handle = None;
+  }
+}
+
+impl Drop for CancelGuard {
+  fn drop(&mut self) {
+    if let Some(handle) = self.handle.take() {
+      handle.signal();
+    }
   }
 }
 
