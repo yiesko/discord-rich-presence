@@ -1019,11 +1019,11 @@ dependencies = [
  "libc",
  "rmp-serde",
  "rsrpc-protocol",
- "rsrpc-state",
  "rsrpc-telemetry",
  "rsrpc-types",
  "rsrpc-ws",
  "rustc-hash",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
@@ -1115,14 +1115,6 @@ dependencies = [
  "serde_with",
  "thiserror",
  "tungstenite",
-]
-
-[[package]]
-name = "rsrpc-state"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

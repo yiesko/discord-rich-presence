@@ -16,13 +16,13 @@ workspace = true
 [dependencies]
 rsrpc-types = { path = "../rsrpc-types" }
 rsrpc-protocol = { path = "../rsrpc-protocol" }
-rsrpc-state = { path = "../rsrpc-state" }
 rsrpc-telemetry = { path = "../rsrpc-telemetry" }
 rsrpc-ws = { path = "../rsrpc-ws" }
 tokio = { workspace = true, features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
 tokio-util = { version = "0.7", default-features = false }
 bytes.workspace = true
 tungstenite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 rmp-serde.workspace = true
 tracing.workspace = true

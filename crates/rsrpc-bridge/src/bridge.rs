@@ -167,7 +167,7 @@ impl Bridge {
     .await?;
 
     let state_path = config.state_dir.as_deref().and_then(|dir| {
-      let path = rsrpc_state::select_slot(dir, rsrpc_state::now_secs());
+      let path = crate::state::select_slot(dir, crate::state::now_secs());
       match &path {
         Some(path) => tracing::info!("[bridge] State snapshot: {}", path.display()),
         None => tracing::warn!("[bridge] State dir set but no free state slot"),
@@ -860,6 +860,55 @@ mod tests {
       .insert(7, BridgeProtocol::Json);
     assert!(shared.is_registered(7));
     assert!(!shared.is_registered(8));
+  }
+
+  /// Publishing past the replay bound keeps the cache within it: steady
+  /// memory no matter how many distinct publishers arrive (same
+  /// regression net as `prune_keeps_cache_within_bound`, through the
+  /// real broadcast path).
+  #[test]
+  fn broadcast_keeps_replay_cache_bounded() {
+    let shared = Shared {
+      json_clients: Mutex::new(FxHashMap::default()),
+      msgpack_clients: Mutex::new(FxHashMap::default()),
+      consumer_protocol: Mutex::new(FxHashMap::default()),
+      cache: Mutex::new(HashMap::new()),
+      activity_seq: Mutex::new(0),
+      last_process: Mutex::new(HashMap::new()),
+      handoff: Mutex::new(HandoffState::default()),
+      recent: Mutex::new(RecentActivities::default()),
+      user: Arc::new(Mutex::new(RpcUser::default())),
+      dirty: AtomicBool::new(false),
+      dropped_broadcasts: AtomicU64::new(0),
+      app_version: String::new(),
+      state_path: None,
+      json_port: 0,
+      msgpack_port: 0,
+      ws_port: None,
+      ipc_path: None,
+      ipc_tx: None,
+      game_tx: None,
+      proc_tx: None,
+      game_clients: None,
+      allowed_origins: Vec::new(),
+    };
+    for i in 0..(crate::config::MAX_CACHED_ACTIVITIES * 2) {
+      let mut cmd: ActivityCmd = serde_json::from_value(serde_json::json!({
+        "cmd": "SET_ACTIVITY",
+        "application_id": format!("app-{i}"),
+        "args": {"pid": i, "activity": {"name": "G", "type": 0}},
+        "nonce": "n",
+      }))
+      .expect("test command builds");
+      let payload =
+        rsrpc_protocol::commands::cached_activity(&mut cmd, None).expect("fixed shapes build");
+      shared.broadcast_activity(payload, SocketId::from(i.to_string()));
+    }
+    let len = shared.cache.lock().unwrap_or_else(|e| e.into_inner()).len();
+    assert!(
+      len <= crate::config::MAX_CACHED_ACTIVITIES,
+      "cache must stay bounded, got {len}"
+    );
   }
 
   /// Session lines fire only on empty<->non-empty edges; slot churn stays quiet.
