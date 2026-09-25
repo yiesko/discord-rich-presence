@@ -2,7 +2,7 @@
 //!
 //! [`RPCConfig`] is a plain struct (all fields `pub`, `Default`
 //! implemented); [`RPCConfigBuilder`] covers programmatic construction
-//! without a 15-field literal.
+//! without a 19-field literal.
 
 /// Daemon configuration. Field docs carry the CLI flag / env mapping.
 #[derive(Clone, Debug)]
@@ -45,6 +45,9 @@ pub struct RPCConfig {
   /// Version stamped into state snapshots (the daemon version: the CLI
   /// sets this to its own; the default is this crate's version).
   pub app_version: String,
+  /// Write presence snapshots to `<tmpdir>/rsrpc-state-{0..9}` for
+  /// external tooling (`--state-file` / `RSRPC_STATE_FILE`).
+  pub state_file: bool,
 }
 
 impl Default for RPCConfig {
@@ -69,6 +72,7 @@ impl Default for RPCConfig {
       ignored_ids: Vec::new(),
       exclusions_url: None,
       app_version: env!("CARGO_PKG_VERSION").to_string(),
+      state_file: false,
     }
   }
 }
@@ -121,7 +125,8 @@ impl RPCConfigBuilder {
     (initial_db_content_hash, Option<(u64, u64)>),
     (ignored_ids, Vec<String>),
     (exclusions_url, Option<String>),
-    (app_version, String)
+    (app_version, String),
+    (state_file, bool)
   );
 
   /// Finish building.
@@ -152,6 +157,7 @@ mod tests {
     assert_eq!(config.scan_interval_secs, 5);
     assert!(!config.enable_db_update);
     assert!(config.ignored_ids.is_empty());
+    assert!(!config.state_file);
   }
 
   /// The builder reaches every field (no silent fallback).
@@ -176,6 +182,7 @@ mod tests {
       .ignored_ids(vec!["7".to_string()])
       .exclusions_url(Some("https://example.invalid/ex".to_string()))
       .app_version("test".to_string())
+      .state_file(true)
       .build();
     assert!(!config.enable_process_scanner);
     assert_eq!(config.port, 1);
@@ -183,5 +190,6 @@ mod tests {
     assert_eq!(config.initial_db_content_hash, Some((1, 2)));
     assert_eq!(config.ignored_ids, vec!["7".to_string()]);
     assert_eq!(config.app_version, "test");
+    assert!(config.state_file);
   }
 }

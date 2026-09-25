@@ -4,10 +4,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-/// Optional presence snapshot for external tooling, enabled by setting
-/// `RSRPC_STATE_FILE` (any value, like arRPC). Slots live beside arRPC's
-/// own files but use an `rsrpc-` prefix so both daemons coexist:
-/// `<tmpdir>/rsrpc-state-{0..9}`.
+/// Optional presence snapshot for external tooling, enabled with
+/// `--state-file` / `RSRPC_STATE_FILE` (any boolish value, e.g. `1`).
+/// Slots live beside arRPC's own files but use an `rsrpc-` prefix so
+/// both daemons coexist: `<tmpdir>/rsrpc-state-{0..9}`.
 pub const STATE_FILE_PREFIX: &str = "rsrpc-state-";
 /// How many slots to scan before giving up (arRPC uses 10).
 pub const MAX_STATE_SLOTS: u8 = 10;

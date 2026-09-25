@@ -223,19 +223,11 @@ impl Daemon {
 
     let (ipc_transport, ipc_rx) = split_option(ipc_transport);
     let (game_transport, game_rx) = split_option(game_transport);
-    let bridge_config = BridgeConfig::new(
-      self.config.port,
-      self.config.bridge_port_end,
-      self.config.msgpack_port,
-      self.config.msgpack_port.saturating_add(10),
-    )
-    .app_version(self.config.app_version.clone())
-    .ws_port(
+    let bridge_config = bridge_config_for(
+      &self.config,
       game_transport
         .as_ref()
         .map(|transport| transport.bound_port()),
-    )
-    .ipc_path(
       ipc_transport
         .as_ref()
         .map(|transport| transport.socket_path().to_string()),
@@ -382,6 +374,30 @@ fn ws_transport_config(config: &RPCConfig) -> WsTransportConfig {
     .secondary_events(config.enable_secondary_events)
 }
 
+/// Bridge config from the daemon config: port ranges, version stamp and
+/// the bound transport metadata; `--state-file` additionally points the
+/// bridge at the temp-dir snapshot slots (`<tmpdir>/rsrpc-state-{0..9}`).
+fn bridge_config_for(
+  config: &RPCConfig,
+  ws_port: Option<u16>,
+  ipc_path: Option<String>,
+) -> BridgeConfig {
+  let bridge_config = BridgeConfig::new(
+    config.port,
+    config.bridge_port_end,
+    config.msgpack_port,
+    config.msgpack_port.saturating_add(10),
+  )
+  .app_version(config.app_version.clone())
+  .ws_port(ws_port)
+  .ipc_path(ipc_path);
+  if config.state_file {
+    bridge_config.state_dir(std::env::temp_dir())
+  } else {
+    bridge_config
+  }
+}
+
 /// Split an optional bound transport into handle + receiver, or a
 /// pre-closed receiver when the leg is disabled (its pump exits at once).
 fn split_option<T>(
@@ -423,5 +439,23 @@ mod tests {
     let cfg = ws_transport_config(&no_ws);
     assert!(!cfg.set_activity);
     assert!(cfg.secondary_events);
+  }
+
+  /// `--state-file` routes bridge snapshots to the temp-dir slots; the
+  /// default keeps snapshots off so ordinary runs never write them.
+  #[test]
+  fn state_file_routes_bridge_snapshots_to_tmpdir() {
+    let off = bridge_config_for(&RPCConfig::default(), None, None);
+    assert!(off.state_dir.is_none());
+
+    let on = bridge_config_for(
+      &RPCConfig {
+        state_file: true,
+        ..RPCConfig::default()
+      },
+      None,
+      None,
+    );
+    assert_eq!(on.state_dir, Some(std::env::temp_dir()));
   }
 }

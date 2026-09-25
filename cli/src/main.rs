@@ -82,6 +82,14 @@ struct Args {
   /// `--list-detected` honors this too (shows what running would publish).
   #[arg(long, env = "RSRPC_IGNORE_IDS")]
   ignore_ids: Option<String>,
+  /// Write presence snapshots to `<tmpdir>/rsrpc-state-{0..9}` for
+  /// external tooling (arRPC layout, `rsrpc-` prefix); off unless set.
+  #[arg(
+    long,
+    env = "RSRPC_STATE_FILE",
+    value_parser = clap::builder::BoolishValueParser::new()
+  )]
+  state_file: bool,
   /// Run a single process scan, print detected games and exit (staged
   /// overrides and ignore-list apply, like the daemon would publish)
   #[arg(
@@ -300,6 +308,7 @@ fn build_daemon_config(args: &Args) -> RPCConfig {
     .ignored_ids(parse_ignore_ids(args.ignore_ids.as_deref()))
     .exclusions_url(effective_exclusions_url.filter(|url| !url.trim().is_empty()))
     .app_version(env!("CARGO_PKG_VERSION").to_string())
+    .state_file(args.state_file)
     .build()
 }
 
@@ -494,4 +503,19 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
   println!("Shutting down...");
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// `--state-file` (env `RSRPC_STATE_FILE`) enables presence snapshots;
+  /// the default keeps them off.
+  #[test]
+  fn state_file_flag_parses() {
+    let on = Args::try_parse_from(["rsrpc-cli", "--state-file"]).expect("--state-file parses");
+    assert!(on.state_file);
+    let off = Args::try_parse_from(["rsrpc-cli"]).expect("defaults parse");
+    assert!(!off.state_file);
+  }
 }
