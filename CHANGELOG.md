@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alongside `consumer` (fan-out and pruning), `router` (activity
   decisions), `replay` (cache and ghost-reap pid resolution), `snapshot`
   (persistence) and `control` (`SET_USER`/`RESET_USER`). `Shared` fields
-  are crate-visible for the new units; no API or protocol changes.
+  are crate-visible for the new units; wire protocols unchanged. One
+  breaking change for library callers: `rsrpc_proc_events::watch` now
+  takes a shutdown flag (`watch(events, stop)`), so the watcher thread
+  joins on directed shutdown instead of blocking on netlink.
 
 ### Fixed
 - Scanner threads now belong to the daemon lifecycle: `ProcessServer`
