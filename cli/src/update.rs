@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 
 /// GitHub API endpoint for the newest stable release.
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/yiesko/rsRPC/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/yiesko/discord-rich-presence/releases/latest";
 /// Checksum manifest asset name inside a release.
 const CHECKSUMS_ASSET: &str = "SHA256SUMS.txt";
 /// Detached minisign signature of [`CHECKSUMS_ASSET`].

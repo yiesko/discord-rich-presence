@@ -7,7 +7,7 @@ authors = ["spikehd"]
 description = "Alternative Discord RPC server CLI: game detection with bundled database, IPC/WebSocket transports and bridge"
 license = "MIT"
 readme = "../README.md"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "rich-presence", "rpc", "bridge", "cli"]
 categories = ["command-line-utilities"]
 

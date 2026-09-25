@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "Modern async WebSocket server: bounded queues, keepalive, graceful shutdown"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["websocket", "server", "async"]
 categories = ["network-programming", "asynchronous"]
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=rsRPC - Discord Rich Presence bridge
-Documentation=https://github.com/yiesko/rsRPC
+Documentation=https://github.com/yiesko/discord-rich-presence
 # Works offline via the bundled database; network only refines it.
 After=network-online.target
 Wants=network-online.target

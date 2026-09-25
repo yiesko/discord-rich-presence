@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "arRPC-compatible activity bridge: fan-out, replay cache, handoff, debounced snapshots"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "rich-presence", "rpc"]
 categories = ["network-programming", "asynchronous"]
 

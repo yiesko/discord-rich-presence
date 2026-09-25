@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "Game detection: database, Aho-Corasick bundle, process scanner, hourly refresh"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "games", "detection"]
 categories = ["parser-implementations"]
 

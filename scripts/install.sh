@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # rsRPC one-liner installer (Linux, systemd user service).
 #
-#   curl -fsSL https://raw.githubusercontent.com/yiesko/rsRPC/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/yiesko/discord-rich-presence/main/scripts/install.sh | bash
 #
 # What it does: detects the arch, downloads the matching release binary
 # (+ unit file) for the newest tag, SHA256-verifies it (plus a minisign
@@ -21,7 +21,7 @@
 #   -h, --help       usage
 set -euo pipefail
 
-REPO="yiesko/rsRPC"
+REPO="yiesko/discord-rich-presence"
 APP="rsrpc-cli"
 # Release-signing pubkey (same key the binary itself embeds for OTA).
 PUBKEY="RWT97nYjybg6X/Q35LBD/thrjkAmYmEHbRm8TQjvpJeLO2kNONgb4ibw"

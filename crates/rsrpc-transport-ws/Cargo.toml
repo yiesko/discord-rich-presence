@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "Discord-facing game WebSocket transport over rsrpc-ws: validation, dispatch, bounded sink"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "rich-presence", "rpc", "websocket"]
 categories = ["network-programming", "asynchronous"]
 

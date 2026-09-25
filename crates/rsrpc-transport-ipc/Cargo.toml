@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "Discord IPC transport: framed protocol, Unix socket and Windows pipe servers with JoinSet lifecycle"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "rich-presence", "rpc", "ipc"]
 categories = ["network-programming", "asynchronous"]
 

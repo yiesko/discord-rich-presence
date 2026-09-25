@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "rsRPC wire protocol: errors, bridge payloads, reply builders, flood guard"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "rich-presence", "rpc"]
 categories = ["network-programming"]
 

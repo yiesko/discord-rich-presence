@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "Steam library provider: VDF parsing, install-dir index, refresh with mtime fingerprints"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["steam", "games", "vdf"]
 categories = ["parser-implementations"]
 

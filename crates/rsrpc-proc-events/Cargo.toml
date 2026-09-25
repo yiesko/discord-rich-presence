@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "Linux cn_proc netlink watcher: EXEC/EXIT lifecycle events with loss accounting"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["linux", "netlink", "process"]
 categories = ["os", "network-programming"]
 

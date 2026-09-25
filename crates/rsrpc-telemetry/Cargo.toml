@@ -6,7 +6,7 @@ rust-version = "1.95"
 authors = ["spikehd"]
 description = "rsRPC diagnostics: queue depth gauges, self-RSS, resource census rendering"
 license = "MIT"
-repository = "https://github.com/yiesko/rsRPC"
+repository = "https://github.com/yiesko/discord-rich-presence"
 keywords = ["discord", "metrics", "diagnostics"]
 categories = ["network-programming"]
 
