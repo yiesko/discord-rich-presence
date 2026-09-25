@@ -1,12 +1,12 @@
 [package]
 name = "rsrpc-ws"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.95"
-authors = ["spikehd"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "Modern async WebSocket server: bounded queues, keepalive, graceful shutdown"
-license = "MIT"
-repository = "https://github.com/yiesko/discord-rich-presence"
+license.workspace = true
+repository.workspace = true
 keywords = ["websocket", "server", "async"]
 categories = ["network-programming", "asynchronous"]
 
@@ -14,17 +14,17 @@ categories = ["network-programming", "asynchronous"]
 workspace = true
 
 [dependencies]
-tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
-tokio-tungstenite = "0.30"
-tungstenite = "0.30"
-bytes = "1.12"
-futures-util = "0.3"
-thiserror = "2"
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
 tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
-tokio = { version = "1.53", features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
-tokio-tungstenite = "0.30"
-tungstenite = "0.30"
-futures-util = "0.3"
-bytes = "1.12"
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "time", "macros", "sync"] }
+tokio-tungstenite.workspace = true
+tungstenite.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
