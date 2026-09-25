@@ -735,6 +735,13 @@ pub fn apply_pending_on_boot() {
 ///
 /// Returns the error when no previous image exists or the swap fails.
 pub fn cmd_rollback() -> Result<(), Box<dyn std::error::Error>> {
+  // The re-exec after a swap passes the original argv again, so a
+  // `--rollback` invocation would toggle exe/prev forever without this
+  // guard (the update path is guarded the same way in
+  // `apply_pending_on_boot`).
+  if std::env::var_os(APPLIED_ENV).is_some() {
+    return Ok(());
+  }
   let exe = std::env::current_exe()
     .and_then(|path| path.canonicalize())
     .map_err(|err| format!("cannot locate running binary: {err}"))?;
@@ -1120,6 +1127,20 @@ mod tests {
     swap_back(&exe, &prev).expect("second rollback");
     assert_eq!(std::fs::read(&exe).expect("read"), b"v2-running");
     assert_eq!(std::fs::read(&prev).expect("read"), b"v1-kept");
+  }
+
+  #[test]
+  fn rollback_after_reexec_is_a_noop() {
+    // The re-exec passes the original argv again (`--rollback`), so
+    // without the applied-guard the swap toggles exe/prev forever
+    // (reproduced: 460 swaps in 3s). The guard makes that pass a no-op.
+    // SAFETY: only this test touches the guard var in the test binary.
+    unsafe { std::env::set_var(APPLIED_ENV, "1") };
+    let result = cmd_rollback();
+    // SAFETY: restores the value saved by the set above; no other test
+    // reads or writes this variable.
+    unsafe { std::env::remove_var(APPLIED_ENV) };
+    result.expect("guarded rollback must return before touching the filesystem");
   }
 
   #[test]
