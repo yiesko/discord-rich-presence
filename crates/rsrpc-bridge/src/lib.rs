@@ -11,8 +11,14 @@
 
 pub mod bridge;
 pub mod config;
+pub mod consumer;
+pub mod control;
 pub mod handoff;
+pub mod replay;
+pub mod router;
+pub mod snapshot;
 
-pub use bridge::{Bridge, BridgeInputs, cache_entry_pid};
+pub use bridge::{Bridge, BridgeInputs};
 pub use config::BridgeConfig;
 pub use handoff::{ProcInput, ScannedGame};
+pub use replay::cache_entry_pid;
