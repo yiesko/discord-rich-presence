@@ -11,12 +11,12 @@
 
 pub mod bridge;
 pub mod config;
-pub mod consumer;
-pub mod control;
+mod consumer;
+mod control;
 pub mod handoff;
-pub mod replay;
-pub mod router;
-pub mod snapshot;
+mod replay;
+mod router;
+mod snapshot;
 
 pub use bridge::{Bridge, BridgeInputs};
 pub use config::BridgeConfig;

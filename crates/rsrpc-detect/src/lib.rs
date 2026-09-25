@@ -8,14 +8,14 @@
 
 pub mod bundle;
 pub mod cache;
-pub mod database;
+mod database;
 pub mod db;
 pub mod refresh;
 pub mod runtime;
 pub mod scan;
-pub mod scanner;
+mod scanner;
 pub mod server;
-pub mod steam;
+mod steam;
 pub mod types;
 
 pub use types::ProcessDetectedEvent;
