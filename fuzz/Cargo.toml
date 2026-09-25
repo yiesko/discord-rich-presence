@@ -17,6 +17,8 @@ path = "../crates/rsrpc-detect"
 path = "../crates/rsrpc-types"
 [dependencies.rsrpc-protocol]
 path = "../crates/rsrpc-protocol"
+[dependencies.rsrpc-transport-ipc]
+path = "../crates/rsrpc-transport-ipc"
 
 [[bin]]
 name = "activity_full"
@@ -35,6 +37,13 @@ bench = false
 [[bin]]
 name = "db_parse"
 path = "fuzz_targets/db_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_frame"
+path = "fuzz_targets/ipc_frame.rs"
 test = false
 doc = false
 bench = false

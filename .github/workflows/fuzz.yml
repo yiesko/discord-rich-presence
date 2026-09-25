@@ -1,0 +1,74 @@
+name: Fuzzing
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/fuzz.yml'
+      - 'fuzz/**'
+      - 'crates/rsrpc-transport-ipc/**'
+      - 'crates/rsrpc-protocol/**'
+      - 'crates/rsrpc-detect/**'
+      - 'crates/rsrpc-types/**'
+      - 'Cargo.lock'
+      - 'fuzz/Cargo.lock'
+  schedule:
+    # Nightly engine run (UTC).
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    # PR sanity: every target still typechecks (no engine run — that is
+    # the nightly job's). Cheap enough to gate merges.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Fuzz targets typecheck
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
+
+  nightly:
+    # Engine run, one target after another inside the time box. PRs skip
+    # this (smoke covers them); nightly + manual dispatch run it.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Pinned nightly: cargo-fuzz needs it, and a moving toolchain would
+      # make week-to-week runs incomparable.
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Restore corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz ipc_frame
+        run: cargo fuzz run ipc_frame -- -max_total_time=600
+        timeout-minutes: 15
+
+      - name: Fuzz activity_full
+        run: cargo fuzz run activity_full -- -max_total_time=600
+        timeout-minutes: 15
+
+      - name: Fuzz trim_db
+        run: cargo fuzz run trim_db -- -max_total_time=600
+        timeout-minutes: 15
+
+      - name: Fuzz db_parse
+        run: cargo fuzz run db_parse -- -max_total_time=600
+        timeout-minutes: 15
