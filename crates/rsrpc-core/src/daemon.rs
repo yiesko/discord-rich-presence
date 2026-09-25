@@ -484,7 +484,8 @@ fn bridge_config_for(
   )
   .app_version(config.app_version.clone())
   .ws_port(ws_port)
-  .ipc_path(ipc_path);
+  .ipc_path(ipc_path)
+  .allowed_origins(config.bridge_allowed_origins.clone());
   if config.state_file {
     bridge_config.state_dir(std::env::temp_dir())
   } else {

@@ -76,6 +76,18 @@ pub(crate) fn send_cached(
 }
 
 impl Shared {
+  /// Whether this id completed a Connect registration. Refused origins
+  /// are closed without registering, but a pipelined frame can still
+  /// arrive before the close lands — and the transport may deliver it —
+  /// so control paths must check this instead of trusting arrival order.
+  pub(crate) fn is_registered(&self, id: ClientId) -> bool {
+    self
+      .consumer_protocol
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .contains_key(&id)
+  }
+
   /// Client map for one bridge encoding.
   pub(crate) fn clients_for(
     &self,

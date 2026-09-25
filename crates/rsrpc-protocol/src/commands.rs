@@ -56,6 +56,12 @@ fn empty_activity(pid: u64, socket_id: SocketId) -> String {
 /// Both encodings are refcounted (`Utf8Bytes`/`Bytes`): cloning a payload
 /// bumps counters, and builders adopt their serialization buffers with no
 /// copy (`String`/`Vec<u8>` move straight in).
+///
+/// `json` deliberately stays `tungstenite::Utf8Bytes` instead of plain
+/// `Bytes`: in tungstenite 0.30 `Message::Text` *is* `Utf8Bytes`, so the
+/// broadcast fan-out clones with zero validation. Storing `Bytes` would
+/// force a UTF-8 re-scan on every send — O(payload) per consumer instead
+/// of O(1). The tungstenite dependency is the price of that guarantee.
 #[derive(Clone, Debug)]
 pub struct CachedActivity {
   pub json: Utf8Bytes,

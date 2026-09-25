@@ -122,7 +122,6 @@ impl Server {
     let (event_tx, event_rx) = mpsc::channel(config.event_queue);
     let token = CancellationToken::new();
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
-    let ids = Arc::new(AtomicU64::new(0));
     let conns = Arc::new(Mutex::new(JoinSet::new()));
 
     let ws_config = WebSocketConfig::default()
@@ -134,7 +133,7 @@ impl Server {
       token: token.clone(),
       semaphore,
       reject_sem: Arc::new(Semaphore::new(MAX_PENDING_REJECTS)),
-      ids,
+      ids: &NEXT_CLIENT_ID,
       event_tx,
       conns: Arc::clone(&conns),
       ws_config,
@@ -192,6 +191,13 @@ impl Server {
   }
 }
 
+/// Process-wide client id counter: ids must be unique across every
+/// `Server::bind` in the process (consumers like the bridge run two
+/// servers sharing one registry keyed by id), matching the documented
+/// contract on [`ClientId`]. A wrapping counter would need 2^64
+/// connections; no process lives that long.
+static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(0);
+
 /// Shared accept-loop state (moved into the accept task).
 struct AcceptCtx {
   listener: TcpListener,
@@ -199,7 +205,7 @@ struct AcceptCtx {
   semaphore: Arc<Semaphore>,
   /// Bounds concurrent over-limit rejections (see `MAX_PENDING_REJECTS`).
   reject_sem: Arc<Semaphore>,
-  ids: Arc<AtomicU64>,
+  ids: &'static AtomicU64,
   event_tx: mpsc::Sender<Event>,
   conns: Arc<Mutex<JoinSet<()>>>,
   ws_config: WebSocketConfig,

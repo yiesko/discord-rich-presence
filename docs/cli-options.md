@@ -29,6 +29,7 @@ forwards through the bridge are always passed on. See
 | `--bridge-port <PORT>` | `RSRPC_BRIDGE_PORT` | `1337` | First JSON bridge port to try. |
 | `--bridge-port-end <PORT>` | `RSRPC_BRIDGE_PORT_END` | `1347` | Last JSON bridge port to try (inclusive). |
 | `--msgpack-port <PORT>` | `RSRPC_MSGPACK_PORT` | `1338` | MessagePack bridge port. It steps forward if the port is taken. |
+| `--bridge-allowed-origins <URLS>` | `RSRPC_BRIDGE_ALLOWED_ORIGINS` | empty | Extra browser origins allowed to drive bridge commands (comma-separated), beyond Discord's own pages. Absent `Origin` (native clients) always passes. |
 | `--ws-port-start <PORT>` | `RSRPC_WS_PORT_START` | `6463` | First websocket port offered to games. |
 | `--ws-port-end <PORT>` | `RSRPC_WS_PORT_END` | `6472` | Last websocket port for games (inclusive). |
 

@@ -233,6 +233,7 @@ impl IpcTransport {
       listener,
       token: token.clone(),
       conns: Arc::clone(&conns),
+      pump_sem: Arc::new(tokio::sync::Semaphore::new(MAX_IPC_PUMPS)),
       live: Arc::clone(&live),
       next_conn_id: Arc::clone(&next_conn_id),
       user,
@@ -383,11 +384,21 @@ fn create_socket(
   })
 }
 
+/// Cap on concurrent Unix IPC pumps (Windows parity in kind, lower in
+/// value): each parks a `spawn_blocking` thread in a blocking pump, and
+/// the CLI runtime allows 32 blocking threads total — past 16, peers are
+/// dropped at once instead of starving the pool (or the process) under
+/// connection floods, leaving room for unrelated blocking work (scanner
+/// builds, snapshot writes).
+const MAX_IPC_PUMPS: usize = 16;
+
 /// Accept-loop state (moved into the accept task).
 struct AcceptCtx {
   listener: UnixListener,
   token: CancellationToken,
   conns: Arc<tokio::sync::Mutex<JoinSet<()>>>,
+  /// Bounds concurrent pumps (see `MAX_IPC_PUMPS`).
+  pump_sem: Arc<tokio::sync::Semaphore>,
   live: Arc<Mutex<Vec<(u64, std::os::unix::net::UnixStream)>>>,
   next_conn_id: Arc<AtomicU64>,
   user: Arc<Mutex<RpcUser>>,
@@ -400,6 +411,7 @@ async fn accept_loop(
     listener,
     token,
     conns,
+    pump_sem,
     live,
     next_conn_id,
     user,
@@ -440,6 +452,14 @@ async fn accept_loop(
         };
         tracing::debug!("[ipc] Incoming stream...");
         let facil = ConnFacilitator::fresh(user.clone(), sink.clone());
+        // Bounded pumps (Windows parity): past the cap the peer is
+        // dropped at once instead of parking another blocking thread.
+        // The permit rides into the closure and releases when the pump
+        // returns.
+        let Ok(pump_permit) = pump_sem.clone().try_acquire_owned() else {
+          tracing::warn!("[ipc] Pump cap reached, dropping peer");
+          continue;
+        };
         // Track one clone per pump so shutdown can close it (unblocking
         // the pump's read); the pump unregisters itself on exit, bounding
         // the list during normal operation.
@@ -457,6 +477,7 @@ async fn accept_loop(
         let mut conns = conns.lock().await;
         while conns.try_join_next().is_some() {}
         conns.spawn_blocking(move || {
+          let _permit = pump_permit;
           let mut facil = facil;
           let mut stream = std_stream;
           handle_stream(&mut facil, &mut stream);

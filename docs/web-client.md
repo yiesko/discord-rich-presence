@@ -20,6 +20,18 @@ steps forward on collision. Configure them with `--bridge-port`,
 `--bridge-port-end`, and `--msgpack-port` (see
 [cli-options.md](cli-options.md)).
 
+## Origin policy
+
+WebSocket has no CORS gate of its own, so the bridge checks the
+`Origin` header itself, mirroring the game transport:
+
+- Absent `Origin` (native clients) always passes.
+- Discord's pages (`https://discord.com`, `https://canary.discord.com`,
+  `https://ptb.discord.com`) pass without extra configuration.
+- Anything else is refused at connect (closed before READY) unless
+  listed in `--bridge-allowed-origins` /
+  `RSRPC_BRIDGE_ALLOWED_ORIGINS` (comma-separated, exact match).
+
 ## Using `RsRpcClient`
 
 ```javascript
