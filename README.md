@@ -17,6 +17,19 @@ clients with official-style replies, and forwards the presence to anything
 listening on its bridge — a Vencord plugin, a browser userscript, or your
 own code.
 
+## Project status
+
+This project is in maintenance mode. That means no new features: I am
+not building new things and I am not taking feature requests. The work
+going forward is making what is already here better — faster,
+simpler, easier to trace and observe, and less dense inside the
+crates.
+
+Splitting the old code into many small crates made each piece easier
+to follow, but it also made the whole harder to keep in your head,
+and every boundary between crates is somewhere a regression can hide.
+Even so, recent releases are stable and fine to use every day.
+
 ## Screenshots
 
 Roblox (Sober) reporting its own presence over IPC, next to a Limusic
