@@ -6,7 +6,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
@@ -250,4 +250,74 @@ async fn shutdown_with_silent_peer_returns_promptly() {
     started.elapsed() < Duration::from_secs(4),
     "shutdown must not stall out the 5s drain deadline"
   );
+}
+
+/// Connection floods past the pump cap drop peers instead of parking
+/// blocking threads without bound (Windows parity): capped busy pumps hold
+/// their permits, so further peers are refused at accept and observe
+/// EOF instead of READY.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flood_past_pump_cap_drops_peers() {
+  // Matches MAX_IPC_PUMPS: deliberately under the 32-thread blocking
+  // pool so unrelated blocking work always has room.
+  const CAP: usize = 16;
+  const EXTRA: usize = 8;
+
+  let scratch = Scratch::new("pump-cap");
+  let dir = scratch.sub("a");
+  let (transport, _rx) = IpcTransport::bind_with_dirs(user(), vec![dir])
+    .await
+    .unwrap();
+  let path = transport.socket_path().to_string();
+
+  // Fill every pump slot: sequential connects preserve accept order, and
+  // each peer holds its pump in a blocking read afterwards.
+  let mut admitted = Vec::new();
+  for _ in 0..CAP {
+    let mut client = UnixStream::connect(&path).expect("connect");
+    client
+      .set_read_timeout(Some(Duration::from_secs(5)))
+      .expect("timeout");
+    write_frame(
+      &mut client,
+      PacketType::Handshake,
+      r#"{"v":1,"client_id":"game-1"}"#,
+    );
+    let (packet_type, body) = read_frame(&mut client);
+    assert_eq!(packet_type, 1);
+    assert!(body.contains("READY"));
+    admitted.push(client);
+  }
+  // Past the cap: the server drops the socket without reading, so the
+  // handshake reply never arrives. No write here on purpose: a write to
+  // an already-dropped peer would panic instead of asserting. Only
+  // refusal signals (EOF/reset) count as dropped: a timeout would mean
+  // an admitted peer went quiet, which must fail loudly instead of
+  // passing silently.
+  let mut dropped = 0;
+  for _ in 0..EXTRA {
+    let mut client = UnixStream::connect(&path).expect("connect");
+    client
+      .set_read_timeout(Some(Duration::from_secs(5)))
+      .expect("timeout");
+    let mut header = [0_u8; 8];
+    match client.read_exact(&mut header) {
+      Err(e)
+        if matches!(
+          e.kind(),
+          std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+        ) =>
+      {
+        dropped += 1;
+      }
+      Err(e) => panic!("admitted peer must answer, got read error: {e:?}"),
+      Ok(()) => panic!("peer past the cap was admitted"),
+    }
+  }
+  assert_eq!(dropped, EXTRA, "peers past the cap must be refused");
+  drop(admitted);
+  transport.shutdown().await;
 }

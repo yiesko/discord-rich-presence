@@ -44,6 +44,10 @@ pub struct BridgeConfig {
   pub ws_port: Option<u16>,
   /// IPC socket path, recorded in the snapshot for tooling.
   pub ipc_path: Option<String>,
+  /// Extra browser origins allowed to drive bridge commands, beyond
+  /// Discord's own pages (`RSRPC_BRIDGE_ALLOWED_ORIGINS`, comma-separated).
+  /// Absent `Origin` (native clients) always passes.
+  pub allowed_origins: Vec<String>,
   /// Snapshot write cadence (dirty-gated).
   pub persist_interval: Duration,
   /// Replay rebroadcast cadence.
@@ -69,6 +73,7 @@ impl BridgeConfig {
       state_dir: None,
       ws_port: None,
       ipc_path: None,
+      allowed_origins: Vec::new(),
       persist_interval: DEFAULT_PERSIST_INTERVAL,
       refresh_interval: DEFAULT_REFRESH_INTERVAL,
     }
@@ -99,6 +104,13 @@ impl BridgeConfig {
   #[must_use]
   pub fn ipc_path(mut self, path: Option<String>) -> Self {
     self.ipc_path = path;
+    self
+  }
+
+  /// Extra browser origins allowed to drive bridge commands.
+  #[must_use]
+  pub fn allowed_origins(mut self, origins: Vec<String>) -> Self {
+    self.allowed_origins = origins;
     self
   }
 

@@ -90,6 +90,10 @@ struct Args {
     value_parser = clap::builder::BoolishValueParser::new()
   )]
   state_file: bool,
+  /// Extra bridge origins beyond Discord's (comma-separated): custom web
+  /// clients driving presence through the bridge.
+  #[arg(long, env = "RSRPC_BRIDGE_ALLOWED_ORIGINS")]
+  bridge_allowed_origins: Option<String>,
   /// Run a single process scan, print detected games and exit (staged
   /// overrides and ignore-list apply, like the daemon would publish)
   #[arg(
@@ -199,8 +203,9 @@ fn daemon_from_fetched(
   Ok((Daemon::from_bundled(config)?, "bundled-fallback"))
 }
 
-/// Split a comma-separated id list (`--ignore-ids`): trims, drops blanks.
-fn parse_ignore_ids(input: Option<&str>) -> Vec<String> {
+/// Split a comma-separated list (`--ignore-ids`,
+/// `--bridge-allowed-origins`): trims, drops blanks.
+fn parse_csv_list(input: Option<&str>) -> Vec<String> {
   input
     .unwrap_or_default()
     .split(',')
@@ -305,10 +310,11 @@ fn build_daemon_config(args: &Args) -> RPCConfig {
     .scan_interval_secs(args.scan_interval_secs)
     .db_url(effective_db_url.clone())
     .enable_db_update(args.enable_db_update)
-    .ignored_ids(parse_ignore_ids(args.ignore_ids.as_deref()))
+    .ignored_ids(parse_csv_list(args.ignore_ids.as_deref()))
     .exclusions_url(effective_exclusions_url.filter(|url| !url.trim().is_empty()))
     .app_version(env!("CARGO_PKG_VERSION").to_string())
     .state_file(args.state_file)
+    .bridge_allowed_origins(parse_csv_list(args.bridge_allowed_origins.as_deref()))
     .build()
 }
 
@@ -517,5 +523,23 @@ mod tests {
     assert!(on.state_file);
     let off = Args::try_parse_from(["rsrpc-cli"]).expect("defaults parse");
     assert!(!off.state_file);
+  }
+
+  /// `--bridge-allowed-origins` (env `RSRPC_BRIDGE_ALLOWED_ORIGINS`)
+  /// parses into a trimmed, blank-free list; unset stays empty.
+  #[test]
+  fn bridge_allowed_origins_flag_parses() {
+    let on = Args::try_parse_from([
+      "rsrpc-cli",
+      "--bridge-allowed-origins",
+      "https://a.example, https://b.example,,",
+    ])
+    .expect("--bridge-allowed-origins parses");
+    assert_eq!(
+      parse_csv_list(on.bridge_allowed_origins.as_deref()),
+      vec!["https://a.example", "https://b.example"]
+    );
+    let off = Args::try_parse_from(["rsrpc-cli"]).expect("defaults parse");
+    assert!(off.bridge_allowed_origins.is_none());
   }
 }

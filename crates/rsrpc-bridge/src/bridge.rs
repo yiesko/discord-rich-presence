@@ -26,7 +26,7 @@ use rsrpc_protocol::error::{Result, RsrpcError};
 use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
 use rsrpc_types::{AppId, SocketId};
-use rsrpc_ws::{ClientId, Event, EventHub, Message, Responder};
+use rsrpc_ws::{ClientId, CloseCode, Event, EventHub, Message, Responder};
 use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -36,6 +36,7 @@ use crate::config::BridgeConfig;
 use crate::consumer::{BridgeProtocol, send_cached, send_message};
 use crate::control::handle_bridge_control;
 use crate::handoff::{HandoffState, ProcInput, is_process_alive, track_process_publication};
+use crate::origin::origin_allowed;
 use crate::replay::{ReplayCache, cache_entry_pid};
 use crate::router::{
   channel_depth, generic_payload, table_transition, take_matching_process, take_process_clear,
@@ -97,6 +98,8 @@ pub(crate) struct Shared {
   pub(crate) proc_tx: Option<mpsc::Sender<ProcInput>>,
   /// Live game-client total from the game transport.
   pub(crate) game_clients: Option<Arc<AtomicU64>>,
+  /// Extra browser origins allowed to drive commands (see `origin`).
+  pub(crate) allowed_origins: Vec<String>,
 }
 
 /// Hourly resource census cadence: distinguishes a growing queue backlog
@@ -196,6 +199,7 @@ impl Bridge {
       game_tx: inputs.game_tx,
       proc_tx: inputs.proc_tx,
       game_clients: inputs.game_clients,
+      allowed_origins: config.allowed_origins.clone(),
     });
 
     {
@@ -361,6 +365,21 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
   while let Some(event) = hub.next_event().await {
     match event {
       Event::Connect(id, responder) => {
+        // Origins are per-connection: refuse mismatches here, before any
+        // READY or slot registration, instead of per message downstream
+        // (same policy as the game transport).
+        if !origin_allowed(
+          responder
+            .details()
+            .headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok()),
+          &shared.allowed_origins,
+        ) {
+          tracing::warn!("[bridge] Refused origin for consumer {id}");
+          responder.close(CloseCode::Normal).await;
+          continue;
+        }
         tracing::info!("[bridge] Consumer {id} connected");
         let protocol =
           BridgeProtocol::from_query(responder.details().uri.as_ref(), default_protocol);
@@ -421,6 +440,11 @@ async fn bridge_pump(hub: EventHub, shared: Arc<Shared>, default_protocol: Bridg
         }
       }
       Event::Message(id, message) => {
+        // Unregistered senders drive nothing: refused origins never
+        // register, and a pipelined frame can outrun its own close.
+        if !shared.is_registered(id) {
+          continue;
+        }
         // Bridge control messages (JSON text) are answered, everything
         // else echoes to the sender as before. Identity changes fan out
         // as CURRENT_USER_UPDATE to every consumer on THIS server (JSON
@@ -783,6 +807,45 @@ async fn persist_task(shared: Arc<Shared>, interval: Duration, token: Cancellati
 mod tests {
   use super::*;
   use crate::handoff::ScannedGame;
+
+  /// Registration means presence in the protocol table: refused origins
+  /// never insert, so their ids stay unknown even if a frame arrives.
+  /// (Guards the `is_registered` gate in the message pump.)
+  #[test]
+  fn registration_means_protocol_table_presence() {
+    let shared = Shared {
+      json_clients: Mutex::new(FxHashMap::default()),
+      msgpack_clients: Mutex::new(FxHashMap::default()),
+      consumer_protocol: Mutex::new(FxHashMap::default()),
+      cache: Mutex::new(HashMap::new()),
+      activity_seq: Mutex::new(0),
+      last_process: Mutex::new(HashMap::new()),
+      handoff: Mutex::new(HandoffState::default()),
+      recent: Mutex::new(RecentActivities::default()),
+      user: Arc::new(Mutex::new(RpcUser::default())),
+      dirty: AtomicBool::new(false),
+      dropped_broadcasts: AtomicU64::new(0),
+      app_version: String::new(),
+      state_path: None,
+      json_port: 0,
+      msgpack_port: 0,
+      ws_port: None,
+      ipc_path: None,
+      ipc_tx: None,
+      game_tx: None,
+      proc_tx: None,
+      game_clients: None,
+      allowed_origins: Vec::new(),
+    };
+    assert!(!shared.is_registered(7));
+    shared
+      .consumer_protocol
+      .lock()
+      .unwrap()
+      .insert(7, BridgeProtocol::Json);
+    assert!(shared.is_registered(7));
+    assert!(!shared.is_registered(8));
+  }
 
   /// Session lines fire only on empty<->non-empty edges; slot churn stays quiet.
   #[test]

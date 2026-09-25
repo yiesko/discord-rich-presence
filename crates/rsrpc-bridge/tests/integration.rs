@@ -577,3 +577,132 @@ async fn session_transitions_emit_census_lines() {
 
   fx.bridge.shutdown().await;
 }
+
+/// Connect a raw consumer with an explicit `Origin` header (`None` sends
+/// no origin at all, like native clients).
+async fn connect_with_origin(port: u16, query: &str, origin: Option<&str>) -> WsStream {
+  use tokio_tungstenite::tungstenite::http::Request;
+
+  let mut builder = Request::builder()
+    .uri(format!("ws://127.0.0.1:{port}/{query}"))
+    .header("host", format!("127.0.0.1:{port}"))
+    .header("upgrade", "websocket")
+    .header("connection", "Upgrade")
+    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+    .header("sec-websocket-version", "13");
+  if let Some(origin) = origin {
+    builder = builder.header("origin", origin);
+  }
+  let request = builder.body(()).expect("request builds");
+  let (ws, _) = tokio_tungstenite::connect_async(request)
+    .await
+    .expect("consumer failed to connect");
+  ws
+}
+
+/// Disallowed origins are closed at connect, before READY or registration.
+#[tokio::test]
+async fn disallowed_origin_is_refused_before_ready() {
+  let fx = fixture().await;
+  let mut evil =
+    connect_with_origin(fx.json_port, "?format=json", Some("https://evil.example")).await;
+  // No READY may arrive: a disallowed origin is closed at connect, and
+  // the client must never be registered.
+  match tokio::time::timeout(TIMEOUT, evil.next()).await.unwrap() {
+    Some(Ok(tungstenite::Message::Close(_))) => {}
+    other => panic!("expected close for disallowed origin, got {other:?}"),
+  }
+  // The bridge still serves legitimate consumers afterwards.
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let ready = read_json(&mut json).await;
+  assert_eq!(ready["evt"], "READY");
+  fx.bridge.shutdown().await;
+}
+
+/// Discord's own pages connect without extra configuration.
+#[tokio::test]
+async fn discord_origin_is_allowed() {
+  let fx = fixture().await;
+  let mut ws = connect_with_origin(fx.json_port, "?format=json", Some("https://discord.com")).await;
+  let ready = read_json(&mut ws).await;
+  assert_eq!(ready["evt"], "READY");
+  fx.bridge.shutdown().await;
+}
+
+/// Absent origin (native clients) connects without extra configuration.
+#[tokio::test]
+async fn absent_origin_is_allowed() {
+  let fx = fixture().await;
+  let mut ws = connect_with_origin(fx.json_port, "?format=json", None).await;
+  let ready = read_json(&mut ws).await;
+  assert_eq!(ready["evt"], "READY");
+  fx.bridge.shutdown().await;
+}
+
+/// Origins listed in `allowed_origins` connect; anything else stays refused.
+#[tokio::test]
+async fn configured_extra_origin_is_allowed() {
+  let (_ipc_tx, ipc_rx) = tokio::sync::mpsc::channel(64);
+  let (_game_tx, game_rx) = tokio::sync::mpsc::channel(1024);
+  let (_proc_tx, proc_rx) = tokio::sync::mpsc::channel(512);
+  let config = BridgeConfig::new(0, 0, 0, 0)
+    .app_version("test-bridge")
+    .allowed_origins(vec!["https://my-client.example".to_string()]);
+  let bridge = Bridge::bind(
+    config,
+    std::sync::Arc::new(std::sync::Mutex::new(RpcUser::default())),
+    BridgeInputs {
+      ipc_rx,
+      game_rx,
+      proc_rx,
+      ipc_tx: None,
+      game_tx: None,
+      proc_tx: None,
+      game_clients: None,
+    },
+  )
+  .await
+  .expect("bridge binds ephemeral ports");
+  let json_port = bridge.json_port();
+  let mut mine =
+    connect_with_origin(json_port, "?format=json", Some("https://my-client.example")).await;
+  let ready = read_json(&mut mine).await;
+  assert_eq!(ready["evt"], "READY");
+  let mut evil = connect_with_origin(json_port, "?format=json", Some("https://evil.example")).await;
+  match tokio::time::timeout(TIMEOUT, evil.next()).await.unwrap() {
+    Some(Ok(tungstenite::Message::Close(_))) => {}
+    other => panic!("expected close for disallowed origin, got {other:?}"),
+  }
+  bridge.shutdown().await;
+}
+
+/// A refused origin racing a pipelined `SET_USER` must not change the
+/// reported user: control messages from unregistered clients are dropped
+/// before the close lands.
+#[tokio::test]
+async fn refused_origin_pipelined_set_user_changes_nothing() {
+  let fx = fixture().await;
+  // Legitimate consumer watches for user changes.
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+  // Refused client floods SET_USER frames, racing its own close.
+  // Individual sends may fail as the close lands; that is fine — enough
+  // frames leave while the socket is open that the bridge must observe
+  // some. What matters is that no delivered frame changes the user.
+  let mut evil =
+    connect_with_origin(fx.json_port, "?format=json", Some("https://evil.example")).await;
+  for _ in 0..50 {
+    let _ = evil
+      .send(tungstenite::Message::Text(
+        r#"{"type":"SET_USER","nonce":"9","patch":{"username":"evil"}}"#.into(),
+      ))
+      .await;
+  }
+  // Silence, not CURRENT_USER_UPDATE: delivered frames must die
+  // unregistered.
+  match tokio::time::timeout(Duration::from_millis(500), json.next()).await {
+    Err(_) => {}
+    Ok(other) => panic!("refused client changed the user: {other:?}"),
+  }
+  fx.bridge.shutdown().await;
+}

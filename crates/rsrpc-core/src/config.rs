@@ -48,6 +48,8 @@ pub struct RPCConfig {
   /// Write presence snapshots to `<tmpdir>/rsrpc-state-{0..9}` for
   /// external tooling (`--state-file` / `RSRPC_STATE_FILE`).
   pub state_file: bool,
+  /// Extra bridge origins beyond Discord's (`RSRPC_BRIDGE_ALLOWED_ORIGINS`).
+  pub bridge_allowed_origins: Vec<String>,
 }
 
 impl Default for RPCConfig {
@@ -73,6 +75,7 @@ impl Default for RPCConfig {
       exclusions_url: None,
       app_version: env!("CARGO_PKG_VERSION").to_string(),
       state_file: false,
+      bridge_allowed_origins: Vec::new(),
     }
   }
 }
@@ -126,7 +129,8 @@ impl RPCConfigBuilder {
     (ignored_ids, Vec<String>),
     (exclusions_url, Option<String>),
     (app_version, String),
-    (state_file, bool)
+    (state_file, bool),
+    (bridge_allowed_origins, Vec<String>)
   );
 
   /// Finish building.

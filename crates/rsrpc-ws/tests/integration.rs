@@ -428,3 +428,28 @@ async fn slow_consumer_try_send_reports_full() {
 
   server.shutdown().await;
 }
+
+/// Client ids are unique across `Server::bind` instances in one process:
+/// the bridge runs JSON + MessagePack servers sharing one consumer
+/// registry, so per-server counters (both starting at zero) would alias
+/// registrations across the two servers.
+#[tokio::test]
+async fn client_ids_are_unique_across_servers() {
+  let (server_a, mut hub_a) = Server::bind(test_config()).await.unwrap();
+  let (server_b, mut hub_b) = Server::bind(test_config()).await.unwrap();
+  let addr_a = server_a.local_addr();
+  let addr_b = server_b.local_addr();
+  let _ws_a = connect(addr_a).await;
+  let _ws_b = connect(addr_b).await;
+  let id_a = match next_event(&mut hub_a).await {
+    Event::Connect(id, _) => id,
+    other => panic!("expected Connect, got {other:?}"),
+  };
+  let id_b = match next_event(&mut hub_b).await {
+    Event::Connect(id, _) => id,
+    other => panic!("expected Connect, got {other:?}"),
+  };
+  assert_ne!(id_a, id_b, "ids from different servers must never collide");
+  server_a.shutdown().await;
+  server_b.shutdown().await;
+}

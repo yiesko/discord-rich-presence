@@ -14,6 +14,7 @@ pub mod config;
 mod consumer;
 mod control;
 pub mod handoff;
+mod origin;
 mod replay;
 mod router;
 mod snapshot;

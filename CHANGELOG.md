@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- The bridge now validates the WebSocket `Origin` header like the game
+  transport already did: absent `Origin` (native clients) and Discord's
+  own pages pass, anything else is closed at connect before READY unless
+  listed in `--bridge-allowed-origins` / `RSRPC_BRIDGE_ALLOWED_ORIGINS`.
+  A malicious page can no longer read local activities or send bridge
+  commands through `ws://127.0.0.1:1337`; frames pipelined past the
+  close are dropped as unregistered. Client ids are now unique
+  process-wide across both bridge servers (per-server counters could
+  alias registrations), and messages from unregistered ids never reach
+  control handling.
+
 ### Changed
+- Unix IPC pumps are capped at 16 concurrent peers like Windows (which
+  keeps 32): connection floods past the cap drop peers at accept instead
+  of parking blocking threads without bound, leaving room in the
+  32-thread blocking pool for unrelated work.
 - Split the two biggest modules internally, same crates and same
   behavior: `rsrpc-detect/src/server.rs` is now foundation plus
   `runtime` (threads, shutdown, join), `database` (bundle ownership and
