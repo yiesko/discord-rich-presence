@@ -53,6 +53,21 @@ YouTube Music buttons:
 * **Diagnostics** — `--list-detected` and `--list-database` show exactly
   what the server sees.
 
+## Platform support
+
+Linux is the primary platform for this fork: it is where the project is
+developed and tested, where CI runs (Ubuntu, x86_64 and ARM), and where
+the systemd integration and self-update mechanism live. It is
+significantly more tested — and potentially more stable — here than on
+macOS or Windows.
+
+macOS and Windows builds are published as release archives and most of
+the code is cross-platform, but they get far less testing: treat them
+as best-effort.
+
+Want to change that? If you'd like to help maintain Windows or macOS
+support, volunteers are very welcome.
+
 ## Install (Linux, systemd)
 
 ```bash
