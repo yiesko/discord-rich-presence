@@ -19,11 +19,10 @@ own code.
 
 ## Screenshots
 
-Game detection and a music presence at the same time: Roblox found by
-the process scanner, alongside a Limusic listening card published
-through rsRPC.
+Roblox (Sober) reporting its own presence over IPC, next to a Limusic
+listening card — both through rsRPC at the same time:
 
-<img src="assets/rpc_sober_limusic.png" alt="Discord activity tab showing a detected Roblox game (A Broken Dream) and a Limusic listening card (Demons by Imagine Dragons) at the same time" width="700" />
+<img src="assets/rpc_sober_limusic.png" alt="Discord activity tab showing a Roblox (Sober) card reporting over IPC (A Broken Dream) and a Limusic listening card (Demons by Imagine Dragons) at the same time" width="700" />
 
 A close-up of the listening card, with the track progress bar and its
 YouTube Music buttons:
