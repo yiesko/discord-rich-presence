@@ -24,10 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gained directed `shutdown()` + `join()` (plus `rsrpc-*` thread names),
   every long sleep became an interruptible park, the netlink watcher
   honors a stop flag (including its self-test), and `Daemon::run_until`
-  shuts down, joins and drops the scanner on success, bind failures and
-  future abandonment alike. When `run_until` returns, no rsRPC thread is
-  still running, so library callers may run another daemon afterwards
-  (`crates/rsrpc-detect/src/server.rs`,
+  shuts down, joins and drops the scanner on success and bind failures.
+  Future abandonment (dropping the future via `select!`/timeout/abort)
+  signals shutdown through a cancellation guard instead, so threads exit
+  on their own within about one poll interval. When `run_until` returns,
+  no rsRPC thread is still running, so library callers may run another
+  daemon afterwards (`crates/rsrpc-detect/src/server.rs`,
   `crates/rsrpc-proc-events/src/lib.rs`,
   `crates/rsrpc-core/src/daemon.rs`).
 

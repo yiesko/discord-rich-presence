@@ -21,6 +21,10 @@ use crate::db::{DetectableActivity, Exclusions};
 use crate::refresh::RefreshConfig;
 use crate::types::{ProcessDetectedEvent, ProcessEventListeners};
 
+// 0.36.1 paths kept working after the module split: these items now
+// live in `runtime`, re-exported here so existing imports keep building.
+pub use super::runtime::{ScanGuard, idle_wait};
+
 pub struct ProcessServer {
   /// Current detection generation (see [`DetectablesBundle`]): lock-free
   /// reads via [`ArcSwap`], whole-generation swaps by writers. Custom
