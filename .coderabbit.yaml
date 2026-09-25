@@ -1,0 +1,6 @@
+# CodeRabbit: review draft PRs automatically. Release branches stay
+# drafts until complete and gates are green, so drafts must be reviewed
+# like any other PR.
+reviews:
+  auto_review:
+    drafts: true
