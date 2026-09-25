@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `--rollback` no longer re-executes into an infinite toggle loop. The
+  re-exec passes the original argv back and `cmd_rollback` had no
+  applied-guard, so every pass swapped `rsrpc-cli`/`rsrpc-cli.prev` again
+  (reproduced: 460 swaps in 3 seconds, killed by timeout). It now does
+  one swap, re-execs once and exits, mirroring the guard in
+  `apply_pending_on_boot` (`cli/src/update.rs`).
+- `RSRPC_STATE_FILE` is wired up again: `--state-file` /
+  `RSRPC_STATE_FILE` points the bridge at the temp-dir snapshot slots
+  (`<tmpdir>/rsrpc-state-{0..9}`), as documented since 0.32.0. The env
+  check was lost in the 0.36.0 workspace refactor while
+  `BridgeConfig::state_dir` stayed `None`, so the CLI activation never
+  happened; `RPCConfig::state_file` now carries it through to
+  `Bridge::bind` (`crates/rsrpc-core/src/{config,daemon}.rs`,
+  `cli/src/main.rs`).
+- `systemd/rsrpc.service` keeps `%h/.local/bin` writable via
+  `ReadWritePaths`: under `ProtectHome=read-only` + `ProtectSystem=strict`
+  the sandboxed service could not swap in its own staged self-updates
+  (discarded at boot with `cannot replace binary`), and the dead
+  `RSRPC_LOGS_ENABLED=1` line (no longer read by the logger) is gone.
+
 ## [0.36.0] - 2026-09-23
 
 ### Breaking
