@@ -638,7 +638,11 @@ async fn proc_pump(
         for (pid, app_id) in outstanding {
           tracing::info!("[bridge] Sending empty payload");
           let socket_id = SocketId::from(app_id);
-          let payload = commands::empty_cached(pid, socket_id.clone());
+          let Some(payload) = commands::empty_cached(pid, socket_id.clone()) else {
+            tracing::warn!("[bridge] Dropping unencodable clear payload");
+            shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+            continue;
+          };
           shared.broadcast_activity(payload, socket_id);
         }
         // Reap replay-cache ghosts: cards whose pid is provably dead but
@@ -658,10 +662,12 @@ async fn proc_pump(
         };
         for (socket_id, pid) in ghosts {
           tracing::info!("[bridge] Reaping ghost card for dead pid {pid}");
-          shared.broadcast_activity(
-            commands::empty_cached(pid, socket_id.clone()),
-            socket_id,
-          );
+          let Some(payload) = commands::empty_cached(pid, socket_id.clone()) else {
+            tracing::warn!("[bridge] Dropping unencodable clear payload");
+            shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+            continue;
+          };
+          shared.broadcast_activity(payload, socket_id);
         }
       }
       ProcInput::Detected(game) => {
@@ -679,11 +685,13 @@ async fn proc_pump(
             .unwrap_or_else(|e| e.into_inner())
             .remove(&game.id);
           if let Some(pid) = withdrawn {
-            shared.broadcast_activity(
-              commands::empty_cached(pid, SocketId::from(&game.id)),
-              SocketId::from(&game.id),
-            );
-            tracing::debug!("[bridge] Yielding {} to live IPC presence", game.name);
+            if let Some(payload) = commands::empty_cached(pid, SocketId::from(&game.id)) {
+              shared.broadcast_activity(payload, SocketId::from(&game.id));
+              tracing::debug!("[bridge] Yielding {} to live IPC presence", game.name);
+            } else {
+              tracing::warn!("[bridge] Dropping unencodable clear payload");
+              shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+            }
           } else {
             tracing::debug!("[bridge] Deferring to live IPC presence for: {}", game.name);
           }
@@ -703,7 +711,12 @@ async fn proc_pump(
           game.pid,
         );
         tracing::debug!("[bridge] Publishing generic presence for activity: {}", game.name);
-        shared.broadcast_activity(generic_payload(&game), SocketId::from(&game.id));
+        if let Some(payload) = generic_payload(&game) {
+          shared.broadcast_activity(payload, SocketId::from(&game.id));
+        } else {
+          tracing::warn!("[bridge] Dropping unencodable generic payload");
+          shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+        }
       }
       ProcInput::Removed(app_id, pid) => {
         // One `(app, pid)` pair vanished while others remain: clear exactly
@@ -728,10 +741,12 @@ async fn proc_pump(
         );
         if let Some(pid) = outstanding {
           tracing::info!("[bridge] Clearing removed game slot");
-          shared.broadcast_activity(
-            commands::empty_cached(pid, SocketId::from(&app_id)),
-            SocketId::from(&app_id),
-          );
+          if let Some(payload) = commands::empty_cached(pid, SocketId::from(&app_id)) {
+            shared.broadcast_activity(payload, SocketId::from(&app_id));
+          } else {
+            tracing::warn!("[bridge] Dropping unencodable clear payload");
+            shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+          }
         } else {
           tracing::debug!("[bridge] Removed slot had no matching generic card");
         }

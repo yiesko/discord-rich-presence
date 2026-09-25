@@ -250,7 +250,9 @@ fn normalize_timestamp(value: i64, millis_threshold: i64) -> i64 {
   } else if value > millis_threshold {
     value
   } else {
-    value * 1000
+    // Hostile input (e.g. `i64::MIN` seconds) must saturate, never panic
+    // in debug or wrap in release: the fuzzer feeds whatever it wants.
+    value.saturating_mul(1000)
   }
 }
 

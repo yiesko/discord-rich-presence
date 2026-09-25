@@ -35,19 +35,6 @@ pub struct ProcessPayload {
   pub socket_id: SocketId,
 }
 
-#[must_use]
-fn empty_activity(pid: u64, socket_id: SocketId) -> String {
-  format!(
-    r#"
-    {{
-      "activity": null,
-      "pid": {pid},
-      "socketId": "{socket_id}"
-    }}
-  "#
-  )
-}
-
 /// An activity payload serialized once for both bridge protocols (JSON text
 /// frames for the 1337 port, MessagePack binary frames for the 1338 port).
 /// Builders return `Arc<CachedActivity>` so broadcast fan-out shares the
@@ -75,30 +62,23 @@ pub struct CachedActivity {
   pub activity_json: Bytes,
 }
 
-/// Build the empty (clear) payload in both protocols.
+/// Build the empty (clear) payload in both protocols. `None` when either
+/// encoding fails: fixed shapes make that practically unreachable, and
+/// callers log and drop so a future field addition surfaces loudly
+/// instead of shipping an empty frame.
 #[must_use]
-pub fn empty_cached(pid: u64, socket_id: SocketId) -> Arc<CachedActivity> {
+pub fn empty_cached(pid: u64, socket_id: SocketId) -> Option<Arc<CachedActivity>> {
   let payload = ActivityPayload {
     activity: None,
     pid: Some(pid),
     socket_id: Some(socket_id.to_string()),
   };
-
-  // Fixed-shape struct (String/int/bool/Option only, no floats or
-  // non-string map keys): serialization cannot fail by construction.
-  // The silent fallback below exists so a future field addition that
-  // breaks that invariant degrades to an empty frame (observed downstream
-  // as a clear) instead of panicking the broadcast path. Protocol has no
-  // logger by design (`obs-library-facade`); callers that need the signal
-  // should validate before building.
-  Arc::new(CachedActivity {
-    json: empty_activity(pid, socket_id).into(),
-    msgpack: rmp_serde::to_vec_named(&payload)
-      .map(Bytes::from)
-      .unwrap_or_default(),
+  Some(Arc::new(CachedActivity {
+    json: serde_json::to_string(&payload).ok().map(Utf8Bytes::from)?,
+    msgpack: rmp_serde::to_vec_named(&payload).ok().map(Bytes::from)?,
     is_clear: true,
     activity_json: Bytes::new(),
-  })
+  }))
 }
 
 /// Serialize the command's activity alone: the flood-guard fingerprint.
@@ -137,7 +117,7 @@ pub fn cached_activity(
 
   if args.activity.is_none() {
     let pid = args.pid.unwrap_or_default();
-    return Some(empty_cached(pid, SocketId::from(pid.to_string())));
+    return empty_cached(pid, SocketId::from(pid.to_string()));
   }
 
   let activity = args.activity.as_mut()?;
@@ -167,6 +147,24 @@ pub fn cached_activity(
 ///
 /// The ACK confirms receipt only — there is no backend behind most event
 /// families, so a subscription that is ACKed here will simply never fire.
+/// Emergency error frame for the (practically unreachable) case where
+/// the structured builders below fail to serialize: `cmd` is escaped
+/// through serde instead of interpolated raw, so the fallback is always
+/// valid JSON. `evt` renders as given or JSON null when `None`, mirroring
+/// each caller's primary shape. The primaries only fail on shapes that
+/// cannot occur (fixed String/int fields), which is why this stays a
+/// fallback instead of a `Result`.
+fn error_fallback_json(cmd: &str, evt: Option<&str>) -> String {
+  let safe_cmd = serde_json::to_string(cmd).unwrap_or_else(|_| r#""?""#.to_string());
+  match evt {
+    Some(evt) => {
+      let safe_evt = serde_json::to_string(evt).unwrap_or_else(|_| r#""?""#.to_string());
+      format!(r#"{{"cmd":{safe_cmd},"evt":{safe_evt}}}"#)
+    }
+    None => format!(r#"{{"cmd":{safe_cmd},"evt":null}}"#),
+  }
+}
+
 /// Events this server can actually dispatch: `READY` (on connect),
 /// `ERROR` (command failures) and `CURRENT_USER_UPDATE` (bridge identity
 /// changes via `SET_USER`/`RESET_USER`). Everything else in the official
@@ -185,7 +183,7 @@ pub fn subscribe_ack(cmd: &ActivityCmd) -> String {
     "evt": null,
     "nonce": cmd.nonce,
   }))
-  .unwrap_or_else(|_| format!(r#"{{"cmd":"{}","evt":"ERROR"}}"#, cmd.cmd))
+  .unwrap_or_else(|_| error_fallback_json(&cmd.cmd, Some("ERROR")))
 }
 
 /// Build the reply for a `GET_USER` command: the current identity, or
@@ -202,7 +200,7 @@ pub fn user_response(cmd: &ActivityCmd, user: Option<&RpcUser>) -> String {
     "evt": null,
     "nonce": cmd.nonce,
   }))
-  .unwrap_or_else(|_| format!(r#"{{"cmd":"{}","evt":"ERROR"}}"#, cmd.cmd))
+  .unwrap_or_else(|_| error_fallback_json(&cmd.cmd, Some("ERROR")))
 }
 
 /// Build the `CURRENT_USER_UPDATE` dispatch emitted when the local
@@ -284,7 +282,7 @@ pub fn rpc_error(cmd: &str, nonce: &Value, code: u16, message: &str) -> String {
     "evt": "ERROR",
     "nonce": nonce,
   }))
-  .unwrap_or_else(|_| format!(r#"{{"cmd":"{cmd}","evt":"ERROR"}}"#))
+  .unwrap_or_else(|_| error_fallback_json(cmd, Some("ERROR")))
 }
 
 /// Build a neutral acknowledgement for known secondary commands
@@ -300,7 +298,7 @@ pub fn generic_ack(cmd: &ActivityCmd) -> String {
     "evt": null,
     "nonce": cmd.nonce,
   }))
-  .unwrap_or_else(|_| format!(r#"{{"cmd":"{}","evt":null}}"#, cmd.cmd))
+  .unwrap_or_else(|_| error_fallback_json(&cmd.cmd, None))
 }
 /// Build the official-shaped confirmation reply for a `SET_ACTIVITY` command.
 ///
@@ -405,11 +403,14 @@ impl RecentActivities {
     payload: Option<&[u8]>,
     now: std::time::Instant,
   ) -> bool {
+    // One allocation per call: build the key once, borrow it for probes,
+    // move it into the insert. (An `AppId` key would allocate identically
+    // here — callers hold `&str` — so the tuple stays `String`-keyed.)
+    let key = (app_id.to_string(), pid);
     let Some(bytes) = payload else {
-      self.entries.remove(&(app_id.to_string(), pid));
+      self.entries.remove(&key);
       return false;
     };
-    let key = (app_id.to_string(), pid);
     if let Some((last, at)) = self.entries.get(&key)
       && last.as_slice() == bytes
       && now.duration_since(*at) < self.window
@@ -437,5 +438,27 @@ impl RecentActivities {
 impl Default for RecentActivities {
   fn default() -> Self {
     Self::new(Self::DEFAULT_WINDOW, Self::DEFAULT_CAP)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Hostile command names (quotes, backslashes, control chars) escape
+  /// through serde instead of breaking the emergency frame, in both
+  /// shapes (error event and null event).
+  #[test]
+  fn error_fallback_escapes_hostile_commands() {
+    let hostile = "x\"\\\n\x00y";
+    let frame = error_fallback_json(hostile, Some("ERROR"));
+    let parsed: serde_json::Value = serde_json::from_str(&frame).expect("fallback is valid JSON");
+    assert_eq!(parsed["cmd"], hostile);
+    assert_eq!(parsed["evt"], "ERROR");
+    let null_frame = error_fallback_json(hostile, None);
+    let null_parsed: serde_json::Value =
+      serde_json::from_str(&null_frame).expect("null fallback is valid JSON");
+    assert_eq!(null_parsed["cmd"], hostile);
+    assert!(null_parsed["evt"].is_null());
   }
 }

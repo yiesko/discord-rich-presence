@@ -50,7 +50,7 @@ pub(crate) fn is_genuine_clear(cmd: &ActivityCmd) -> bool {
 }
 
 /// Build the generic process-detection payload for a scanned game.
-pub(crate) fn generic_payload(game: &ScannedGame) -> Arc<CachedActivity> {
+pub(crate) fn generic_payload(game: &ScannedGame) -> Option<Arc<CachedActivity>> {
   let payload_struct = commands::ProcessPayload {
     activity: commands::ProcessActivity {
       application_id: game.id.clone(),
@@ -63,27 +63,20 @@ pub(crate) fn generic_payload(game: &ScannedGame) -> Arc<CachedActivity> {
     pid: game.pid,
     socket_id: SocketId::from(&game.id),
   };
-  // Same fixed-shape guarantee as `empty_cached` (String/int only):
-  // encode failure is a future-field bug — degrade loudly in diagnostics,
-  // never panic the broadcast path.
-  let activity_json = serde_json::to_vec(&payload_struct.activity).unwrap_or_default();
-  Arc::new(commands::CachedActivity {
+  // Fixed shapes: practically unreachable encode failure surfaces as
+  // `None` so callers log and drop instead of shipping an empty frame.
+  let activity_json = serde_json::to_vec(&payload_struct.activity).ok()?;
+  Some(Arc::new(commands::CachedActivity {
     json: serde_json::to_string(&payload_struct)
-      .map(tungstenite::Utf8Bytes::from)
-      .unwrap_or_else(|err| {
-        tracing::debug!("[bridge] Generic payload encode failed: {err}");
-        tungstenite::Utf8Bytes::from_static("")
-      }),
+      .ok()
+      .map(tungstenite::Utf8Bytes::from)?,
     msgpack: rmp_serde::to_vec_named(&payload_struct)
-      .map(bytes::Bytes::from)
-      .unwrap_or_else(|err| {
-        tracing::debug!("[bridge] Generic payload encode failed: {err}");
-        bytes::Bytes::new()
-      }),
+      .ok()
+      .map(bytes::Bytes::from)?,
     // Always built with `activity: Some` above.
     is_clear: false,
     activity_json: bytes::Bytes::from(activity_json),
-  })
+  }))
 }
 
 /// Remove one process publication only when the stored pid matches the
@@ -282,7 +275,12 @@ impl Shared {
       game.name,
       game.id
     );
-    self.broadcast_activity(generic_payload(game), SocketId::from(&game.id));
+    let Some(payload) = generic_payload(game) else {
+      tracing::warn!("[bridge] Dropping unencodable generic payload");
+      self.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
+      return;
+    };
+    self.broadcast_activity(payload, SocketId::from(&game.id));
   }
 
   /// Broadcast an activity payload, updating the replay cache (clears

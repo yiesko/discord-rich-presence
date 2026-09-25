@@ -58,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   joins on directed shutdown instead of blocking on netlink.
 
 ### Fixed
+- Hostile timestamps saturate instead of overflowing: `normalize_timestamp`
+  uses `saturating_mul`, so extreme inputs floor at `i64::MIN` in both
+  debug and release builds.
+- Payload builders (`empty_cached`, `generic_payload`) return `None` on
+  encode failure instead of shipping empty frames: callers log, count a
+  dropped broadcast and skip. The hand-written clear JSON is gone — clears
+  serialize from the same struct as everything else — and the emergency
+  error frames escape the command name instead of interpolating it raw.
+- The flood-guard key builds once per call instead of twice (an `AppId`
+  key would allocate identically, since callers hold `&str`).
 - Scanner threads now belong to the daemon lifecycle: `ProcessServer`
   gained directed `shutdown()` + `join()` (plus `rsrpc-*` thread names),
   every long sleep became an interruptible park, the netlink watcher
