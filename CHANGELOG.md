@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Split the two biggest modules internally, same crates and same
+  behavior: `rsrpc-detect/src/server.rs` is now foundation plus
+  `runtime` (threads, shutdown, join), `database` (bundle ownership and
+  swaps), `scanner` (enumeration and classification), `steam`
+  (library roots) alongside the existing `bundle`/`db`/`refresh`/`scan`
+  modules; `rsrpc-bridge/src/bridge.rs` is now construction plus pumps
+  alongside `consumer` (fan-out and pruning), `router` (activity
+  decisions), `replay` (cache and ghost-reap pid resolution), `snapshot`
+  (persistence) and `control` (`SET_USER`/`RESET_USER`). `Shared` fields
+  are crate-visible for the new units; no API or protocol changes.
+
 ### Fixed
 - Scanner threads now belong to the daemon lifecycle: `ProcessServer`
   gained directed `shutdown()` + `join()` (plus `rsrpc-*` thread names),
