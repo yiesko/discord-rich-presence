@@ -68,6 +68,25 @@ as best-effort.
 Want to change that? If you'd like to help maintain Windows or macOS
 support, volunteers are very welcome.
 
+## Compatible Discord clients
+
+Use this fork - and the original SpikeHD rsRPC it derives from - with
+[Equibop](https://github.com/Equicord/Equibop),
+[Vesktop](https://github.com/Vencord/Vesktop),
+[Dorion](https://github.com/SpikeHD/Dorion) or
+[GoofCord](https://github.com/Milkshiift/GoofCord) and never with the
+official Discord client, whether installed as a Flatpak or downloaded
+from Discord directly. Equibop bundles arRPC-bun, Vesktop and GoofCord
+bundle arRPC, and Dorion - built by the same developer as rsRPC -
+embeds rsRPC itself.
+
+Whichever server is embedded, you can simply switch it off and let
+this fork provide presence instead: each of these clients consumes
+presence through a bridge on `ws://127.0.0.1:1337`, which is this
+fork's default bridge port. The official client works differently: it
+only ever uses its own implementation and will override this fork's
+server, so running it alongside rsRPC accomplishes nothing.
+
 ## Install (Linux, systemd)
 
 ```bash
@@ -138,7 +157,7 @@ Requirements: [Rust and Cargo](https://www.rust-lang.org/) 1.95 or newer.
 
 ```bash
 git clone https://github.com/yiesko/discord-rich-presence
-cd rsRPC
+cd discord-rich-presence
 cargo build -p rsrpc-cli --release   # → target/release/rsrpc-cli
 ```
 
