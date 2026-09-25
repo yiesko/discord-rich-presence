@@ -1,4 +1,6 @@
-use rsrpc_state::{STATE_FILE_PREFIX, StateServers, StateSnapshot, select_slot, write_snapshot};
+use rsrpc_bridge::state::{
+  STATE_FILE_PREFIX, StateServers, StateSnapshot, select_slot, write_snapshot,
+};
 
 #[test]
 fn missing_slot_is_reusable() {
@@ -71,11 +73,13 @@ fn snapshot_round_trips_through_atomic_write() {
   let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Snapshots stamp the caller daemon version, never the crate version.
+/// Snapshots stamp the caller daemon version, never the defining crate's
+/// version (this held when the code lived in its own crate, and holds
+/// now that it lives in the bridge).
 #[test]
 fn snapshot_carries_caller_version_not_crate_version() {
-  // Regression net for the extraction: `env!("CARGO_PKG_VERSION")` inside
-  // this crate would freeze "0.1.0", so the daemon version travels as a
+  // Regression net: `env!("CARGO_PKG_VERSION")` inside the defining
+  // module would freeze the version, so the daemon version travels as a
   // parameter instead.
   let snapshot = StateSnapshot::new("9.9.9-test", StateServers::default(), vec![]);
   assert_eq!(snapshot.app_version, "9.9.9-test");

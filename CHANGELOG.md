@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified the same way before anything is installed from it.
 
 ### Changed
+- Folded `rsrpc-state` into `rsrpc-bridge` (12 crates down to 11): the
+  snapshot slots had exactly one consumer, so the crate boundary only
+  added hops. `rsrpc-telemetry` stays separate: four crates share it,
+  and folding it into the bridge would point their dependencies the
+  wrong way. `BindPaths=/tmp` in the unit stays as is: tightening was
+  investigated, but BindPaths takes no globs, the sockets only exist at
+  runtime, and the fan-out symlinks need the host path writable.
+- Regression nets now pin the memory bounds: replay-cache pruning and
+  broadcast fan-out never exceed `MAX_CACHED_ACTIVITIES`, and the
+  flood-guard table stays within its cap.
 - Shared package metadata and dependency pins now live in the workspace
   root (`[workspace.package]` + `[workspace.dependencies]`): edition,
   MSRV, license, repository, authors and 14 dependency versions change

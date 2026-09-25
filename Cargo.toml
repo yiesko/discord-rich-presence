@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "crates/rsrpc-ws", "crates/rsrpc-types", "crates/rsrpc-protocol", "crates/rsrpc-transport-ws", "crates/rsrpc-transport-ipc", "crates/rsrpc-state", "crates/rsrpc-bridge", "crates/rsrpc-telemetry", "crates/rsrpc-proc-events", "crates/rsrpc-steam", "crates/rsrpc-detect", "crates/rsrpc-core"]
+members = ["cli", "crates/rsrpc-ws", "crates/rsrpc-types", "crates/rsrpc-protocol", "crates/rsrpc-transport-ws", "crates/rsrpc-transport-ipc", "crates/rsrpc-bridge", "crates/rsrpc-telemetry", "crates/rsrpc-proc-events", "crates/rsrpc-steam", "crates/rsrpc-detect", "crates/rsrpc-core"]
 resolver = "2"
 
 # Shared package metadata: every member inherits these so author,

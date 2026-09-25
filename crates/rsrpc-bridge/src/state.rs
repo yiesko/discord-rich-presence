@@ -1,3 +1,10 @@
+//! Presence snapshot slots for external tooling, enabled with
+//! `--state-file` / `RSRPC_STATE_FILE`.
+//!
+//! Slots live beside arRPC's own files but use an `rsrpc-` prefix so
+//! both daemons coexist: `<tmpdir>/rsrpc-state-{0..9}`. Writes are
+//! atomic (temp + rename) so readers never see a torn file.
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,7 +64,7 @@ pub struct StateSnapshot {
 
 impl StateSnapshot {
   /// Build a snapshot stamped with the *caller* version: `env!` here would
-  /// freeze this crate's version, not the daemon's.
+  /// freeze the bridge crate's version, not the daemon's.
   pub fn new(app_version: &str, servers: StateServers, activities: Vec<StateActivity>) -> Self {
     Self {
       app_version: app_version.to_string(),

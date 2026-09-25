@@ -6,7 +6,7 @@
 
 use super::bridge::Shared;
 use super::replay::ReplayCache;
-use rsrpc_state::{StateActivity, StateServer, StateServers, StateSnapshot};
+use super::state::{StateActivity, StateServer, StateServers, StateSnapshot, write_snapshot};
 
 impl Shared {
   /// Write the snapshot when dirty (spawn_blocking: sync temp+rename+fsync
@@ -33,8 +33,7 @@ impl Shared {
     };
     let activities = state_activities(&self.cache.lock().unwrap_or_else(|e| e.into_inner()));
     let snapshot = StateSnapshot::new(&self.app_version, servers, activities);
-    let result =
-      tokio::task::spawn_blocking(move || rsrpc_state::write_snapshot(&path, &snapshot)).await;
+    let result = tokio::task::spawn_blocking(move || write_snapshot(&path, &snapshot)).await;
     match result {
       Ok(Ok(())) => {}
       Ok(Err(err)) => tracing::debug!("[bridge] State snapshot failed: {err}"),
