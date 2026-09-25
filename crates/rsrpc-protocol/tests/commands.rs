@@ -263,11 +263,11 @@ fn cached_builds_share_one_allocation() {
   use rsrpc_protocol::commands::empty_cached;
   use rsrpc_types::SocketId;
 
-  let payload = empty_cached(42, SocketId::from("sock"));
+  let payload = empty_cached(42, SocketId::from("sock")).expect("fixed shapes build");
   let shared = payload.clone();
   assert!(std::sync::Arc::ptr_eq(&payload, &shared));
   // Deref reaches both encodings without unwrapping.
-  assert!(payload.json.contains("\"pid\": 42"));
+  assert!(payload.json.contains("\"pid\":42"));
   assert!(!payload.msgpack.is_empty());
   // Cloning shares the refcounted backing, not the bytes.
   assert!(std::ptr::eq(
@@ -285,7 +285,11 @@ fn cached_payload_knows_whether_it_clears() {
   use rsrpc_types::cmd::ActivityCmd;
 
   // Clear builds always clear, without parsing to find out.
-  assert!(empty_cached(1, SocketId::from("s")).is_clear);
+  assert!(
+    empty_cached(1, SocketId::from("s"))
+      .expect("fixed shapes build")
+      .is_clear
+  );
 
   // Activity builds never clear.
   let mut cmd: ActivityCmd = serde_json::from_value(serde_json::json!({
