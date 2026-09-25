@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- Bumped `rustls` to 0.23.45 in the `fuzz` and `tools/updater`
+  workspaces (RUSTSEC-2026-0285, TLS 1.3 handshake); the main lock was
+  already clean. All three locks are now audited in CI.
 - The bridge now validates the WebSocket `Origin` header like the game
   transport already did: absent `Origin` (native clients) and Discord's
   own pages pass, anything else is closed at connect before READY unless
@@ -25,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified the same way before anything is installed from it.
 
 ### Changed
+- CI now runs the test suite on Windows and macOS as well as Linux,
+  audits all three lockfiles, and validates non-Rust artifacts
+  (`node --check` on the plugin, `systemd-analyze verify` on the unit,
+  typecheck of the fuzz workspace). A new fuzz workflow smoke-checks
+  targets on PRs and runs the engine nightly (10 minutes per target:
+  `ipc_frame`, `activity_full`, `trim_db`, `db_parse`), with corpus
+  caching between runs. New `ipc_frame` fuzz target covers the IPC
+  header parse, length bound and encode round-trip (26M execs clean).
 - All GitHub Actions references are pinned to commit SHAs (tags kept as
   comments), closing the mutable-tag supply-chain window on the release
   pipeline especially.

@@ -79,7 +79,12 @@ jobs:
         run: cargo clippy --manifest-path ./Cargo.toml --workspace --all-targets --locked -- -D warnings
 
   test:
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.platform }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -128,8 +133,11 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      - name: Security audit
-        run: cargo audit
+      - name: Security audit (all workspaces)
+        run: |
+          cargo audit
+          cargo audit --file fuzz/Cargo.lock
+          cargo audit --file tools/updater/Cargo.lock
 
   msrv:
     runs-on: ubuntu-22.04
@@ -146,3 +154,20 @@ jobs:
 
       - name: MSRV check
         run: cargo check --manifest-path ./Cargo.toml --workspace --all-targets --locked
+
+  artifacts:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Plugin syntax
+        run: node --check plugin/rsrpc.js
+
+      - name: Systemd unit
+        run: systemd-analyze verify ./systemd/rsrpc.service
+
+      - name: Fuzz workspace check
+        run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
