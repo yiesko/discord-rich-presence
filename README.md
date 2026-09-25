@@ -106,7 +106,8 @@ curl -fsSL https://raw.githubusercontent.com/yiesko/discord-rich-presence/main/s
 ```
 
 The script detects your architecture, downloads the newest release binary
-and unit file, verifies them (SHA256 plus minisign when available), and
+and unit file, verifies both against the minisign-signed checksum
+manifest (minisign is required), and
 installs to `~/.local/bin` and `~/.config/systemd/user`, then enables and
 starts the user service. Re-running it updates. Flags: `--yes`, `--force`,
 `--no-systemd` (files only), `--auto-update` (opt into background update

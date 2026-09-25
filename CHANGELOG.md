@@ -18,8 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process-wide across both bridge servers (per-server counters could
   alias registrations), and messages from unregistered ids never reach
   control handling.
+- The installer is fail-closed: a missing signature manifest or a
+  missing `minisign` binary aborts the install instead of continuing on
+  SHA256 alone (explicit `--binary` files stay exempt). The systemd unit
+  ships as a signed release asset covered by `SHA256SUMS.txt` and is
+  verified the same way before anything is installed from it.
 
 ### Changed
+- All GitHub Actions references are pinned to commit SHAs (tags kept as
+  comments), closing the mutable-tag supply-chain window on the release
+  pipeline especially.
 - Unix IPC pumps are capped at 16 concurrent peers like Windows (which
   keeps 32): connection floods past the cap drop peers at accept instead
   of parking blocking threads without bound, leaving room in the

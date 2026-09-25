@@ -48,11 +48,11 @@ jobs:
             target: 'aarch64-pc-windows-msvc'
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Generate detectable snapshot
         run: cargo run --manifest-path tools/updater/Cargo.toml
@@ -124,7 +124,7 @@ jobs:
           PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
 
       - name: Upload binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: rsrpc-${{ matrix.config.target }}
           # Find exec based on platform
@@ -138,14 +138,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
 
       # Download all artifacts from the build job
       - name: Download artifacts
         # NOTE: no node24 release yet (v6 still targets node20); bump when upstream ships it.
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           path: artifacts
 
@@ -169,11 +169,12 @@ jobs:
           # sha256sum-compatible manifest covering everything uploaded.
           # MVP targets only: Linux x86_64 + ARM64. NOTE: this runs after
           # the zip step above already removed the artifact dirs, so the
-          # binaries are pulled back out of their zips.
+          # binaries are pulled back out of their zips. The unit file
+          # rides the same manifest so install.sh verifies it identically.
           unzip -p rsrpc-x86_64-unknown-linux-gnu.zip rsrpc-cli > ./rsrpc-cli-x86_64-unknown-linux-gnu
           unzip -p rsrpc-aarch64-unknown-linux-gnu.zip rsrpc-cli > ./rsrpc-cli-aarch64-unknown-linux-gnu
           chmod +x rsrpc-cli-x86_64-unknown-linux-gnu rsrpc-cli-aarch64-unknown-linux-gnu
-          sha256sum rsrpc-cli-x86_64-unknown-linux-gnu rsrpc-cli-aarch64-unknown-linux-gnu rsrpc*.zip > SHA256SUMS.txt
+          sha256sum rsrpc-cli-x86_64-unknown-linux-gnu rsrpc-cli-aarch64-unknown-linux-gnu rsrpc*.zip systemd/rsrpc.service > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Sign OTA manifest
@@ -215,13 +216,14 @@ jobs:
           } > RELEASE_NOTES.md
 
       - name: Create release using all artifacts
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@5113cdc90fd4d541c801c55356214017bf5ae34b # v3
         if: github.event_name != 'schedule'
         with:
           files: |
             rsrpc*.zip
             rsrpc-cli-x86_64-unknown-linux-gnu
             rsrpc-cli-aarch64-unknown-linux-gnu
+            systemd/rsrpc.service
             SHA256SUMS.txt
             SHA256SUMS.txt.minisig
           token: ${{ secrets.GITHUB_TOKEN }}

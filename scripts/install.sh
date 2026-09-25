@@ -4,8 +4,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/yiesko/discord-rich-presence/main/scripts/install.sh | bash
 #
 # What it does: detects the arch, downloads the matching release binary
-# (+ unit file) for the newest tag, SHA256-verifies it (plus a minisign
-# check when the tool is present), installs to ~/.local/bin and
+# (+ unit file) for the newest tag, verifies both against the
+# minisign-signed checksum manifest (minisign is required — there is no
+# silent SHA256-only fallback), installs to ~/.local/bin and
 # ~/.config/systemd/user (timestamped backups of anything replaced),
 # then enables + starts the user service. Re-running it updates.
 #
@@ -97,6 +98,7 @@ if [ -z "$TAG" ]; then
   [ -n "$TAG" ] || die "could not resolve the newest tag (network/API?)"
 fi
 log "release: $TAG ($TRIPLE)"
+BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -105,13 +107,12 @@ if [ -n "$BINARY" ]; then
   [ -f "$BINARY" ] || die "binary not found: $BINARY"
   cp "$BINARY" "$WORK/$APP"
 else
-  BASE="https://github.com/${REPO}/releases/download/${TAG}"
   log "downloading binary..."
   curl -fsSL --max-time 120 -o "$WORK/$APP" "${BASE}/${APP}-${TRIPLE}"
   log "downloading checksums..."
   curl -fsSL --max-time 30 -o "$WORK/SHA256SUMS.txt" "${BASE}/SHA256SUMS.txt"
   curl -fsSL --max-time 30 -o "$WORK/SHA256SUMS.txt.minisig" "${BASE}/SHA256SUMS.txt.minisig" \
-    || warn "no signature manifest; continuing on SHA256 only"
+    || die "no signature manifest: refusing to install without authentication"
 fi
 
 # Verify before anything executes or installs. The manifest lists every
@@ -127,7 +128,7 @@ if [ -f "$WORK/SHA256SUMS.txt" ]; then
         || die "signature invalid: refusing to install"
       log "signature OK"
     else
-      warn "minisign not installed: signature NOT checked (install it for full verification)"
+      die "minisign not installed: refusing to install unverified (install minisign and retry)"
     fi
   fi
 elif [ -n "$BINARY" ]; then
@@ -148,10 +149,22 @@ if [ -z "$UNIT" ]; then
   if [ -f "./systemd/${UNIT_NAME}" ]; then
     UNIT="./systemd/${UNIT_NAME}"
   else
+    # Explicit --binary mode never downloads a manifest, so there is
+    # nothing to verify a remote unit against: pass --unit or run from
+    # a checkout instead.
+    [ -f "$WORK/SHA256SUMS.txt" ] \
+      || die "no verified manifest (explicit --binary mode needs an explicit --unit file or a checkout)"
     log "downloading unit file..."
-    curl -fsSL --max-time 30 -o "$WORK/$UNIT_NAME" \
-      "https://raw.githubusercontent.com/${REPO}/${TAG}/systemd/${UNIT_NAME}"
+    curl -fsSL --max-time 30 -o "$WORK/$UNIT_NAME" "${BASE}/${UNIT_NAME}" \
+      || die "unit asset missing for $TAG (pre-signed-unit release? pass --unit PATH)"
     UNIT="$WORK/$UNIT_NAME"
+    # The unit rides the same signed manifest as the binary: verify
+    # before anything is installed from it.
+    UNIT_HASH="$(awk -v f="systemd/${UNIT_NAME}" '$2 == f {print $1}' "$WORK/SHA256SUMS.txt")"
+    [ -n "$UNIT_HASH" ] || die "unit entry missing from checksum manifest: refusing to install"
+    echo "$UNIT_HASH  $UNIT" | sha256sum -c --status - \
+      || die "unit checksum mismatch: refusing to install"
+    log "unit checksum OK"
   fi
 fi
 [ -f "$UNIT" ] || die "unit file not found: $UNIT"

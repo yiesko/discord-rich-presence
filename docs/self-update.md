@@ -88,7 +88,8 @@ Published update binaries are Linux x86_64 and Linux ARM64
 (`rsrpc-cli-x86_64-unknown-linux-gnu`, `rsrpc-cli-aarch64-unknown-linux-gnu`).
 Anything else reports `no published builds for <triple>` and keeps the
 version it has. Releases also ship `SHA256SUMS.txt` (plus its minisign
-signature) and zipped builds for Linux armv7, macOS (x86_64 and ARM64) and
+signature), the `systemd/rsrpc.service` unit file (covered by the same
+manifest), and zipped builds for Linux armv7, macOS (x86_64 and ARM64) and
 Windows (x86_64 and ARM64) on the
 [releases page](https://github.com/yiesko/discord-rich-presence/releases).
 
