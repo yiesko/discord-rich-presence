@@ -40,6 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `run_until` takes a shutdown future: whatever you pass resolves when the
 daemon should stop (a Ctrl+C signal, a channel closing, a test ending).
+Teardown is total — transports, bridge, scanner threads and the event
+pump all stop and join, in reverse startup order. When `run_until`
+returns, no rsRPC thread is still running, so embedding more than one
+daemon lifetime per process is safe.
 
 ## Loading the database
 
@@ -157,8 +161,9 @@ the same locations the CLI checks (`$RSRPC_OVERRIDES_FILE` /
 `detect_once` and `database_summary` must run **before** it. One-shot use
 never needs `run_until` at all.
 
-Treat one `run_until` per process as the supported shape: background
-threads are not joined when it returns.
+Teardown is total (see above): when `run_until` returns, no rsRPC
+thread is still running, so starting another daemon afterwards is
+safe — only the consumed `Daemon` value itself is single-use.
 
 ## Errors
 

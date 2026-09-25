@@ -261,6 +261,23 @@ impl<T> GaugeReceiver<T> {
       self.gauge.dec();
     })
   }
+
+  /// Bounded receive for interruptible loops, releasing the backlog count
+  /// on success exactly like [`recv`](Self::recv).
+  ///
+  /// # Errors
+  ///
+  /// Returns [`mpsc::RecvTimeoutError::Timeout`] on deadline expiry (the
+  /// caller re-checks its shutdown flag) and
+  /// [`mpsc::RecvTimeoutError::Disconnected`] once every sender is gone.
+  pub fn recv_timeout(
+    &self,
+    timeout: std::time::Duration,
+  ) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    self.inner.recv_timeout(timeout).inspect(|_| {
+      self.gauge.dec();
+    })
+  }
 }
 
 impl<T> Drop for GaugeReceiver<T> {

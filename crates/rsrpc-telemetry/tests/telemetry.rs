@@ -172,3 +172,41 @@ fn format_resource_stats_mentions_reason_and_fields() {
   assert!(line.contains("proc:4"), "proc depth missing: {line}");
   assert!(line.contains("ws:5"), "ws depth missing: {line}");
 }
+
+/// `recv_timeout` honors the deadline, counts only real receives, and
+/// reports a gone sender like `recv` (needed for interruptible shutdown
+/// loops: timeout wakes the loop, disconnect ends it).
+#[test]
+fn recv_timeout_honors_deadline_and_disconnect() {
+  use std::sync::mpsc::RecvTimeoutError;
+  use std::time::{Duration, Instant};
+  let (tx, rx) = QueueGauge::pair::<u64>();
+  let gauge = tx.gauge();
+  let start = Instant::now();
+  assert!(
+    matches!(
+      rx.recv_timeout(Duration::from_millis(50)),
+      Err(RecvTimeoutError::Timeout)
+    ),
+    "empty queue must time out"
+  );
+  assert!(
+    start.elapsed() < Duration::from_secs(5),
+    "timeout must bound the wait"
+  );
+  tx.send(7).expect("send");
+  assert_eq!(
+    rx.recv_timeout(Duration::from_secs(5)).expect("recv"),
+    7,
+    "message must arrive"
+  );
+  assert_eq!(gauge.depth(), 0, "only real receives release backlog");
+  drop(tx);
+  assert!(
+    matches!(
+      rx.recv_timeout(Duration::from_millis(50)),
+      Err(RecvTimeoutError::Disconnected)
+    ),
+    "gone sender must disconnect"
+  );
+}
