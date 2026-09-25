@@ -2,6 +2,38 @@
 members = ["cli", "crates/rsrpc-ws", "crates/rsrpc-types", "crates/rsrpc-protocol", "crates/rsrpc-transport-ws", "crates/rsrpc-transport-ipc", "crates/rsrpc-state", "crates/rsrpc-bridge", "crates/rsrpc-telemetry", "crates/rsrpc-proc-events", "crates/rsrpc-steam", "crates/rsrpc-detect", "crates/rsrpc-core"]
 resolver = "2"
 
+# Shared package metadata: every member inherits these so author,
+# license, repository, edition and MSRV cannot drift apart.
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/yiesko/discord-rich-presence"
+authors = ["spikehd", "yieskoW"]
+
+# Shared dependency pins: members inherit with `dep = { workspace = true }`
+# (plus their own `features`, which add to the workspace set). Versions
+# change here once instead of per crate.
+[workspace.dependencies]
+tokio = { version = "1.53" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+thiserror = "2"
+bytes = "1.12"
+tungstenite = "0.30"
+tokio-tungstenite = "0.30"
+futures-util = "0.3"
+ureq = { version = "3", default-features = false, features = ["rustls", "charset"] }
+serde_with = "3.21"
+rustc-hash = "2.1"
+rmp-serde = "1.3"
+hotpath = "0.25"
+tracing-subscriber = { version = "0.3", default-features = false }
+# tokio-util is intentionally NOT inherited: default-features differ per
+# crate (bridge/ws opt out) and inheritance cannot override them, so each
+# user pins explicitly.
+
 # Shared lint gates (each member opts in with `lints.workspace = true`):
 # correctness denies landmines, the rest warn. Deliberately NOT pedantic
 # or `warnings = "deny"`: those break across toolchain/MSRV skew, while CI

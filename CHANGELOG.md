@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verified the same way before anything is installed from it.
 
 ### Changed
+- Shared package metadata and dependency pins now live in the workspace
+  root (`[workspace.package]` + `[workspace.dependencies]`): edition,
+  MSRV, license, repository, authors and 14 dependency versions change
+  once instead of per crate. `Cargo.lock` is byte-identical, and per-crate
+  versions are untouched. `authors` names the historical author and the
+  current maintainer (`spikehd`, `yieskoW`). `tokio-util` stays pinned
+  per crate on purpose: inheritance cannot override `default-features`.
 - CI now runs the test suite on Windows and macOS as well as Linux,
   audits all three lockfiles, and validates non-Rust artifacts
   (`node --check` on the plugin, `systemd-analyze verify` on the unit,

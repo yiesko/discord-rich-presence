@@ -1,13 +1,13 @@
 [package]
 name = "rsrpc-cli"
 version = "0.36.1"
-edition = "2024"
-rust-version = "1.95"
-authors = ["spikehd"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "Alternative Discord RPC server CLI: game detection with bundled database, IPC/WebSocket transports and bridge"
-license = "MIT"
+license.workspace = true
 readme = "../README.md"
-repository = "https://github.com/yiesko/discord-rich-presence"
+repository.workspace = true
 keywords = ["discord", "rich-presence", "rpc", "bridge", "cli"]
 categories = ["command-line-utilities"]
 
@@ -18,11 +18,11 @@ workspace = true
 rsrpc-core = { path = "../crates/rsrpc-core" }
 rsrpc-detect = { path = "../crates/rsrpc-detect" }
 clap = { version = "4.6.6", features = ["derive", "std", "env", "help", "usage", "error-context"], default-features = false }
-ureq = { version = "3.4.0", default-features = false, features = ["rustls", "charset"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 semver = "1.0"
 sha2 = "0.10"
 minisign-verify = "0.2"
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter", "std"] }

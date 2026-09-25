@@ -1,12 +1,12 @@
 [package]
 name = "rsrpc-types"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.95"
-authors = ["spikehd"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "Core wire types for rsRPC: ids, activity commands, bridge identity"
-license = "MIT"
-repository = "https://github.com/yiesko/discord-rich-presence"
+license.workspace = true
+repository.workspace = true
 keywords = ["discord", "rich-presence", "rpc"]
 categories = ["network-programming"]
 
@@ -14,9 +14,9 @@ categories = ["network-programming"]
 workspace = true
 
 [dependencies]
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-serde_with = "3.21"
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+serde_with.workspace = true
 
 [dev-dependencies]
-serde_json = "1.0"
+serde_json.workspace = true

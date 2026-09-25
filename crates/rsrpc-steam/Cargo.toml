@@ -1,12 +1,12 @@
 [package]
 name = "rsrpc-steam"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.95"
-authors = ["spikehd"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "Steam library provider: VDF parsing, install-dir index, refresh with mtime fingerprints"
-license = "MIT"
-repository = "https://github.com/yiesko/discord-rich-presence"
+license.workspace = true
+repository.workspace = true
 keywords = ["steam", "games", "vdf"]
 categories = ["parser-implementations"]
 
@@ -14,7 +14,7 @@ categories = ["parser-implementations"]
 workspace = true
 
 [dependencies]
-serde_json = "1.0"
-tracing = "0.1"
+serde_json.workspace = true
+tracing.workspace = true
 # Profiling only: inert unless a `hotpath-*` feature is enabled.
-hotpath = "0.25"
+hotpath.workspace = true

@@ -1,12 +1,12 @@
 [package]
 name = "rsrpc-telemetry"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.95"
-authors = ["spikehd"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "rsRPC diagnostics: queue depth gauges, self-RSS, resource census rendering"
-license = "MIT"
-repository = "https://github.com/yiesko/discord-rich-presence"
+license.workspace = true
+repository.workspace = true
 keywords = ["discord", "metrics", "diagnostics"]
 categories = ["network-programming"]
 

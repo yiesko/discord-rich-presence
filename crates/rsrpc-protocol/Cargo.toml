@@ -1,12 +1,12 @@
 [package]
 name = "rsrpc-protocol"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.95"
-authors = ["spikehd"]
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "rsRPC wire protocol: errors, bridge payloads, reply builders, flood guard"
-license = "MIT"
-repository = "https://github.com/yiesko/discord-rich-presence"
+license.workspace = true
+repository.workspace = true
 keywords = ["discord", "rich-presence", "rpc"]
 categories = ["network-programming"]
 
@@ -15,16 +15,16 @@ workspace = true
 
 [dependencies]
 rsrpc-types = { path = "../rsrpc-types" }
-bytes = "1.12"
-tungstenite = "0.30"
-serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
-serde_with = "3.21"
-rmp-serde = "1.3"
-thiserror = "2.0"
+bytes.workspace = true
+tungstenite.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+serde_with.workspace = true
+rmp-serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-serde_json = "1.0"
+serde_json.workspace = true
 rsrpc-types = { path = "../rsrpc-types" }
 criterion = "0.8.2"
 
