@@ -107,6 +107,8 @@ Every field, with its default:
 | `ignored_ids` | `[]` | App ids the scanner never publishes (`--ignore-ids`) |
 | `exclusions_url` | `None` | Discord exclusions feed (`--exclusions-url`) |
 | `app_version` | this crate's version | Version stamped into state snapshots |
+| `state_file` | `false` | Presence snapshots to `<tmpdir>/rsrpc-state-{0..9}` (`--state-file`) |
+| `bridge_allowed_origins` | `[]` | Extra browser origins driving bridge commands (`--bridge-allowed-origins`) |
 
 ## One-shot diagnostics (no threads)
 
