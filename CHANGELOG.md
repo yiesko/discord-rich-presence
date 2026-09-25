@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-09-24
+
 ### Fixed
 - `--rollback` no longer re-executes into an infinite toggle loop. The
   re-exec passes the original argv back and `cmd_rollback` had no
@@ -27,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sandboxed service could not swap in its own staged self-updates
   (discarded at boot with `cannot replace binary`), and the dead
   `RSRPC_LOGS_ENABLED=1` line (no longer read by the logger) is gone.
+
+### Changed
+- The repository moved from `yiesko/rsRPC` to
+  `yiesko/discord-rich-presence`; every checked-in URL (crates,
+  install script, docs, changelog links, self-update API) now points
+  at the new location.
+- The README was rewritten in plain English with a screenshots section,
+  and the deep guides moved into `docs/` (`cli-options`,
+  `process-detection`, `protocol`, `web-client`, `library`,
+  `self-update`, `systemd-operations`); `systemd-user-units.md` is now
+  a step-by-step setup guide quoting the unit byte-for-byte.
 
 ## [0.36.0] - 2026-09-23
 
@@ -561,7 +574,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Stuck presence after game close.
 
-[Unreleased]: https://github.com/yiesko/discord-rich-presence/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/yiesko/discord-rich-presence/compare/v0.36.1...HEAD
+[0.36.1]: https://github.com/yiesko/discord-rich-presence/releases/tag/v0.36.1
 [0.36.0]: https://github.com/yiesko/discord-rich-presence/releases/tag/v0.36.0
 [0.35.0]: https://github.com/yiesko/discord-rich-presence/releases/tag/v0.35.0
 [0.34.0]: https://github.com/yiesko/discord-rich-presence/releases/tag/v0.34.0
