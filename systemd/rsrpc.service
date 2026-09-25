@@ -10,7 +10,6 @@ StartLimitBurst=3
 [Service]
 Type=exec
 Environment=XDG_RUNTIME_DIR=%t
-Environment=RSRPC_LOGS_ENABLED=1
 # Port/cadence parametrization (clap reads RSRPC_* env). Defaults match
 # the CLI; uncomment to pin alternatives for testing.
 Environment=RSRPC_BRIDGE_PORT=1337
@@ -42,8 +41,9 @@ BindPaths=/tmp
 ProtectSystem=strict
 ProtectHome=read-only
 # Steam provider + OTA caches (~/.cache/rsrpc) stay writable under the
-# read-only home; %t keeps the IPC sockets writable.
-ReadWritePaths=%h/.config/rsrpc %t %h/.cache/rsrpc
+# read-only home; %t keeps the IPC sockets writable; %h/.local/bin lets
+# the sandboxed service swap in staged self-updates at boot.
+ReadWritePaths=%h/.config/rsrpc %t %h/.cache/rsrpc %h/.local/bin
 # cn_proc watcher needs AF_NETLINK; without it the scanner silently stays
 # on polling (diagnose via the missing "watcher live" boot line).
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
