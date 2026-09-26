@@ -167,7 +167,13 @@ jobs:
         run: node --check plugin/rsrpc.js
 
       - name: Systemd unit
-        run: systemd-analyze verify ./systemd/rsrpc.service
+        run: |
+          # verify only checks the ExecStart path exists and is
+          # executable; the runner has no installed binary, so stub it.
+          mkdir -p ~/.local/bin
+          touch ~/.local/bin/rsrpc-cli
+          chmod +x ~/.local/bin/rsrpc-cli
+          systemd-analyze verify ./systemd/rsrpc.service
 
       - name: Fuzz workspace check
         run: cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked
