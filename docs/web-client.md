@@ -30,7 +30,9 @@ WebSocket has no CORS gate of its own, so the bridge checks the
   `https://ptb.discord.com`) pass without extra configuration.
 - Anything else is refused at connect (closed before READY) unless
   listed in `--bridge-allowed-origins` /
-  `RSRPC_BRIDGE_ALLOWED_ORIGINS` (comma-separated, exact match).
+  `RSRPC_BRIDGE_ALLOWED_ORIGINS` (comma-separated; normalized to
+  browser form — lowercase, no trailing slash, no default port —
+  then exact match).
 
 ## Using `RsRpcClient`
 

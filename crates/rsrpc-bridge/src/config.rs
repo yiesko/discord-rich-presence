@@ -108,9 +108,14 @@ impl BridgeConfig {
   }
 
   /// Extra browser origins allowed to drive bridge commands.
+  /// Normalized once (lowercase, no trailing slash, no default port)
+  /// so configured values match browser serialization.
   #[must_use]
   pub fn allowed_origins(mut self, origins: Vec<String>) -> Self {
-    self.allowed_origins = origins;
+    self.allowed_origins = origins
+      .iter()
+      .map(|origin| super::origin::normalize_origin(origin))
+      .collect();
     self
   }
 
@@ -146,5 +151,17 @@ mod tests {
     assert_eq!(config.msgpack_port_start, 1338);
     assert_eq!(config.persist_interval, DEFAULT_PERSIST_INTERVAL);
     assert!(config.state_dir.is_none());
+  }
+
+  /// The builder stores canonical origins, so the per-connection check
+  /// stays an exact comparison.
+  #[test]
+  fn allowed_origins_normalize_once() {
+    let config = BridgeConfig::new(0, 0, 0, 0)
+      .allowed_origins(vec!["HTTPS://My-Client.Example:443/".to_string()]);
+    assert_eq!(
+      config.allowed_origins,
+      vec!["https://my-client.example".to_string()]
+    );
   }
 }
