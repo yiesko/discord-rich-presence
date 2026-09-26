@@ -31,8 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Presence snapshots are owner-only: the temp file is created with an
   explicit `0600` mode on Unix (the rename carries it to the final
   path), so app ids, pids and ports stay private under a permissive
-  umask. Slot selection stays best-effort — concurrent daemons share
-  slots, last writer wins.
+  umask. Every write uses its own temp, created exclusively without
+  following symlinks, so a planted link is refused and concurrent
+  daemons sharing a slot still write apart. Slot selection stays
+  best-effort — concurrent daemons share slots, last writer wins —
+  and stale crash temps are swept under the same staleness rule.
 
 ### Changed
 - Folded `rsrpc-state` into `rsrpc-bridge` (12 crates down to 11): the
@@ -125,6 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed `/proc` directory entry can no longer abort the scan tick:
   the skip is now explicit (the surrounding filter already excluded
   errors; the invariant is documented, behavior unchanged).
+- Steam prefix matching works on Windows: library keys and queries are
+  canonicalized once (lowercase, backslash to slash, leading slash), so
+  native `C:\...` paths meet the cached keys. Without this no prefix
+  ever matched there and Steam games went undetected.
 
 ## [0.36.1] - 2026-09-24
 
