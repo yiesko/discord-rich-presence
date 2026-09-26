@@ -38,6 +38,10 @@ const STEAM_ROOT_ENV: &str = "RSRPC_STEAM_ROOT";
 const STEAM_LIBRARIES_ENV: &str = "RSRPC_STEAM_LIBRARIES";
 /// Cache filename under `$XDG_CACHE_HOME` (else `~/.cache`).
 const CACHE_FILE: &str = "rsrpc/steam-libraries.json";
+/// Cache schema version: bumped to 2 when prefix keys became canonical
+/// (`/`-separated), so v1 caches holding Windows backslash keys are
+/// ignored once and rescanned instead of reused empty.
+const STEAM_CACHE_VERSION: u64 = 2;
 
 #[derive(Clone, Debug)]
 pub enum Vdf {
@@ -661,8 +665,8 @@ impl SteamLibraries {
 }
 
 /// Whether `prefix` (a cached install-dir key) belongs to `library`.
-/// Keys are built as `<library-lower>/steamapps/...`, so a string-prefix
-/// test on the lowercased library path is exact.
+/// Keys are built canonical (`canonical_steam_path` + `/steamapps/...`),
+/// so a string-prefix test on the canonical library path is exact.
 fn library_owns_prefix(library: &Path, prefix: &str) -> bool {
   prefix.starts_with(&library_prefix(library))
 }
@@ -1027,17 +1031,23 @@ fn fingerprint_from_json(value: &serde_json::Value) -> Option<Fingerprint> {
 /// Read the on-disk library cache, tolerating absence and corruption as
 /// an empty cache (rediscovery covers the gap).
 fn load_cache() -> HashMap<String, CachedLibrary> {
-  let mut cached = HashMap::new();
   let Some(path) = cache_path() else {
-    return cached;
+    return HashMap::new();
   };
-  let Ok(body) = read_limited(&path, MAX_FOLDERS_BYTES) else {
+  load_cache_from(&path)
+}
+
+/// Cache entries from one file (split for hermetic tests: production
+/// reads the platform cache dir, tests pass a scratch file).
+fn load_cache_from(path: &Path) -> HashMap<String, CachedLibrary> {
+  let mut cached = HashMap::new();
+  let Ok(body) = read_limited(path, MAX_FOLDERS_BYTES) else {
     return cached;
   };
   let Ok(doc) = serde_json::from_str::<serde_json::Value>(&body) else {
     return cached;
   };
-  if doc.get("version").and_then(|v| v.as_u64()) != Some(1) {
+  if doc.get("version").and_then(|v| v.as_u64()) != Some(STEAM_CACHE_VERSION) {
     return cached;
   }
   if let Some(libraries) = doc.get("libraries").and_then(|v| v.as_object()) {
@@ -1106,7 +1116,10 @@ fn save_cache(libraries: &SteamLibraries) {
     }
   }
   let mut doc = serde_json::Map::new();
-  doc.insert("version".to_string(), serde_json::Value::from(1));
+  doc.insert(
+    "version".to_string(),
+    serde_json::Value::from(STEAM_CACHE_VERSION),
+  );
   let mut libs = serde_json::Map::new();
   for (lib_path, fingerprint) in &libraries.fingerprints {
     let mut entry = serde_json::Map::new();
@@ -1150,5 +1163,48 @@ mod tests {
       "/home/u/.local/share/steam"
     );
     assert_eq!(canonical_steam_path("relative\\dir"), "/relative/dir");
+  }
+
+  /// v1 caches (backslash prefix keys on Windows) are ignored once and
+  /// rescanned instead of reused empty.
+  #[test]
+  fn v1_cache_is_ignored() {
+    let dir = std::env::temp_dir().join(format!("rsrpc-steam-test-cachev1-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("cache.json");
+    std::fs::write(
+      &file,
+      r#"{"version":1,"libraries":{"/lib":{"fingerprint":{"dir_mtime_ms":1,"manifests":1,"newest_manifest_ms":1,"compat_mtime_ms":0},"dirs":{"/lib/steamapps/common/game/":"1"}}}}"#,
+    )
+    .expect("v1 cache");
+    assert!(
+      load_cache_from(&file).is_empty(),
+      "v1 cache must be ignored"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// The current schema version still loads through the same path.
+  #[test]
+  fn current_cache_version_loads() {
+    let dir = std::env::temp_dir().join(format!("rsrpc-steam-test-cachev2-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("cache.json");
+    let body = serde_json::json!({
+      "version": STEAM_CACHE_VERSION,
+      "libraries": {
+        "/lib": {
+          "fingerprint": {"dir_mtime_ms": 1, "manifests": 1, "newest_manifest_ms": 1, "compat_mtime_ms": 0},
+          "dirs": {"/lib/steamapps/common/game/": "1"}
+        }
+      }
+    });
+    std::fs::write(&file, body.to_string()).expect("v2 cache");
+    let cached = load_cache_from(&file);
+    assert_eq!(
+      cached["/lib"].dirs.get("/lib/steamapps/common/game/"),
+      Some(&"1".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
   }
 }
