@@ -131,7 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Steam prefix matching works on Windows: library keys and queries are
   canonicalized once (lowercase, backslash to slash, leading slash), so
   native `C:\...` paths meet the cached keys. Without this no prefix
-  ever matched there and Steam games went undetected.
+  ever matched there and Steam games went undetected. The library cache
+  schema bumped to v2 for the same reason: v1 caches holding backslash
+  keys are ignored once and rescanned instead of reused empty.
+- The crash-temp sweep only removes snapshot temps: it now requires the
+  snapshot filename prefix too, so other programs' `*.tmp-*` files in
+  the shared temp dir are never touched.
 
 ## [0.36.1] - 2026-09-24
 
