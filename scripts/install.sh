@@ -13,10 +13,11 @@
 # Non-interactive / hermetic knobs (tests, provisioning):
 #   --yes            answer yes to prompts (keeps safe defaults)
 #   --force          reinstall even when the same version is present
-#   --no-systemd     only lay down files, skip all systemctl/loginctl calls
+#   --no-systemd     install the binary only, skip the unit file and all
+#                    systemctl/loginctl calls
 #   --auto-update    opt into background update staging (default: off)
-#   --binary PATH    use this file instead of downloading (unit still
-#                    resolves from ./systemd/ or the tag, see --unit)
+#   --binary PATH    use this file instead of downloading (unit resolves
+#                    from ./systemd/, --unit, or the tag unless --no-systemd)
 #   --unit PATH      use this unit file instead of resolving one
 #   --tag TAG        install this release instead of the newest (e.g. v0.33.1)
 #   -h, --help       usage
@@ -145,7 +146,7 @@ if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "${TAG#v}" ] && [ "$F
   exit 0
 fi
 
-if [ -z "$UNIT" ]; then
+if [ "$NO_SYSTEMD" -eq 0 ] && [ -z "$UNIT" ]; then
   if [ -f "./systemd/${UNIT_NAME}" ]; then
     UNIT="./systemd/${UNIT_NAME}"
   else
@@ -167,18 +168,23 @@ if [ -z "$UNIT" ]; then
     log "unit checksum OK"
   fi
 fi
-[ -f "$UNIT" ] || die "unit file not found: $UNIT"
+if [ "$NO_SYSTEMD" -eq 0 ]; then
+  [ -f "$UNIT" ] || die "unit file not found: $UNIT"
+fi
 
 if [ -n "$INSTALLED_VERSION" ]; then
   confirm "replace $APP $INSTALLED_VERSION with ${TAG#v}?" || die "cancelled"
 fi
 
-mkdir -p "$BIN_DIR" "$UNIT_DIR"
+mkdir -p "$BIN_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 [ -f "${BIN_DIR}/${APP}" ] && cp -a "${BIN_DIR}/${APP}" "${BIN_DIR}/${APP}.bak-${STAMP}" && log "backed up binary"
 cp -a "$WORK/$APP" "${BIN_DIR}/${APP}"
-[ -f "${UNIT_DIR}/${UNIT_NAME}" ] && cp -a "${UNIT_DIR}/${UNIT_NAME}" "${UNIT_DIR}/${UNIT_NAME}.bak-${STAMP}" && log "backed up unit"
-cp -a "$UNIT" "${UNIT_DIR}/${UNIT_NAME}"
+if [ "$NO_SYSTEMD" -eq 0 ]; then
+  mkdir -p "$UNIT_DIR"
+  [ -f "${UNIT_DIR}/${UNIT_NAME}" ] && cp -a "${UNIT_DIR}/${UNIT_NAME}" "${UNIT_DIR}/${UNIT_NAME}.bak-${STAMP}" && log "backed up unit"
+  cp -a "$UNIT" "${UNIT_DIR}/${UNIT_NAME}"
+fi
 log "installed ${BIN_DIR}/${APP} (${TAG})"
 
 # Opt-in stays opt-in: --yes keeps the default (off); only an explicit
@@ -188,7 +194,7 @@ if [ "$AUTO_UPDATE" -eq 0 ] && [ "$YES" -eq 0 ] && [ "$NO_SYSTEMD" -eq 0 ] && [ 
     AUTO_UPDATE=1
   fi
 fi
-if [ "$AUTO_UPDATE" -eq 1 ]; then
+if [ "$AUTO_UPDATE" -eq 1 ] && [ "$NO_SYSTEMD" -eq 0 ]; then
   mkdir -p "$DROPIN_DIR"
   printf '[Service]\nEnvironment=RSRPC_AUTO_UPDATE=1\n' > "${DROPIN_DIR}/10-auto-update.conf"
   log "auto-update staging enabled"
@@ -212,4 +218,8 @@ else
   log "systemd integration skipped (--no-systemd)"
 fi
 
-log "done. logs: journalctl --user -u $UNIT_NAME -f | update: ${BIN_DIR}/${APP} --update"
+if [ "$NO_SYSTEMD" -eq 0 ]; then
+  log "done. logs: journalctl --user -u $UNIT_NAME -f | update: ${BIN_DIR}/${APP} --update"
+else
+  log "done. update: ${BIN_DIR}/${APP} --update"
+fi
