@@ -11,13 +11,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::proc_start::process_start_ms;
 use super::refresh::{FetchOutcome, fetch_detectable_etag};
 use super::scan::{ExecScratch, MatchScratch, apply_ignore_list, first_sightings};
 // Linux-only: the /proc reader does not exist on other targets.
 #[cfg(target_os = "linux")]
 use super::scan::read_exec_into;
 use super::server::{ProcessServer, allocator_numbers, release_parse_arenas};
-use super::types::{Exec, ProcessDetectedEvent, ScannedHit};
+use super::types::{Exec, ProcessDetectedEvent, ScannedHit, epoch_ms};
 // Linux-only (`spawn_proc_watcher` return type); the other use below is
 // fully qualified.
 #[cfg(target_os = "linux")]
@@ -688,14 +689,30 @@ impl ProcessServer {
         }
         // First sightings this boot, at INFO: without this, a daemon
         // whose bridge path goes quiet is indistinguishable from a
-        // blind scanner except with a debug build. Bounded: one line
+        // blind one without a debug build. Bounded: one line
         // per game id per boot, same cadence as bridge publishes.
+        // Each line carries provenance (which matcher won) and latency
+        // (how long the process had been alive when first classified):
+        // rare by construction, nothing here runs on the hot path.
         for game in first_sightings(&mut seen_ids, &detected) {
-          tracing::info!(
-            "[Process Scanner] Detected: {} ({})",
-            game.entry.name,
-            game.entry.id
-          );
+          let age_ms = process_start_ms(game.pid).map(|started| epoch_ms().saturating_sub(started));
+          match age_ms {
+            Some(age) => tracing::info!(
+              "[Process Scanner] Detected: {} ({}, pid {}) via {}, process age {}ms",
+              game.entry.name,
+              game.entry.id,
+              game.pid,
+              game.source.as_str(),
+              age
+            ),
+            None => tracing::info!(
+              "[Process Scanner] Detected: {} ({}, pid {}) via {}",
+              game.entry.name,
+              game.entry.id,
+              game.pid,
+              game.source.as_str()
+            ),
+          }
         }
         // Track live game pids for the proc-events watcher: only THEIR
         // exits wake us early (a build storm's exits never cause a scan).

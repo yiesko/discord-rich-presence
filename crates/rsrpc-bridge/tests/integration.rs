@@ -217,6 +217,8 @@ async fn process_scan_publishes_generic_and_null_clears() {
       name: "Scanned".to_string(),
       pid: 4242,
       start: 1_700_000_000,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }))
     .await
     .unwrap();
@@ -247,6 +249,8 @@ async fn null_scan_clears_live_generic_exactly_once() {
       name: "LiveGeneric".to_string(),
       pid: live,
       start: 1_700_000_000,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }))
     .await
     .unwrap();
@@ -403,6 +407,8 @@ async fn null_scan_keeps_live_pid_cards() {
       name: "Barrier".to_string(),
       pid: live,
       start: 1_700_000_000,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }))
     .await
     .unwrap();
@@ -557,6 +563,8 @@ async fn session_transitions_emit_census_lines() {
       name: "Session".to_string(),
       pid: u64::from(std::process::id()),
       start: 1_700_000_000,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }))
     .await
     .unwrap();

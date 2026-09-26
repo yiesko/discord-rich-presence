@@ -68,6 +68,16 @@ pub(crate) fn state_activities(cache: &ReplayCache) -> Vec<StateActivity> {
           serde_json::Value::String(text) => text.clone(),
           other => other.to_string(),
         }),
+      // Provenance stamped by the payload builders (generic matcher
+      // source, or "sdk" for client cards); unclassified cards omit it.
+      detection_source: payload
+        .provenance
+        .as_ref()
+        .map(|provenance| provenance.source.clone()),
+      detect_latency_ms: payload
+        .provenance
+        .as_ref()
+        .and_then(|provenance| provenance.latency_ms),
     }
   }));
   out

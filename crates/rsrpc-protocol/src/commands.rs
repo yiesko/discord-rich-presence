@@ -60,6 +60,22 @@ pub struct CachedActivity {
   /// Recorded at construction so change detection compares bytes instead
   /// of re-serializing and re-parsing; empty for clears.
   pub activity_json: Bytes,
+  /// Detection provenance for snapshots and journal correlation
+  /// (in-memory only — never serialized onto the wire). `None` for
+  /// clears and unclassified payloads.
+  pub provenance: Option<ActivityProvenance>,
+}
+
+/// Where a published card came from: detection matcher or SDK client,
+/// plus process age at first publish when known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityProvenance {
+  /// Matcher source (`automaton`, `steam-app-id`, …) or `"sdk"` for
+  /// client-published activities.
+  pub source: String,
+  /// Process age in ms at first publish (`None` when the start time
+  /// was unreadable, always for SDK activities).
+  pub latency_ms: Option<u64>,
 }
 
 /// Build the empty (clear) payload in both protocols. `None` when either
@@ -78,6 +94,7 @@ pub fn empty_cached(pid: u64, socket_id: SocketId) -> Option<Arc<CachedActivity>
     msgpack: rmp_serde::to_vec_named(&payload).ok().map(Bytes::from)?,
     is_clear: true,
     activity_json: Bytes::new(),
+    provenance: None,
   }))
 }
 
@@ -136,6 +153,9 @@ pub fn cached_activity(
     // carries a real activity object, never null.
     is_clear: false,
     activity_json: fingerprint.map(Bytes::from).unwrap_or_default(),
+    // Provenance is stamped by the bridge caller (generic vs SDK paths
+    // know their source); the protocol layer leaves it empty.
+    provenance: None,
   }))
 }
 

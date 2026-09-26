@@ -22,6 +22,12 @@ pub struct ScannedGame {
   pub pid: u64,
   /// Process start time (Unix seconds) for card timestamps.
   pub start: u64,
+  /// Which matcher classified the process (log string form): travels to
+  /// generic payloads and snapshots for detection provenance.
+  pub source: String,
+  /// Process start as epoch millis, when the detector could read it:
+  /// snapshot latency is measured against this, never re-read.
+  pub process_start_ms: Option<u64>,
 }
 
 /// Scanner input to the bridge: one game appeared, one slot vanished, or
@@ -107,6 +113,38 @@ pub fn is_process_alive(pid: u64) -> bool {
     // Platforms without a probe: assume alive (ghost reaping stays off
     // rather than risking live cards).
     true
+  }
+}
+
+/// Why a visible card was (or is being) cleared: the attribution asked
+/// for when a presence disappears. `Copy` and allocation-free — it only
+/// rides log lines and snapshot fields, never hot structures.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClearReason {
+  /// Genuine null-activity CLEAR frame from the owning connection.
+  SdkClear,
+  /// Owning socket died without CLEAR (ghost reap, pid-owned release).
+  AbruptClose,
+  /// Scanner reports the process gone and liveness confirms death.
+  ProcessVanished,
+  /// Process alive but no longer classified (database refresh or
+  /// ignore-list dropped the match while the pid still runs).
+  ScanAbsent,
+  /// Generic card withdrawn for a live SDK owner on the same slot.
+  Yielded,
+}
+
+impl ClearReason {
+  /// Stable log identifier for journal correlation.
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::SdkClear => "sdk-clear",
+      Self::AbruptClose => "abrupt-close",
+      Self::ProcessVanished => "process-vanished",
+      Self::ScanAbsent => "scan-absent",
+      Self::Yielded => "yielded",
+    }
   }
 }
 
@@ -206,6 +244,13 @@ impl HandoffState {
     self.live_ipc.contains_key(app_id)
   }
 
+  /// Pid currently owning `app_id`'s slot, if a live SDK source holds it
+  /// (for takeover log lines naming both sides).
+  #[must_use]
+  pub fn owner_of(&self, app_id: &str) -> Option<u64> {
+    self.live_ipc.get(app_id).copied()
+  }
+
   /// The game to re-assert when `app_id`'s IPC source cleared, if the
   /// scanner still reports that same game.
   #[must_use]
@@ -252,6 +297,8 @@ mod tests {
       name: "Game".to_string(),
       pid: 1234,
       start: 0,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }
   }
 
@@ -307,6 +354,24 @@ mod tests {
     assert!(!handoff.is_suppressed("1"));
   }
 
+  /// `owner_of` tracks the current owner through publishes, takeovers
+  /// and releases: the takeover log reads this to name both sides.
+  #[test]
+  fn owner_of_follows_publishes_and_releases() {
+    let mut handoff = HandoffState::default();
+    assert_eq!(handoff.owner_of("1"), None);
+    handoff.note_publish("1", 10);
+    assert_eq!(handoff.owner_of("1"), Some(10));
+    // Companion takeover replaces the owner.
+    handoff.note_publish("1", 20);
+    assert_eq!(handoff.owner_of("1"), Some(20));
+    // Owner's clear releases; a stranger's does not.
+    assert!(!handoff.note_clear("1", 10));
+    assert_eq!(handoff.owner_of("1"), Some(20));
+    assert!(handoff.note_clear("1", 20));
+    assert_eq!(handoff.owner_of("1"), None);
+  }
+
   /// Resume fires only for the game the scanner still reports.
   #[test]
   fn resume_only_matches_scanned_game() {
@@ -322,6 +387,8 @@ mod tests {
       name: "Other".to_string(),
       pid: 9,
       start: 0,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }));
     // A different game on screen: not ours to resume.
     assert_eq!(handoff.resume_for("1"), None);

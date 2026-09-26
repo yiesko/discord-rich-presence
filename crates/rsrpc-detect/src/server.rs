@@ -302,7 +302,7 @@ mod tests {
   use crate::runtime::{
     exec_hit_ignored, removed_slots, scan_cadence, should_exit_on_send_error, unpark_scan_wake,
   };
-  use crate::types::{ProcessDetectedEvent, ScannedEntry, ScannedHit};
+  use crate::types::{DetectSource, ProcessDetectedEvent, ScannedEntry, ScannedHit};
 
   /// Empty-database server with a live gauge sender for unit tests.
   fn fixture_server() -> ProcessServer {
@@ -393,6 +393,7 @@ mod tests {
     let hit = ScannedHit::stamp(
       std::sync::Arc::new(ScannedEntry::from_activity(&custom_entry())),
       4242,
+      DetectSource::Automaton,
     );
     let ignored: HashSet<String> = ["777".to_string()].into_iter().collect();
     assert!(exec_hit_ignored(&ignored, &hit));

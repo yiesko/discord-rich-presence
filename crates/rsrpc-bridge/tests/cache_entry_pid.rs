@@ -16,6 +16,7 @@ fn cached_with(pid_json: &str) -> CachedActivity {
     msgpack: bytes::Bytes::new(),
     is_clear: true,
     activity_json: bytes::Bytes::new(),
+    provenance: None,
   }
 }
 
@@ -36,6 +37,7 @@ fn numeric_socket_id_used_when_body_unusable() {
     msgpack: bytes::Bytes::new(),
     is_clear: true,
     activity_json: bytes::Bytes::new(),
+    provenance: None,
   };
   assert_eq!(
     cache_entry_pid(&SocketId::from("4242"), &broken),
@@ -67,6 +69,7 @@ fn rejects_zero_and_garbage() {
     msgpack: bytes::Bytes::new(),
     is_clear: true,
     activity_json: bytes::Bytes::new(),
+    provenance: None,
   };
   assert_eq!(cache_entry_pid(&SocketId::from("app"), &broken), None);
 }

@@ -238,6 +238,43 @@ impl ScannedEntry {
   }
 }
 
+/// Which matcher classified the process: the provenance asked for when
+/// a detection needs explaining. `Copy` and allocation-free by design —
+/// it travels on every hit without touching the hot path's budget.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DetectSource {
+  /// Database-declared path (Aho-Corasick on the process path).
+  Automaton,
+  /// Bare exe joined with the process working directory.
+  CwdJoined,
+  /// `win32` (Proton) database entries.
+  ProtonAutomaton,
+  /// Authoritative store id (Steam/Proton environ, or cmdline fallback).
+  SteamAppId,
+  /// Install directory inherited from a known Steam library.
+  SteamLibrary,
+  /// Executable stem equal to a multi-word game name.
+  ExeStem,
+  /// Install folder carrying the title.
+  Folder,
+}
+
+impl DetectSource {
+  /// Stable log identifier for journal correlation.
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Automaton => "automaton",
+      Self::CwdJoined => "cwd-joined",
+      Self::ProtonAutomaton => "proton-automaton",
+      Self::SteamAppId => "steam-app-id",
+      Self::SteamLibrary => "steam-library",
+      Self::ExeStem => "exe-stem",
+      Self::Folder => "folder",
+    }
+  }
+}
+
 /// One classified game: the shared slim entry plus the observation (pid +
 /// epoch-millis start). Replaces stamping pid/timestamp onto a full-struct
 /// clone per hit per tick — zero per-hit allocation beyond the timestamp
@@ -247,22 +284,35 @@ pub struct ScannedHit {
   pub entry: Arc<ScannedEntry>,
   pub pid: u64,
   pub start: u64,
+  /// Which matcher classified the process (detection provenance).
+  pub source: DetectSource,
 }
 
 impl ScannedHit {
   /// Attach the observation (pid + now as epoch millis) to a shared
   /// entry: no clone, unlike the old full-struct stamp.
-  pub fn stamp(entry: Arc<ScannedEntry>, pid: u64) -> Self {
+  pub fn stamp(entry: Arc<ScannedEntry>, pid: u64, source: DetectSource) -> Self {
     // Epoch millis as a NUMBER: Discord's schema (and strict clients)
     // want an integer here — a stringified timestamp is silently
     // dropped downstream.
-    let start = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .ok()
-      .and_then(|age| u64::try_from(age.as_millis()).ok())
-      .unwrap_or(0);
-    Self { entry, pid, start }
+    Self {
+      entry,
+      pid,
+      start: epoch_ms(),
+      source,
+    }
   }
+}
+
+/// Now as epoch millis (0 when the clock is unreadable): single
+/// canonical clock for stamps and latency math.
+#[must_use]
+pub fn epoch_ms() -> u64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .ok()
+    .and_then(|age| u64::try_from(age.as_millis()).ok())
+    .unwrap_or(0)
 }
 
 const _: () = assert!(std::mem::size_of::<ScannedEntry>() <= 104);

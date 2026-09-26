@@ -16,7 +16,9 @@ use rsrpc_types::{AppId, SocketId};
 use tokio::sync::mpsc;
 
 use super::bridge::Shared;
-use super::handoff::{ProcInput, ScannedGame, is_process_alive, track_process_publication};
+use super::handoff::{
+  ClearReason, ProcInput, ScannedGame, is_process_alive, track_process_publication,
+};
 use super::replay::prune_cache;
 
 /// Session-boundary reason for a process-table event: the table went
@@ -66,6 +68,20 @@ pub(crate) fn generic_payload(game: &ScannedGame) -> Option<Arc<CachedActivity>>
   // Fixed shapes: practically unreachable encode failure surfaces as
   // `None` so callers log and drop instead of shipping an empty frame.
   let activity_json = serde_json::to_vec(&payload_struct.activity).ok()?;
+  // Provenance for snapshots: the matcher's source travels on the game,
+  // latency is process age at this (first) publish. Rare path only —
+  // never per tick per process.
+  let now_ms = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .ok()
+    .and_then(|age| u64::try_from(age.as_millis()).ok())
+    .unwrap_or(0);
+  let provenance = Some(commands::ActivityProvenance {
+    source: game.source.clone(),
+    latency_ms: game
+      .process_start_ms
+      .map(|started| now_ms.saturating_sub(started)),
+  });
   Some(Arc::new(commands::CachedActivity {
     json: serde_json::to_string(&payload_struct)
       .ok()
@@ -76,6 +92,7 @@ pub(crate) fn generic_payload(game: &ScannedGame) -> Option<Arc<CachedActivity>>
     // Always built with `activity: Some` above.
     is_clear: false,
     activity_json: bytes::Bytes::from(activity_json),
+    provenance,
   }))
 }
 
@@ -114,6 +131,10 @@ pub(crate) fn take_process_clear(shared: &Shared) -> Vec<(u64, AppId)> {
 impl Shared {
   /// IPC-wins handoff: a live SDK presence takes over this app slot
   /// from generic detection (last publisher wins across companions).
+  /// Logs takeovers once — fresh claims and owner changes alike (steady
+  /// republishes with ticking timestamps stay quiet) — naming the
+  /// suppressed generic so the journal shows which side owns the slot
+  /// and why.
   pub(crate) fn note_sdk_publish(&self, cmd: &ActivityCmd) {
     let args = cmd.args.as_ref();
     let pid = args.and_then(|args| args.pid).unwrap_or_default();
@@ -121,11 +142,34 @@ impl Shared {
       .and_then(|args| args.activity.as_ref())
       .and_then(|activity| activity.application_id.clone())
     {
-      self
-        .handoff
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .note_publish(&app, pid);
+      let (previous, generic) = {
+        let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = handoff.owner_of(&app);
+        handoff.note_publish(&app, pid);
+        let generic = handoff
+          .resume_for(&app)
+          .map(|game| game.name.clone())
+          .unwrap_or_default();
+        (previous, generic)
+      };
+      // Same owner republishing: quiet (timestamps tick every second).
+      if previous != Some(pid) {
+        match (previous, generic.is_empty()) {
+          (None, true) => {
+            tracing::info!("[bridge] SDK presence for {app} (pid {pid}) now owns its slot");
+          }
+          (None, false) => {
+            tracing::info!(
+              "[bridge] SDK presence for {app} (pid {pid}) took over slot from generic {generic}"
+            );
+          }
+          (Some(old), _) => {
+            tracing::info!(
+              "[bridge] SDK presence for {app} (pid {pid}) took over slot from pid {old}"
+            );
+          }
+        }
+      }
     }
   }
 
@@ -181,11 +225,22 @@ impl Shared {
           .collect(),
       }
     };
+    let mut resumed = 0;
     for game in resume.into_iter().filter(|game| is_process_alive(game.pid)) {
       self.resume_generic(&game);
+      resumed += 1;
     }
     if changed {
-      tracing::info!("[bridge] Source cleared, resuming process detection");
+      match cmd.application_id.clone() {
+        Some(app) => tracing::info!(
+          "[bridge] Source cleared for {app} (pid {pid}), resuming {resumed} slot(s)"
+        ),
+        // No app id: abrupt close (socket died without CLEAR) — the
+        // release names the dead owner instead of a slot.
+        None => tracing::info!(
+          "[bridge] Owner pid {pid} went away without CLEAR, resuming {resumed} slot(s)"
+        ),
+      }
     } else {
       tracing::debug!("[bridge] Duplicate clear ignored (pid {pid})");
     }
@@ -208,10 +263,18 @@ impl Shared {
       tracing::debug!("[bridge] Dropping duplicate SET_ACTIVITY (app {app_key}, pid {pid})");
       return;
     }
-    let Some(payload) = commands::cached_activity(&mut cmd, fingerprint.clone()) else {
+    let Some(mut payload) = commands::cached_activity(&mut cmd, fingerprint.clone()) else {
       tracing::warn!("[bridge] Invalid activity command, skipping");
       return;
     };
+    // Freshly built (sole owner): stamp SDK provenance so snapshots tell
+    // client-published cards apart from detected generics.
+    if let Some(payload) = Arc::get_mut(&mut payload) {
+      payload.provenance = Some(commands::ActivityProvenance {
+        source: "sdk".to_string(),
+        latency_ms: None,
+      });
+    }
     let app_key = cmd.application_id.as_deref().unwrap_or("");
     let activity = cmd.args.as_ref().and_then(|args| args.activity.as_ref());
     self.note_sdk_publish(&cmd);
@@ -238,10 +301,14 @@ impl Shared {
         }
       }
       None => {
+        // Broadcast clears here always originate from a client frame
+        // (abrupt closes send none) — reason is sdk-clear by
+        // construction; other reasons are tagged at their own sites.
+        let reason = ClearReason::SdkClear.as_str();
         if changed {
-          tracing::info!("[bridge] Published clear (pid {pid})");
+          tracing::info!("[bridge] Published clear for {app_key} (pid {pid}): {reason}");
         } else {
-          tracing::debug!("[bridge] Published clear (pid {pid})");
+          tracing::debug!("[bridge] Published clear for {app_key} (pid {pid}): {reason}");
         }
       }
     }
@@ -302,5 +369,42 @@ impl Shared {
     }
     self.send_to_all(&payload);
     self.dirty.store(true, Ordering::Relaxed);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Epoch millis for latency fixtures.
+  fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .ok()
+      .and_then(|age| u64::try_from(age.as_millis()).ok())
+      .unwrap_or(0)
+  }
+
+  /// Generic payloads stamp detection provenance for snapshots: the
+  /// matcher's source travels on the card, latency is process age at
+  /// first publish.
+  #[test]
+  fn generic_payload_stamps_provenance() {
+    let game = ScannedGame {
+      id: AppId::from("12345"),
+      name: "Source Game".to_string(),
+      pid: u64::from(std::process::id()),
+      start: 0,
+      source: "steam-app-id".to_string(),
+      process_start_ms: Some(now_ms().saturating_sub(5000)),
+    };
+    let payload = generic_payload(&game).expect("builds");
+    let provenance = payload.provenance.clone().expect("stamped");
+    assert_eq!(provenance.source, "steam-app-id");
+    let latency = provenance.latency_ms.expect("latency");
+    assert!(
+      (5000..=60_000).contains(&latency),
+      "latency {latency}ms should be ~5s"
+    );
   }
 }
