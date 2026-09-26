@@ -110,6 +110,34 @@ pub fn is_process_alive(pid: u64) -> bool {
   }
 }
 
+/// Why a visible card was (or is being) cleared: the attribution asked
+/// for when a presence disappears. `Copy` and allocation-free — it only
+/// rides log lines and snapshot fields, never hot structures.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClearReason {
+  /// Genuine null-activity CLEAR frame from the owning connection.
+  SdkClear,
+  /// Owning socket died without CLEAR (ghost reap, pid-owned release).
+  AbruptClose,
+  /// Scanner reports the process gone (per-slot remove, empty table).
+  ProcessVanished,
+  /// Generic card withdrawn for a live SDK owner on the same slot.
+  Yielded,
+}
+
+impl ClearReason {
+  /// Stable log identifier for journal correlation.
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::SdkClear => "sdk-clear",
+      Self::AbruptClose => "abrupt-close",
+      Self::ProcessVanished => "process-vanished",
+      Self::Yielded => "yielded",
+    }
+  }
+}
+
 /// IPC-wins handoff state. One lock for the whole state (short critical
 /// sections, no I/O under it), shared by the event and process pumps.
 #[derive(Clone, Debug, Default)]
@@ -204,6 +232,13 @@ impl HandoffState {
   #[must_use]
   pub fn is_suppressed(&self, app_id: &str) -> bool {
     self.live_ipc.contains_key(app_id)
+  }
+
+  /// Pid currently owning `app_id`'s slot, if a live SDK source holds it
+  /// (for takeover log lines naming both sides).
+  #[must_use]
+  pub fn owner_of(&self, app_id: &str) -> Option<u64> {
+    self.live_ipc.get(app_id).copied()
   }
 
   /// The game to re-assert when `app_id`'s IPC source cleared, if the

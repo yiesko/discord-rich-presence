@@ -16,7 +16,9 @@ use rsrpc_types::{AppId, SocketId};
 use tokio::sync::mpsc;
 
 use super::bridge::Shared;
-use super::handoff::{ProcInput, ScannedGame, is_process_alive, track_process_publication};
+use super::handoff::{
+  ClearReason, ProcInput, ScannedGame, is_process_alive, track_process_publication,
+};
 use super::replay::prune_cache;
 
 /// Session-boundary reason for a process-table event: the table went
@@ -114,6 +116,9 @@ pub(crate) fn take_process_clear(shared: &Shared) -> Vec<(u64, AppId)> {
 impl Shared {
   /// IPC-wins handoff: a live SDK presence takes over this app slot
   /// from generic detection (last publisher wins across companions).
+  /// Logs the takeover once (transition only — steady republishes with
+  /// ticking timestamps stay quiet), naming the suppressed generic so
+  /// the journal shows which side owns the slot and why.
   pub(crate) fn note_sdk_publish(&self, cmd: &ActivityCmd) {
     let args = cmd.args.as_ref();
     let pid = args.and_then(|args| args.pid).unwrap_or_default();
@@ -121,11 +126,25 @@ impl Shared {
       .and_then(|args| args.activity.as_ref())
       .and_then(|activity| activity.application_id.clone())
     {
-      self
-        .handoff
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .note_publish(&app, pid);
+      let (fresh_takeover, generic) = {
+        let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh_takeover = !handoff.is_suppressed(&app);
+        handoff.note_publish(&app, pid);
+        let generic = handoff
+          .resume_for(&app)
+          .map(|game| game.name.clone())
+          .unwrap_or_default();
+        (fresh_takeover, generic)
+      };
+      if fresh_takeover {
+        if generic.is_empty() {
+          tracing::info!("[bridge] SDK presence for {app} (pid {pid}) now owns its slot");
+        } else {
+          tracing::info!(
+            "[bridge] SDK presence for {app} (pid {pid}) took over slot from generic {generic}"
+          );
+        }
+      }
     }
   }
 
@@ -181,11 +200,22 @@ impl Shared {
           .collect(),
       }
     };
+    let mut resumed = 0;
     for game in resume.into_iter().filter(|game| is_process_alive(game.pid)) {
       self.resume_generic(&game);
+      resumed += 1;
     }
     if changed {
-      tracing::info!("[bridge] Source cleared, resuming process detection");
+      match cmd.application_id.clone() {
+        Some(app) => tracing::info!(
+          "[bridge] Source cleared for {app} (pid {pid}), resuming {resumed} slot(s)"
+        ),
+        // No app id: abrupt close (socket died without CLEAR) — the
+        // release names the dead owner instead of a slot.
+        None => tracing::info!(
+          "[bridge] Owner pid {pid} went away without CLEAR, resuming {resumed} slot(s)"
+        ),
+      }
     } else {
       tracing::debug!("[bridge] Duplicate clear ignored (pid {pid})");
     }
@@ -238,10 +268,14 @@ impl Shared {
         }
       }
       None => {
+        // Broadcast clears here always originate from a client frame
+        // (abrupt closes send none) — reason is sdk-clear by
+        // construction; other reasons are tagged at their own sites.
+        let reason = ClearReason::SdkClear.as_str();
         if changed {
-          tracing::info!("[bridge] Published clear (pid {pid})");
+          tracing::info!("[bridge] Published clear for {app_key} (pid {pid}): {reason}");
         } else {
-          tracing::debug!("[bridge] Published clear (pid {pid})");
+          tracing::debug!("[bridge] Published clear for {app_key} (pid {pid}): {reason}");
         }
       }
     }

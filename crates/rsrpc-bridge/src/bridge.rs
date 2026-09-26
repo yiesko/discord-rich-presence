@@ -35,7 +35,9 @@ use tokio_util::sync::CancellationToken;
 use crate::config::BridgeConfig;
 use crate::consumer::{BridgeProtocol, send_cached, send_message};
 use crate::control::handle_bridge_control;
-use crate::handoff::{HandoffState, ProcInput, is_process_alive, track_process_publication};
+use crate::handoff::{
+  ClearReason, HandoffState, ProcInput, is_process_alive, track_process_publication,
+};
 use crate::origin::origin_allowed;
 use crate::replay::{ReplayCache, cache_entry_pid};
 use crate::router::{
@@ -636,7 +638,11 @@ async fn proc_pump(
         // once: repeated clears go quiet.
         let outstanding = take_process_clear(&shared);
         for (pid, app_id) in outstanding {
-          tracing::info!("[bridge] Sending empty payload");
+          tracing::info!(
+            "[bridge] Clearing {} (pid {pid}): {}",
+            app_id.as_ref(),
+            ClearReason::ProcessVanished.as_str()
+          );
           let socket_id = SocketId::from(app_id);
           let Some(payload) = commands::empty_cached(pid, socket_id.clone()) else {
             tracing::warn!("[bridge] Dropping unencodable clear payload");
@@ -661,7 +667,10 @@ async fn proc_pump(
             .collect()
         };
         for (socket_id, pid) in ghosts {
-          tracing::info!("[bridge] Reaping ghost card for dead pid {pid}");
+          tracing::info!(
+            "[bridge] Reaping ghost card for dead pid {pid}: {}",
+            ClearReason::AbruptClose.as_str()
+          );
           let Some(payload) = commands::empty_cached(pid, socket_id.clone()) else {
             tracing::warn!("[bridge] Dropping unencodable clear payload");
             shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
@@ -677,8 +686,15 @@ async fn proc_pump(
 
         // IPC-wins: a live SDK presence owns this slot — withdraw our
         // generic card if shown and stay out until that source clears.
-        // Strictly per-slot: co-running games keep theirs.
-        if shared.handoff.lock().unwrap_or_else(|e| e.into_inner()).is_suppressed(game.id.as_ref()) {
+        // Strictly per-slot: co-running games keep theirs. The owner
+        // lookup doubles as the suppression check (same map), so the
+        // log names both sides of the takeover with one lock.
+        if let Some(owner) = shared
+          .handoff
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .owner_of(game.id.as_ref())
+        {
           let withdrawn = shared
             .last_process
             .lock()
@@ -687,7 +703,13 @@ async fn proc_pump(
           if let Some(pid) = withdrawn {
             if let Some(payload) = commands::empty_cached(pid, SocketId::from(&game.id)) {
               shared.broadcast_activity(payload, SocketId::from(&game.id));
-              tracing::debug!("[bridge] Yielding {} to live IPC presence", game.name);
+              tracing::debug!(
+                "[bridge] Yielding generic {} ({}) to live IPC presence (pid {}): {}",
+                game.name,
+                game.id.as_ref(),
+                owner,
+                ClearReason::Yielded.as_str()
+              );
             } else {
               tracing::warn!("[bridge] Dropping unencodable clear payload");
               shared.dropped_broadcasts.fetch_add(1, Ordering::Relaxed);
@@ -740,7 +762,11 @@ async fn proc_pump(
           pid,
         );
         if let Some(pid) = outstanding {
-          tracing::info!("[bridge] Clearing removed game slot");
+          tracing::info!(
+            "[bridge] Clearing removed game slot for {} (pid {pid}): {}",
+            app_id.as_ref(),
+            ClearReason::ProcessVanished.as_str()
+          );
           if let Some(payload) = commands::empty_cached(pid, SocketId::from(&app_id)) {
             shared.broadcast_activity(payload, SocketId::from(&app_id));
           } else {
