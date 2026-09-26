@@ -138,6 +138,8 @@ publish.
 
 ## See also
 
+- [detection-traceability.md](detection-traceability.md) — provenance,
+  latency, and clear reasons for debugging.
 - [cli-options.md](cli-options.md) — every flag and environment variable.
 - [protocol.md](protocol.md) — how games report themselves over IPC and
   websockets.

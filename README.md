@@ -221,6 +221,7 @@ one-shot `detect_once`/`database_summary` diagnostics. See
 
 * [docs/cli-options.md](docs/cli-options.md) — every flag and environment variable
 * [docs/process-detection.md](docs/process-detection.md) — how games are found
+* [docs/detection-traceability.md](docs/detection-traceability.md) — provenance, latency, and clear reasons
 * [docs/protocol.md](docs/protocol.md) — handshakes, commands, and error codes
 * [docs/web-client.md](docs/web-client.md) — browser, Vencord, and Node clients
 * [docs/library.md](docs/library.md) — embedding the daemon in Rust

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Detection traceability: every first sighting logs which matcher won
+  (`automaton`, `cwd-joined`, `proton-automaton`, `steam-app-id`,
+  `steam-library`, `exe-stem`, `folder`) plus process age in ms at
+  classification; every clear carries its reason (`sdk-clear`,
+  `abrupt-close`, `process-vanished`, `yielded`); SDK takeovers and
+  generic resumes name both sides of the slot. Snapshots gain additive
+  `detectionSource` / `detectLatencyMs` fields per card (`"sdk"` for
+  client-published cards, absent on old ones). Tracing only, on
+  lifecycle transitions — no hot-path cost, no retained state. Guide:
+  `docs/detection-traceability.md`.
+
 ## [0.37.0] - 2026-09-25
 
 ### Security
