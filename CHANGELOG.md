@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SHA256 alone (explicit `--binary` files stay exempt). The systemd unit
   ships as a signed release asset covered by `SHA256SUMS.txt` and is
   verified the same way before anything is installed from it.
+- Presence snapshots are owner-only: the temp file is created with an
+  explicit `0600` mode on Unix (the rename carries it to the final
+  path), so app ids, pids and ports stay private under a permissive
+  umask. Slot selection stays best-effort — concurrent daemons share
+  slots, last writer wins.
 
 ### Changed
 - Folded `rsrpc-state` into `rsrpc-bridge` (12 crates down to 11): the
@@ -53,8 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typecheck of the fuzz workspace). A new fuzz workflow smoke-checks
   targets on PRs and runs the engine nightly (10 minutes per target:
   `ipc_frame`, `activity_full`, `trim_db`, `db_parse`), with corpus
-  caching between runs. New `ipc_frame` fuzz target covers the IPC
-  header parse, length bound and encode round-trip (26M execs clean).
+  caching between runs. New `ipc_frame` fuzz target drives the IPC
+  reader (`handle_stream` with a mock facilitator and a split
+  byte-duplex), asserting every response byte belongs to a complete
+  frame (708k runs clean locally).
 - All GitHub Actions references are pinned to commit SHAs (tags kept as
   comments), closing the mutable-tag supply-chain window on the release
   pipeline especially.
@@ -99,6 +106,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   daemon afterwards (`crates/rsrpc-detect/src/server.rs`,
   `crates/rsrpc-proc-events/src/lib.rs`,
   `crates/rsrpc-core/src/daemon.rs`).
+- The module split broke non-Linux builds (the Linux-only `/proc`
+  reader was imported unconditionally: E0432 on every Windows/macOS
+  job). The reader import and its Linux-only companions are now gated
+  on the target, and the whole workspace checks warning-free for
+  Windows again.
+- `--binary … --no-systemd` outside a checkout died demanding a
+  signature manifest for a unit the user asked not to install. Every
+  unit step (resolution, validation, directory creation, copy) is now
+  skipped in `--no-systemd` mode — binary-only install, exit 0 — and
+  the auto-update drop-in and closing log line follow the same flag
+  (`scripts/install.sh`).
+- Configured extra origins normalize once in the builder (lowercase,
+  no trailing slash, no default port), so `https://client/` or
+  `https://CLIENT` matches the serialized `Origin` the browser sends
+  instead of failing with only a `Refused origin` log. The
+  per-connection check stays an exact comparison.
+- A failed `/proc` directory entry can no longer abort the scan tick:
+  the skip is now explicit (the surrounding filter already excluded
+  errors; the invariant is documented, behavior unchanged).
 
 ## [0.36.1] - 2026-09-24
 
