@@ -706,7 +706,7 @@ async fn proc_pump(
           if let Some(pid) = withdrawn {
             if let Some(payload) = commands::empty_cached(pid, SocketId::from(&game.id)) {
               shared.broadcast_activity(payload, SocketId::from(&game.id));
-              tracing::debug!(
+              tracing::info!(
                 "[bridge] Yielding generic {} ({}) to live IPC presence (pid {}): {}",
                 game.name,
                 game.id.as_ref(),

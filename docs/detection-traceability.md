@@ -11,7 +11,7 @@ Lifecycle lines (detection, publish, takeover, clear, resume) are
 (`RUST_LOG=debug`). Logs go to stderr — the journal under systemd:
 
 ```bash
-journalctl --user -u rsrpc.service --since "10 minutes ago" | grep -E "Detected|Published|Yielding|Clearing|cleared|took over"
+journalctl --user -u rsrpc.service --since "10 minutes ago" | grep -E "Detected|Published|Yielding|Clearing|cleared|took over|Reaping|went away without CLEAR"
 ```
 
 ## Detection: source and latency
@@ -77,8 +77,9 @@ unclassified payloads, so old readers keep working):
 
 - `detectionSource`: matcher source above, or `"sdk"` for
   client-published cards.
-- `detectLatencyMs`: process age in ms at first publish (`null` when
-  the start time was unreadable, always for SDK cards).
+- `detectLatencyMs`: process age in ms at first publish, omitted when
+  the start time is unreadable — always omitted for SDK cards, which
+  have no detection event.
 
 Clears evict their cards, so "why did it stop" lives in the journal
 (clear lines above), not the snapshot.
