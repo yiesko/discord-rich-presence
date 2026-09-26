@@ -19,8 +19,10 @@ impl ProcessServer {
       .unwrap_or_else(|e| e.into_inner()) = libraries;
   }
 
-  /// AppId whose Steam install dir prefixes `normalized_path` (already
-  /// lowercased `/`-separated). Cloned out of the lock; tiny strings.
+  /// AppId whose Steam install dir prefixes the process path.
+  /// Canonicalization (lowercase, `/` separators) happens inside
+  /// [`SteamLibraries::match_prefix`]; callers pass native paths.
+  /// Cloned out of the lock; tiny strings.
   pub fn steam_prefix_app_id(&self, normalized_path: &str) -> Option<String> {
     self
       .steam_libraries
