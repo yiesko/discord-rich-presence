@@ -114,7 +114,11 @@ impl ProcessServer {
     let mut filled = 0usize;
 
     for entry in proc_list {
-      let entry = entry?;
+      // The filter above already drops error entries; skip explicitly so
+      // one failed read can never abort the tick (documented invariant).
+      let Ok(entry) = entry else {
+        continue;
+      };
       let path = entry.path();
 
       let Ok(pid) = path
