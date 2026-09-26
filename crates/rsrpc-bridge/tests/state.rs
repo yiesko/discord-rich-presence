@@ -177,6 +177,13 @@ fn select_slot_sweeps_only_stale_tmps() {
   select_slot(&dir, real_now).expect("a slot");
   assert!(fresh_tmp.exists(), "fresh temp must stay");
 
+  // Another program's temp in the shared dir: never ours, never
+  // touched, however stale.
+  let foreign_tmp = dir.join("other-program.tmp-9-9");
+  std::fs::write(&foreign_tmp, b"not ours").expect("foreign tmp");
+  select_slot(&dir, real_now + 3600).expect("a slot");
+  assert!(foreign_tmp.exists(), "foreign temps must survive the sweep");
+
   let _ = std::fs::remove_dir_all(&dir);
 }
 
