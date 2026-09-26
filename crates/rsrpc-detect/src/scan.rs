@@ -451,7 +451,9 @@ pub fn match_steam_id(
     );
     return live_or_none(obj, pid, source);
   }
-  // Custom override with a bare steam SKU (no executables to index).
+  // Custom override with a bare steam SKU (no executables to index):
+  // the provenance travels through — a library-inherited app id matched
+  // here still reports the library path that supplied it.
   for obj in custom {
     let sku_match = obj.steam_ids.iter().any(|id| {
       let sid: &str = id;
@@ -463,7 +465,7 @@ pub fn match_steam_id(
         obj.name,
         appid
       );
-      return live_or_none(obj, pid, DetectSource::SteamAppId);
+      return live_or_none(obj, pid, source);
     }
   }
   None
@@ -1128,6 +1130,34 @@ mod tick2_tests {
     )
     .expect("folder hits");
     assert_eq!(folder_hit.source, DetectSource::Folder);
+  }
+
+  /// A custom SKU matched through library inheritance reports the
+  /// library path, not a direct app-id lookup. (Inline: needs
+  /// `SortedIndex::build`, crate-private.)
+  #[test]
+  fn custom_sku_hit_keeps_library_source() {
+    use crate::bundle::SortedIndex;
+    use crate::types::DetectSource;
+
+    let entry = Arc::new(ScannedEntry {
+      id: "999".into(),
+      name: "Custom Game".into(),
+      executables: Vec::new(),
+      steam_ids: vec!["999".into()],
+      aliases: Vec::new(),
+    });
+    let empty_map = SortedIndex::build(Vec::new());
+    let hit = match_steam_id(
+      Some("999"),
+      u64::from(std::process::id()),
+      &empty_map,
+      &[],
+      &[entry],
+      DetectSource::SteamLibrary,
+    )
+    .expect("custom sku hits");
+    assert_eq!(hit.source, DetectSource::SteamLibrary);
   }
 
   /// Scratch buffers are stable across calls: no reallocations on
