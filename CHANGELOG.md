@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-25
+
 ### Added
 - Detection traceability: every first sighting logs which matcher won
   (`automaton`, `cwd-joined`, `proton-automaton`, `steam-app-id`,
@@ -18,8 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client-published cards, absent on old ones). Tracing only, on
   lifecycle transitions — no hot-path cost, no retained state. Guide:
   `docs/detection-traceability.md`.
-
-## [0.37.0] - 2026-09-25
 
 ### Security
 - Bumped `rustls` to 0.23.45 in the `fuzz` and `tools/updater`
