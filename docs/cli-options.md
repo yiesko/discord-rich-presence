@@ -92,7 +92,7 @@ detected under Proton/Wine. Details:
 |---|---|---|
 | `--list-detected` | `RSRPC_LIST_DETECTED` | Run one scan, print what would be published, and exit. |
 | `--list-database` | `RSRPC_LIST_DATABASE` | Print database counts and the first ten entries, then exit. |
-| `--state-file` | `RSRPC_STATE_FILE` | Write presence snapshots to `<tmpdir>/rsrpc-state-{0..9}` (arRPC layout) for external tooling. Off by default. |
+| `--state-file` | `RSRPC_STATE_FILE` | Write presence snapshots to `<tmpdir>/rsrpc-state-{0..9}` (arRPC layout) for external tooling. Off by default. Snapshots are owner-only; concurrent daemons share slots (last writer wins). |
 | `-D, --debug` | `RSRPC_DEBUG` | Print the resolved configuration and enable debug logging. |
 
 ```bash

@@ -3,13 +3,20 @@
 //!
 //! Slots live beside arRPC's own files but use an `rsrpc-` prefix so
 //! both daemons coexist: `<tmpdir>/rsrpc-state-{0..9}`. Writes are
-//! atomic (temp + rename) so readers never see a torn file.
+//! atomic (temp + rename) so readers never see a torn file, and
+//! owner-only (`0600` where the platform supports it) so presence
+//! metadata is not world-readable under a permissive umask. Slot
+//! selection is best-effort: concurrent daemons may pick the same slot
+//! and overwrite each other — last writer wins, same as arRPC.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Optional presence snapshot for external tooling, enabled with
 /// `--state-file` / `RSRPC_STATE_FILE` (any boolish value, e.g. `1`).
@@ -126,11 +133,25 @@ fn slot_reusable(path: &Path, now_secs: u64) -> bool {
 }
 
 /// Atomically persist a snapshot (write temp + rename), so readers never
-/// see a torn file. Best-effort by design: callers log and continue.
+/// see a torn file. The temp file is created owner-only (`0600` on
+/// Unix; the rename carries the mode to the final path), so presence
+/// metadata stays private under a permissive umask. Best-effort by
+/// design: callers log and continue.
 pub fn write_snapshot(path: &Path, snapshot: &StateSnapshot) -> std::io::Result<()> {
   let body = serde_json::to_vec(snapshot)
     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
   let tmp = path.with_extension("tmp");
+  // Drop a stale temp first so the create below always applies the
+  // owner-only mode (mode only takes effect on creation).
+  let _ = std::fs::remove_file(&tmp);
+  #[cfg(unix)]
+  let mut file = std::fs::OpenOptions::new()
+    .write(true)
+    .create(true)
+    .truncate(true)
+    .mode(0o600)
+    .open(&tmp)?;
+  #[cfg(not(unix))]
   let mut file = std::fs::File::create(&tmp)?;
   file.write_all(&body)?;
   file.sync_all()?;

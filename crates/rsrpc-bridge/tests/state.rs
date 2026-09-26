@@ -73,6 +73,29 @@ fn snapshot_round_trips_through_atomic_write() {
   let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Snapshots are owner-only on Unix: presence metadata (app ids, pids)
+/// must not leak to other local users under a permissive umask.
+#[cfg(unix)]
+#[test]
+fn snapshot_file_is_owner_only() {
+  use std::os::unix::fs::PermissionsExt;
+
+  let dir = std::env::temp_dir().join("rsrpc-state-test-perms");
+  let _ = std::fs::create_dir_all(&dir);
+  let path = dir.join("rsrpc-state-0");
+
+  let snapshot = StateSnapshot::new("0.35.0", StateServers::default(), vec![]);
+  write_snapshot(&path, &snapshot).expect("writes");
+  let mode = std::fs::metadata(&path)
+    .expect("metadata")
+    .permissions()
+    .mode()
+    & 0o777;
+  assert_eq!(mode, 0o600, "snapshot must be owner-only, got {mode:o}");
+
+  let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Snapshots stamp the caller daemon version, never the defining crate's
 /// version (this held when the code lived in its own crate, and holds
 /// now that it lives in the bridge).
