@@ -350,6 +350,24 @@ mod tests {
     assert!(!handoff.is_suppressed("1"));
   }
 
+  /// `owner_of` tracks the current owner through publishes, takeovers
+  /// and releases: the takeover log reads this to name both sides.
+  #[test]
+  fn owner_of_follows_publishes_and_releases() {
+    let mut handoff = HandoffState::default();
+    assert_eq!(handoff.owner_of("1"), None);
+    handoff.note_publish("1", 10);
+    assert_eq!(handoff.owner_of("1"), Some(10));
+    // Companion takeover replaces the owner.
+    handoff.note_publish("1", 20);
+    assert_eq!(handoff.owner_of("1"), Some(20));
+    // Owner's clear releases; a stranger's does not.
+    assert!(!handoff.note_clear("1", 10));
+    assert_eq!(handoff.owner_of("1"), Some(20));
+    assert!(handoff.note_clear("1", 20));
+    assert_eq!(handoff.owner_of("1"), None);
+  }
+
   /// Resume fires only for the game the scanner still reports.
   #[test]
   fn resume_only_matches_scanned_game() {

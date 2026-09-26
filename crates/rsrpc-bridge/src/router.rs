@@ -131,9 +131,10 @@ pub(crate) fn take_process_clear(shared: &Shared) -> Vec<(u64, AppId)> {
 impl Shared {
   /// IPC-wins handoff: a live SDK presence takes over this app slot
   /// from generic detection (last publisher wins across companions).
-  /// Logs the takeover once (transition only — steady republishes with
-  /// ticking timestamps stay quiet), naming the suppressed generic so
-  /// the journal shows which side owns the slot and why.
+  /// Logs takeovers once — fresh claims and owner changes alike (steady
+  /// republishes with ticking timestamps stay quiet) — naming the
+  /// suppressed generic so the journal shows which side owns the slot
+  /// and why.
   pub(crate) fn note_sdk_publish(&self, cmd: &ActivityCmd) {
     let args = cmd.args.as_ref();
     let pid = args.and_then(|args| args.pid).unwrap_or_default();
@@ -141,23 +142,32 @@ impl Shared {
       .and_then(|args| args.activity.as_ref())
       .and_then(|activity| activity.application_id.clone())
     {
-      let (fresh_takeover, generic) = {
+      let (previous, generic) = {
         let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
-        let fresh_takeover = !handoff.is_suppressed(&app);
+        let previous = handoff.owner_of(&app);
         handoff.note_publish(&app, pid);
         let generic = handoff
           .resume_for(&app)
           .map(|game| game.name.clone())
           .unwrap_or_default();
-        (fresh_takeover, generic)
+        (previous, generic)
       };
-      if fresh_takeover {
-        if generic.is_empty() {
-          tracing::info!("[bridge] SDK presence for {app} (pid {pid}) now owns its slot");
-        } else {
-          tracing::info!(
-            "[bridge] SDK presence for {app} (pid {pid}) took over slot from generic {generic}"
-          );
+      // Same owner republishing: quiet (timestamps tick every second).
+      if previous != Some(pid) {
+        match (previous, generic.is_empty()) {
+          (None, true) => {
+            tracing::info!("[bridge] SDK presence for {app} (pid {pid}) now owns its slot");
+          }
+          (None, false) => {
+            tracing::info!(
+              "[bridge] SDK presence for {app} (pid {pid}) took over slot from generic {generic}"
+            );
+          }
+          (Some(old), _) => {
+            tracing::info!(
+              "[bridge] SDK presence for {app} (pid {pid}) took over slot from pid {old}"
+            );
+          }
         }
       }
     }
