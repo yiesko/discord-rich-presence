@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`automaton`, `cwd-joined`, `proton-automaton`, `steam-app-id`,
   `steam-library`, `exe-stem`, `folder`) plus process age in ms at
   classification; every clear carries its reason (`sdk-clear`,
-  `abrupt-close`, `process-vanished`, `yielded`); SDK takeovers and
+  `abrupt-close`, `process-vanished`, `scan-absent`, `yielded`); SDK takeovers and
   generic resumes name both sides of the slot. Snapshots gain additive
   `detectionSource` / `detectLatencyMs` fields per card (`"sdk"` for
   client-published cards, absent on old ones). Tracing only, on

@@ -66,7 +66,8 @@ Clear reasons (`: {reason}` suffix):
 |---|---|
 | `sdk-clear` | Genuine null-activity CLEAR frame from the owning connection |
 | `abrupt-close` | Owning socket died without CLEAR (ghost reap, pid-owned release) |
-| `process-vanished` | Scanner reports the process gone (per-slot remove, empty table) |
+| `process-vanished` | Scanner reports the slot gone and liveness confirms the pid dead |
+| `scan-absent` | Slot left the classified scan but the pid still runs (database refresh or ignore-list delisted a live game) |
 | `yielded` | Generic card withdrawn for a live SDK owner on the same slot |
 
 ## Snapshots (`--state-file`)

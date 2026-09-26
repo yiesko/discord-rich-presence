@@ -638,11 +638,14 @@ async fn proc_pump(
         // once: repeated clears go quiet.
         let outstanding = take_process_clear(&shared);
         for (pid, app_id) in outstanding {
-          tracing::info!(
-            "[bridge] Clearing {} (pid {pid}): {}",
-            app_id.as_ref(),
-            ClearReason::ProcessVanished.as_str()
-          );
+          // Same liveness gate as the per-slot path above: an emptied
+          // table can also mean delisting, not death.
+          let reason = if is_process_alive(pid) {
+            ClearReason::ScanAbsent
+          } else {
+            ClearReason::ProcessVanished
+          };
+          tracing::info!("[bridge] Clearing {} (pid {pid}): {}", app_id.as_ref(), reason.as_str());
           let socket_id = SocketId::from(app_id);
           let Some(payload) = commands::empty_cached(pid, socket_id.clone()) else {
             tracing::warn!("[bridge] Dropping unencodable clear payload");
@@ -762,10 +765,18 @@ async fn proc_pump(
           pid,
         );
         if let Some(pid) = outstanding {
+          // A lost match is not necessarily a dead process (database
+          // refresh or ignore-list can delist a live pid): probe before
+          // claiming death in the log.
+          let reason = if is_process_alive(pid) {
+            ClearReason::ScanAbsent
+          } else {
+            ClearReason::ProcessVanished
+          };
           tracing::info!(
             "[bridge] Clearing removed game slot for {} (pid {pid}): {}",
             app_id.as_ref(),
-            ClearReason::ProcessVanished.as_str()
+            reason.as_str()
           );
           if let Some(payload) = commands::empty_cached(pid, SocketId::from(&app_id)) {
             shared.broadcast_activity(payload, SocketId::from(&app_id));

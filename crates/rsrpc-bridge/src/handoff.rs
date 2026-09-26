@@ -125,8 +125,11 @@ pub enum ClearReason {
   SdkClear,
   /// Owning socket died without CLEAR (ghost reap, pid-owned release).
   AbruptClose,
-  /// Scanner reports the process gone (per-slot remove, empty table).
+  /// Scanner reports the process gone and liveness confirms death.
   ProcessVanished,
+  /// Process alive but no longer classified (database refresh or
+  /// ignore-list dropped the match while the pid still runs).
+  ScanAbsent,
   /// Generic card withdrawn for a live SDK owner on the same slot.
   Yielded,
 }
@@ -139,6 +142,7 @@ impl ClearReason {
       Self::SdkClear => "sdk-clear",
       Self::AbruptClose => "abrupt-close",
       Self::ProcessVanished => "process-vanished",
+      Self::ScanAbsent => "scan-absent",
       Self::Yielded => "yielded",
     }
   }
