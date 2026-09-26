@@ -120,10 +120,16 @@ fn sweep_stale_tmps(dir: &Path, now_secs: u64) {
   };
   for entry in entries.flatten() {
     let path = entry.path();
+    // Scope to our own temp names: the state dir defaults to shared
+    // `/tmp`, where any `*.tmp-*` may belong to another program.
     let is_tmp = path
-      .extension()
-      .and_then(|ext| ext.to_str())
-      .is_some_and(|ext| ext.starts_with("tmp-"));
+      .file_name()
+      .and_then(|name| name.to_str())
+      .is_some_and(|name| name.starts_with(STATE_FILE_PREFIX))
+      && path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.starts_with("tmp-"));
     if !is_tmp {
       continue;
     }
