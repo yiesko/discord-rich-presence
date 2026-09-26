@@ -92,8 +92,12 @@ fn bundled_database_summarizes() {
 }
 
 /// Full boot on ephemeral ports shuts down cleanly inside the deadline.
+/// Holds the teardown serial like every other daemon run: thread-name
+/// assertions are process-global, so two daemons must never overlap —
+/// even this scanner-less boot spawns a transient pump.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_binds_and_shuts_down_cleanly() {
+  let _serial = SERIAL_TEARDOWN.lock().await;
   let daemon = Daemon::from_json_str("[]", shutdown_config()).expect("empty db parses");
   tokio::time::timeout(Duration::from_secs(30), daemon.run_until(async {}))
     .await
