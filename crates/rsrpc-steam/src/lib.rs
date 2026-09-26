@@ -251,16 +251,25 @@ pub fn manifest_ids(doc: &HashMap<String, Vdf>) -> Option<(String, String)> {
 
 /// Lowercased `.../steamapps/common/<installdir>/` (or
 /// `.../steamapps/compatdata/<id>/`) for prefix matching against the
-/// scanner's normalized process paths.
+/// scanner's process paths.
 fn common_prefix(library: &str, installdir: &str) -> String {
-  let mut prefix = format!("{library}/steamapps/common/{installdir}").to_lowercase();
+  let mut prefix = canonical_steam_path(&format!("{library}/steamapps/common/{installdir}"));
   if !prefix.ends_with('/') {
     prefix.push('/');
   }
-  if !prefix.starts_with('/') {
-    prefix.insert(0, '/');
-  }
   prefix
+}
+
+/// Canonical form for prefix matching: lowercase, `/` separators,
+/// leading `/`. Windows contributes `\`-separated library and process
+/// paths; without this, cached keys and queries never share a form
+/// there and no prefix ever matches.
+fn canonical_steam_path(raw: &str) -> String {
+  let mut out = raw.replace('\\', "/").to_lowercase();
+  if !out.starts_with('/') {
+    out.insert(0, '/');
+  }
+  out
 }
 
 /// Change marker for one library: steamapps dir mtime, manifest count,
@@ -569,10 +578,12 @@ impl SteamLibraries {
     }
   }
 
-  /// AppId whose install dir is the longest prefix of `normalized_path`
-  /// (already lowercased, `/`-separated, leading `/` — the scanner's form).
+  /// AppId whose install dir is the longest prefix of `path`. The
+  /// query is canonicalized first (lowercase, `/` separators, leading
+  /// `/`), so native Windows paths match the cached keys.
   #[inline]
-  pub fn match_prefix(&self, normalized_path: &str) -> Option<&str> {
+  pub fn match_prefix(&self, path: &str) -> Option<&str> {
+    let normalized_path = canonical_steam_path(path);
     let mut best: Option<&str> = None;
     let mut best_len = 0;
     for (prefix, appid) in &self.dirs {
@@ -621,14 +632,11 @@ impl SteamLibraries {
       // Proton prefix without a manifest (deleted/never-written acf):
       // `steamapps/compatdata/<id>/` still names its owner.
       if name.chars().all(|c| c.is_ascii_digit()) && entry.path().join("pfx").is_dir() {
-        let mut prefix = format!(
+        let prefix = canonical_steam_path(&format!(
           "{}/steamapps/compatdata/{}/",
-          library.to_string_lossy().to_lowercase(),
+          library.to_string_lossy(),
           name
-        );
-        if !prefix.starts_with('/') {
-          prefix.insert(0, '/');
-        }
+        ));
         dirs.entry(prefix).or_insert(name.to_string());
         continue;
       }
@@ -662,12 +670,9 @@ fn library_owns_prefix(library: &Path, prefix: &str) -> bool {
 /// Normalized owning-prefix form of one library (`<lib-lower>/steamapps/`),
 /// hoisted so hot loops build it once per library instead of per prefix.
 fn library_prefix(library: &Path) -> String {
-  let mut lib = library.to_string_lossy().to_lowercase();
+  let mut lib = canonical_steam_path(&library.to_string_lossy());
   if !lib.ends_with('/') {
     lib.push('/');
-  }
-  if !lib.starts_with('/') {
-    lib.insert(0, '/');
   }
   lib.push_str("steamapps/");
   lib
@@ -1121,5 +1126,29 @@ fn save_cache(libraries: &SteamLibraries) {
   let tmp = path.with_extension("json.tmp");
   if std::fs::write(&tmp, body).is_ok() {
     let _ = std::fs::rename(&tmp, &path);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Canonical form folds separators and case: Windows library roots
+  /// and native process paths meet the cached `/`-separated keys.
+  #[test]
+  fn canonical_path_folds_separators_and_case() {
+    assert_eq!(
+      canonical_steam_path("C:\\Steam\\library"),
+      "/c:/steam/library"
+    );
+    assert_eq!(
+      canonical_steam_path("c:/Steam/Library/"),
+      "/c:/steam/library/"
+    );
+    assert_eq!(
+      canonical_steam_path("/home/u/.local/share/Steam"),
+      "/home/u/.local/share/steam"
+    );
+    assert_eq!(canonical_steam_path("relative\\dir"), "/relative/dir");
   }
 }
