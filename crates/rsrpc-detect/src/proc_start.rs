@@ -58,6 +58,7 @@ pub fn process_start_ms(pid: u64) -> Option<u64> {
 /// `starttime` (field 22, clock ticks since boot) from a `/proc` stat
 /// line. The comm may hold spaces and parens, so fields start after
 /// the LAST `)` — everything past it is numeric.
+#[cfg(target_os = "linux")]
 fn stat_starttime_ticks(stat: &str) -> Option<u64> {
   let close = stat.rfind(')')?;
   if !stat[..close].contains('(') {
@@ -67,16 +68,21 @@ fn stat_starttime_ticks(stat: &str) -> Option<u64> {
 }
 
 /// Absolute start millis from boot millis, start ticks and clock ticks.
+#[cfg(target_os = "linux")]
 fn start_ms_from_ticks(boot_ms: u64, ticks: u64, clk_tck: u64) -> u64 {
   boot_ms.saturating_add(ticks.saturating_mul(1000) / clk_tck.max(1))
 }
 
 #[cfg(test)]
 mod tests {
+  // Unit tests cover the Linux parser; other targets exercise the
+  // public reader through the integration test instead.
+  #[cfg(target_os = "linux")]
   use super::*;
 
   /// `starttime` is field 22 even when the comm holds spaces and parens
   /// (fields start after the LAST `)`).
+  #[cfg(target_os = "linux")]
   #[test]
   fn stat_starttime_survives_tricky_comm() {
     let stat = "12345 (my (tricky) game) R 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 42 999";
@@ -84,6 +90,7 @@ mod tests {
   }
 
   /// Short lines and comm-less garbage refuse instead of misparsing.
+  #[cfg(target_os = "linux")]
   #[test]
   fn stat_starttime_rejects_garbage() {
     assert_eq!(stat_starttime_ticks(""), None);
@@ -92,6 +99,7 @@ mod tests {
   }
 
   /// Tick math is exact and saturating.
+  #[cfg(target_os = "linux")]
   #[test]
   fn start_ms_math_is_exact() {
     assert_eq!(

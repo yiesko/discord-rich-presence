@@ -68,6 +68,20 @@ pub(crate) fn generic_payload(game: &ScannedGame) -> Option<Arc<CachedActivity>>
   // Fixed shapes: practically unreachable encode failure surfaces as
   // `None` so callers log and drop instead of shipping an empty frame.
   let activity_json = serde_json::to_vec(&payload_struct.activity).ok()?;
+  // Provenance for snapshots: the matcher's source travels on the game,
+  // latency is process age at this (first) publish. Rare path only —
+  // never per tick per process.
+  let now_ms = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .ok()
+    .and_then(|age| u64::try_from(age.as_millis()).ok())
+    .unwrap_or(0);
+  let provenance = Some(commands::ActivityProvenance {
+    source: game.source.clone(),
+    latency_ms: game
+      .process_start_ms
+      .map(|started| now_ms.saturating_sub(started)),
+  });
   Some(Arc::new(commands::CachedActivity {
     json: serde_json::to_string(&payload_struct)
       .ok()
@@ -78,6 +92,7 @@ pub(crate) fn generic_payload(game: &ScannedGame) -> Option<Arc<CachedActivity>>
     // Always built with `activity: Some` above.
     is_clear: false,
     activity_json: bytes::Bytes::from(activity_json),
+    provenance,
   }))
 }
 
@@ -238,10 +253,18 @@ impl Shared {
       tracing::debug!("[bridge] Dropping duplicate SET_ACTIVITY (app {app_key}, pid {pid})");
       return;
     }
-    let Some(payload) = commands::cached_activity(&mut cmd, fingerprint.clone()) else {
+    let Some(mut payload) = commands::cached_activity(&mut cmd, fingerprint.clone()) else {
       tracing::warn!("[bridge] Invalid activity command, skipping");
       return;
     };
+    // Freshly built (sole owner): stamp SDK provenance so snapshots tell
+    // client-published cards apart from detected generics.
+    if let Some(payload) = Arc::get_mut(&mut payload) {
+      payload.provenance = Some(commands::ActivityProvenance {
+        source: "sdk".to_string(),
+        latency_ms: None,
+      });
+    }
     let app_key = cmd.application_id.as_deref().unwrap_or("");
     let activity = cmd.args.as_ref().and_then(|args| args.activity.as_ref());
     self.note_sdk_publish(&cmd);
@@ -336,5 +359,42 @@ impl Shared {
     }
     self.send_to_all(&payload);
     self.dirty.store(true, Ordering::Relaxed);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Epoch millis for latency fixtures.
+  fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .ok()
+      .and_then(|age| u64::try_from(age.as_millis()).ok())
+      .unwrap_or(0)
+  }
+
+  /// Generic payloads stamp detection provenance for snapshots: the
+  /// matcher's source travels on the card, latency is process age at
+  /// first publish.
+  #[test]
+  fn generic_payload_stamps_provenance() {
+    let game = ScannedGame {
+      id: AppId::from("12345"),
+      name: "Source Game".to_string(),
+      pid: u64::from(std::process::id()),
+      start: 0,
+      source: "steam-app-id".to_string(),
+      process_start_ms: Some(now_ms().saturating_sub(5000)),
+    };
+    let payload = generic_payload(&game).expect("builds");
+    let provenance = payload.provenance.clone().expect("stamped");
+    assert_eq!(provenance.source, "steam-app-id");
+    let latency = provenance.latency_ms.expect("latency");
+    assert!(
+      (5000..=60_000).contains(&latency),
+      "latency {latency}ms should be ~5s"
+    );
   }
 }

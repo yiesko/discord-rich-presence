@@ -1,5 +1,6 @@
 use rsrpc_bridge::state::{
-  STATE_FILE_PREFIX, StateServers, StateSnapshot, now_secs, select_slot, write_snapshot,
+  STATE_FILE_PREFIX, StateActivity, StateServers, StateSnapshot, now_secs, select_slot,
+  write_snapshot,
 };
 
 #[test]
@@ -185,6 +186,29 @@ fn select_slot_sweeps_only_stale_tmps() {
   assert!(foreign_tmp.exists(), "foreign temps must survive the sweep");
 
   let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Provenance rides the snapshot additively: present when known,
+/// absent (not null) when the card predates it — old readers keep working.
+#[test]
+fn activity_provenance_is_additive() {
+  let bare = StateActivity {
+    socket_id: "1".to_string(),
+    ..StateActivity::default()
+  };
+  let body = serde_json::to_value(&bare).expect("json");
+  assert!(body.get("detectionSource").is_none());
+  assert!(body.get("detectLatencyMs").is_none());
+
+  let traced = StateActivity {
+    socket_id: "1".to_string(),
+    detection_source: Some("steam-app-id".to_string()),
+    detect_latency_ms: Some(4321),
+    ..StateActivity::default()
+  };
+  let body = serde_json::to_value(&traced).expect("json");
+  assert_eq!(body["detectionSource"], "steam-app-id");
+  assert_eq!(body["detectLatencyMs"], 4321);
 }
 
 /// Snapshots stamp the caller daemon version, never the defining crate's

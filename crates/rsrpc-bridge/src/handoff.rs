@@ -22,6 +22,12 @@ pub struct ScannedGame {
   pub pid: u64,
   /// Process start time (Unix seconds) for card timestamps.
   pub start: u64,
+  /// Which matcher classified the process (log string form): travels to
+  /// generic payloads and snapshots for detection provenance.
+  pub source: String,
+  /// Process start as epoch millis, when the detector could read it:
+  /// snapshot latency is measured against this, never re-read.
+  pub process_start_ms: Option<u64>,
 }
 
 /// Scanner input to the bridge: one game appeared, one slot vanished, or
@@ -287,6 +293,8 @@ mod tests {
       name: "Game".to_string(),
       pid: 1234,
       start: 0,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }
   }
 
@@ -357,6 +365,8 @@ mod tests {
       name: "Other".to_string(),
       pid: 9,
       start: 0,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     }));
     // A different game on screen: not ours to resume.
     assert_eq!(handoff.resume_for("1"), None);

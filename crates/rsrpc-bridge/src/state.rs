@@ -66,6 +66,14 @@ pub struct StateActivity {
   pub pid: Option<u64>,
   #[serde(rename = "startTime", skip_serializing_if = "Option::is_none")]
   pub start_time: Option<String>,
+  /// How this card was detected (matcher source, or `"sdk"` for
+  /// client-published activities). Additive: absent on old cards.
+  #[serde(rename = "detectionSource", skip_serializing_if = "Option::is_none")]
+  pub detection_source: Option<String>,
+  /// Process age in ms when first published (`None` when the start
+  /// time was unreadable). Additive: absent on old cards.
+  #[serde(rename = "detectLatencyMs", skip_serializing_if = "Option::is_none")]
+  pub detect_latency_ms: Option<u64>,
 }
 
 #[derive(Serialize, Clone, Debug)]

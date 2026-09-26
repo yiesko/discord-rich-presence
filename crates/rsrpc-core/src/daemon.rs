@@ -411,6 +411,10 @@ impl Daemon {
               name: hit.entry.name.to_string(),
               pid: hit.pid,
               start: hit.start,
+              // Provenance travels per event (rare by construction): one
+              // start-time read here, never on the scan tick.
+              source: hit.source.as_str().to_string(),
+              process_start_ms: rsrpc_detect::proc_start::process_start_ms(hit.pid),
             }),
             rsrpc_detect::ProcessDetectedEvent::Cleared => ProcInput::Cleared,
             rsrpc_detect::ProcessDetectedEvent::Removed { id, pid } => {

@@ -945,6 +945,8 @@ mod tests {
       name: "G".to_string(),
       pid: 7,
       start: 0,
+      source: "automaton".to_string(),
+      process_start_ms: None,
     };
     // Empty -> game: session start; repeats stay quiet.
     assert_eq!(
