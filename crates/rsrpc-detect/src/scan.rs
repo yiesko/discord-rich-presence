@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::bundle::{DetectablesBundle, SortedIndex, bare_exe, path_variants_into};
 use crate::server::ProcessServer;
-use crate::types::{Exec, ScannedEntry, ScannedHit};
+use crate::types::{DetectSource, Exec, ScannedEntry, ScannedHit};
 
 /// Read one process's cmdline into an `Exec` (Linux). `None` for kernel
 /// threads, zombies, vanished or unreadable pids — the caller just skips
@@ -344,12 +344,12 @@ pub fn exe_stem(normalized_path: &str) -> &str {
 /// choke point for every aux hit (appid/stem/folder), mirroring the scan
 /// loop's post-match check for AC hits. Stamps the observation onto the
 /// shared slim entry (no clone).
-fn live_or_none(obj: &Arc<ScannedEntry>, pid: u64) -> Option<ScannedHit> {
+fn live_or_none(obj: &Arc<ScannedEntry>, pid: u64, source: DetectSource) -> Option<ScannedHit> {
   if is_suspended(pid) {
     tracing::debug!("[Process Scanner] Ignoring suspended process (pid {pid})");
     return None;
   }
-  Some(ScannedHit::stamp(obj.clone(), pid))
+  Some(ScannedHit::stamp(obj.clone(), pid, source))
 }
 
 /// First sightings this boot: entries of `detected` not yet in `seen`
@@ -394,6 +394,7 @@ fn finish_direct_hit(
   obj: &Arc<ScannedEntry>,
   exe_index: usize,
   process: &Exec,
+  source: DetectSource,
 ) -> Option<ScannedHit> {
   // A hit without executables (or a stale index) is corrupt input, not a
   // game: skip the process instead of panicking the scan.
@@ -413,7 +414,7 @@ fn finish_direct_hit(
     }
   }
 
-  live_or_none(obj, process.pid)
+  live_or_none(obj, process.pid, source)
 }
 
 /// Steam's non-Steam shortcut range: ids Steam itself assigns when a
@@ -438,6 +439,7 @@ pub fn match_steam_id(
   steam_map: &SortedIndex,
   detectable_list: &[Arc<ScannedEntry>],
   custom: &[Arc<ScannedEntry>],
+  source: DetectSource,
 ) -> Option<ScannedHit> {
   let appid = steam_app_id?;
   if let Some(&idx) = steam_map.get(appid) {
@@ -447,7 +449,7 @@ pub fn match_steam_id(
       obj.name,
       appid
     );
-    return live_or_none(obj, pid);
+    return live_or_none(obj, pid, source);
   }
   // Custom override with a bare steam SKU (no executables to index).
   for obj in custom {
@@ -461,7 +463,7 @@ pub fn match_steam_id(
         obj.name,
         appid
       );
-      return live_or_none(obj, pid);
+      return live_or_none(obj, pid, DetectSource::SteamAppId);
     }
   }
   None
@@ -488,7 +490,7 @@ pub fn match_name_or_folder(
       obj.name,
       stem
     );
-    return live_or_none(obj, pid);
+    return live_or_none(obj, pid, DetectSource::ExeStem);
   }
 
   // Install-folder fallback (Hydra / non-Steam shortcuts / renamed exes):
@@ -515,7 +517,7 @@ pub fn match_name_or_folder(
         obj.name,
         folder
       );
-      return live_or_none(obj, pid);
+      return live_or_none(obj, pid, DetectSource::Folder);
     }
   }
 
@@ -542,7 +544,7 @@ pub fn match_name_or_folder(
         obj.name,
         folder
       );
-      return live_or_none(obj, pid);
+      return live_or_none(obj, pid, DetectSource::Folder);
     }
   }
 
@@ -714,6 +716,9 @@ impl ProcessServer {
     // variants (so `wow64.exe` also matches a `wow.exe` pattern, like
     // arrpc/pog5-rsrpc). First hit in variant order wins.
     let mut found = self.probe_variants(&process_path, variant_bufs, reversed_path, bundle, false);
+    // Which probe won (native path vs cwd-joined): tracked alongside
+    // `found` because both funnel into one tail call below.
+    let mut found_source = DetectSource::Automaton;
 
     // Proton bare-exe probe (DOOM Eternal case): argv[0] without
     // directories plus the process cwd often reconstructs the install
@@ -730,6 +735,7 @@ impl ProcessServer {
       );
       found = self.probe_variants(&candidate, variant_bufs, reversed_path, bundle, false);
       if found.is_some() {
+        found_source = DetectSource::CwdJoined;
         tracing::debug!("[Process Scanner] Cwd match for pid {}", process.pid);
       }
     }
@@ -774,6 +780,7 @@ impl ProcessServer {
           &bundle.steam_map,
           &bundle.list,
           &bundle.custom,
+          DetectSource::SteamAppId,
         ) {
           return Some(hit);
         }
@@ -803,7 +810,7 @@ impl ProcessServer {
         if let Some((obj, exe_index)) =
           self.probe_variants(&process_path, variant_bufs, reversed_path, bundle, true)
         {
-          return finish_direct_hit(&obj, exe_index, process);
+          return finish_direct_hit(&obj, exe_index, process, DetectSource::ProtonAutomaton);
         }
         // Steam's own word: the process runs under a known install dir,
         // so it inherits that entry's AppId. Beats name guessing below,
@@ -815,6 +822,7 @@ impl ProcessServer {
             &bundle.steam_map,
             &bundle.list,
             &bundle.custom,
+            DetectSource::SteamLibrary,
           )
         {
           tracing::debug!(
@@ -840,7 +848,7 @@ impl ProcessServer {
       }
     };
 
-    finish_direct_hit(&obj, exe_index, process)
+    finish_direct_hit(&obj, exe_index, process, found_source)
   }
 
   /// Single reversed-path AC probe (main DB, then custom overrides).
@@ -1049,6 +1057,77 @@ mod tick2_tests {
         "mismatch for {input:?}"
       );
     }
+  }
+
+  /// Authoritative AppId matches report their provenance on the hit.
+  /// (Inline: the fixture needs `SortedIndex::build`, which is
+  /// crate-private by design.)
+  #[test]
+  fn steam_app_id_hit_carries_its_source() {
+    use crate::bundle::SortedIndex;
+    use crate::types::DetectSource;
+
+    let entry = Arc::new(ScannedEntry {
+      id: "12345".into(),
+      name: "Source Game".into(),
+      executables: Vec::new(),
+      steam_ids: vec!["12345".into()],
+      aliases: Vec::new(),
+    });
+    let steam_map = SortedIndex::build(vec![("12345".into(), 0)]);
+    let hit = match_steam_id(
+      Some("12345"),
+      u64::from(std::process::id()),
+      &steam_map,
+      &[entry],
+      &[],
+      DetectSource::SteamAppId,
+    )
+    .expect("appid hits");
+    assert_eq!(hit.source, DetectSource::SteamAppId);
+  }
+
+  /// Exe-stem and folder heuristics report their own provenance.
+  /// (Inline: the fixtures need `SortedIndex::build`, crate-private.)
+  #[test]
+  fn name_and_folder_hits_carry_their_sources() {
+    use crate::bundle::SortedIndex;
+    use crate::types::DetectSource;
+
+    let entry = Arc::new(ScannedEntry {
+      id: "12345".into(),
+      name: "Source Game".into(),
+      executables: Vec::new(),
+      steam_ids: Vec::new(),
+      aliases: Vec::new(),
+    });
+    let name_map = SortedIndex::build(vec![("source game".into(), 0)]);
+    let empty = SortedIndex::build(Vec::new());
+    let list = [entry];
+    let mut norm_out = String::new();
+    let pid = u64::from(std::process::id());
+
+    let stem_hit = match_name_or_folder(
+      "/opt/source game",
+      pid,
+      &name_map,
+      &empty,
+      &list,
+      &mut norm_out,
+    )
+    .expect("stem hits");
+    assert_eq!(stem_hit.source, DetectSource::ExeStem);
+
+    let folder_hit = match_name_or_folder(
+      "/opt/source game/bin/run",
+      pid,
+      &name_map,
+      &empty,
+      &list,
+      &mut norm_out,
+    )
+    .expect("folder hits");
+    assert_eq!(folder_hit.source, DetectSource::Folder);
   }
 
   /// Scratch buffers are stable across calls: no reallocations on
