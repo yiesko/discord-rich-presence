@@ -7,7 +7,10 @@
 //! caller-owned reuse buffers.
 
 use super::runtime::ScanGuard;
-use super::scan::{ExecScratch, MatchScratch, read_exec_into};
+use super::scan::{ExecScratch, MatchScratch};
+// Linux-only: the /proc reader does not exist on other targets.
+#[cfg(target_os = "linux")]
+use super::scan::read_exec_into;
 use super::server::ProcessServer;
 use super::types::{Exec, ProcessScanState, ScannedHit};
 
