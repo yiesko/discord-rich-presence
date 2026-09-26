@@ -12,9 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::refresh::{FetchOutcome, fetch_detectable_etag};
-use super::scan::{ExecScratch, MatchScratch, apply_ignore_list, first_sightings, read_exec_into};
+use super::scan::{ExecScratch, MatchScratch, apply_ignore_list, first_sightings};
+// Linux-only: the /proc reader does not exist on other targets.
+#[cfg(target_os = "linux")]
+use super::scan::read_exec_into;
 use super::server::{ProcessServer, allocator_numbers, release_parse_arenas};
 use super::types::{Exec, ProcessDetectedEvent, ScannedHit};
+// Linux-only (`spawn_proc_watcher` return type); the other use below is
+// fully qualified.
+#[cfg(target_os = "linux")]
 use rsrpc_telemetry::QueueGauge;
 
 /// Re-entrancy guard for [`ProcessServer::scan_for_processes`]: acquired
@@ -233,6 +239,7 @@ impl ProcessServer {
 /// Cadence between dispatch receives: the only blocking wait in the
 /// dispatch loop doubles as the shutdown poll. Traffic returns at once;
 /// silence costs one cheap timeout per interval.
+#[cfg(target_os = "linux")]
 const DISPATCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Whether an EXEC fast-path hit must be skipped: ignored app IDs behave
