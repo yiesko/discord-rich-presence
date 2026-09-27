@@ -191,7 +191,7 @@ impl Shared {
       match serde_json::to_string(cmd) {
         Ok(payload) => Some(payload),
         Err(err) => {
-          tracing::debug!("[bridge] Dropping unserializable fan-out frame: {err}");
+          tracing::warn!("[bridge] Dropping unserializable fan-out frame: {err}");
           None
         }
       }
@@ -202,7 +202,7 @@ impl Shared {
       match rmp_serde::to_vec_named(cmd) {
         Ok(payload) => Some(payload),
         Err(err) => {
-          tracing::debug!("[bridge] Dropping unserializable fan-out frame: {err}");
+          tracing::warn!("[bridge] Dropping unserializable fan-out frame: {err}");
           None
         }
       }

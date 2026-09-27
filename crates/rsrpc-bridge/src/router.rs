@@ -17,7 +17,8 @@ use tokio::sync::mpsc;
 
 use super::bridge::Shared;
 use super::handoff::{
-  ClearReason, ProcInput, ScannedGame, is_process_alive, track_process_publication,
+  ClearReason, ProcInput, ScannedGame, is_process_alive, publication_purge_probe,
+  track_process_publication,
 };
 use super::replay::prune_cache;
 
@@ -143,9 +144,17 @@ impl Shared {
       .and_then(|activity| activity.application_id.clone())
     {
       let (previous, generic) = {
+        let (previous, probe) = {
+          let handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+          let previous = handoff.owner_of(&app);
+          (previous, handoff.publish_purge_probe())
+        }; // lock released: liveness probing is syscall I/O, never under it
+        let dead: Vec<u64> = probe
+          .into_iter()
+          .filter(|pid| !is_process_alive(*pid))
+          .collect();
         let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = handoff.owner_of(&app);
-        handoff.note_publish(&app, pid);
+        handoff.note_publish(&app, pid, &dead);
         let generic = handoff
           .resume_for(&app)
           .map(|game| game.name.clone())
@@ -215,9 +224,10 @@ impl Shared {
           handoff.resume_for(app.as_ref()).into_iter().collect()
         }
         Some(_) => Vec::new(),
-        // No app id: abrupt close (socket died without CLEAR).
-        // Release every slot this pid owned, or their generics stay
-        // suppressed by a dead owner forever.
+        // No app id: either an abrupt close (socket died without CLEAR)
+        // or a client-sent clear without application_id. Both release
+        // every slot this pid owned; their generics stay suppressed by
+        // a dead owner otherwise.
         None => handoff
           .note_clear_pid(pid)
           .into_iter()
@@ -332,11 +342,16 @@ impl Shared {
   /// scanner only emits on *changes*, so without this the slot would stay
   /// dark until the next game switch.
   pub(crate) fn resume_generic(&self, game: &ScannedGame) {
-    track_process_publication(
-      &mut self.last_process.lock().unwrap_or_else(|e| e.into_inner()),
-      game.id.clone(),
-      game.pid,
-    );
+    let probe = {
+      let last_process = self.last_process.lock().unwrap_or_else(|e| e.into_inner());
+      publication_purge_probe(&last_process)
+    }; // lock released: liveness probing is syscall I/O, never under it
+    let dead: Vec<u64> = probe
+      .into_iter()
+      .filter(|pid| !is_process_alive(*pid))
+      .collect();
+    let mut last_process = self.last_process.lock().unwrap_or_else(|e| e.into_inner());
+    track_process_publication(&mut last_process, game.id.clone(), game.pid, &dead);
     tracing::debug!(
       "[bridge] Resuming generic presence for {} ({})",
       game.name,

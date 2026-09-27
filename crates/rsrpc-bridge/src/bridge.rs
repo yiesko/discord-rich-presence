@@ -36,7 +36,8 @@ use crate::config::BridgeConfig;
 use crate::consumer::{BridgeProtocol, send_cached, send_message};
 use crate::control::handle_bridge_control;
 use crate::handoff::{
-  ClearReason, HandoffState, ProcInput, is_process_alive, track_process_publication,
+  ClearReason, HandoffState, ProcInput, is_process_alive, publication_purge_probe,
+  track_process_publication,
 };
 use crate::origin::origin_allowed;
 use crate::replay::{ReplayCache, cache_entry_pid};
@@ -313,7 +314,15 @@ impl Bridge {
     owned.abort_all();
     if let Some(path) = self.state_path.as_ref() {
       let path = path.clone();
-      let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
+      // A persist task dropped mid-write can complete its rename after
+      // this remove, resurrecting the slot. Best-effort second remove.
+      let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_file(&path);
+        if path.exists() {
+          let _ = std::fs::remove_file(&path);
+        }
+      })
+      .await;
     }
   }
 }
@@ -335,6 +344,7 @@ async fn bind_range(
   name: &'static str,
 ) -> Result<(rsrpc_ws::Server, EventHub, u16)> {
   let end = end.max(start);
+  let mut last_error = None;
   for port in start..=end {
     if Some(port) == skip {
       continue;
@@ -351,13 +361,24 @@ async fn bind_range(
       }
       Err(rsrpc_ws::Error::Bind(source)) => {
         tracing::warn!("[bridge] Failed to bind {name} on port {port}: {source}, trying next");
+        last_error = Some(rsrpc_ws::Error::Bind(source));
       }
       Err(err) => {
         tracing::warn!("[bridge] Failed to launch {name} on port {port}: {err}, trying next");
+        last_error = Some(err);
       }
     }
   }
-  Err(RsrpcError::BridgeBind { name, start, end })
+  Err(RsrpcError::BridgeBind {
+    name,
+    start,
+    end,
+    // The cause survives the coarse kind: when the scan ended on a
+    // non-bind failure that error is the real reason no port worked.
+    source: Box::new(
+      last_error.unwrap_or(rsrpc_ws::Error::Config("no candidate port was attempted")),
+    ),
+  })
 }
 
 /// Consumer pump for one bridge server: READY + replay on connect, control
@@ -632,7 +653,11 @@ async fn proc_pump(
         };
         match input {
       ProcInput::Cleared => {
-        shared.handoff.lock().unwrap_or_else(|e| e.into_inner()).note_scan(None);
+        shared
+          .handoff
+          .lock()
+          .unwrap_or_else(|e| e.into_inner())
+          .note_scan(None, &[]);
         // Clear every outstanding process publication (multi-game scans
         // publish per slot; one clear means the table is empty). Consumed
         // once: repeated clears go quiet.
@@ -684,8 +709,17 @@ async fn proc_pump(
       }
       ProcInput::Detected(game) => {
         // Remember the scan for the handoff: a clear hands the slot back
-        // to exactly this game (the scanner won't re-emit it).
-        shared.handoff.lock().unwrap_or_else(|e| e.into_inner()).note_scan(Some(game.clone()));
+        // to exactly this game (the scanner won't re-emit it). The
+        // capacity purge probes liveness outside the handoff lock.
+        let probe = {
+          let handoff = shared.handoff.lock().unwrap_or_else(|e| e.into_inner());
+          handoff.scan_purge_probe()
+        };
+        let dead: Vec<u64> = probe.into_iter().filter(|pid| !is_process_alive(*pid)).collect();
+        {
+          let mut handoff = shared.handoff.lock().unwrap_or_else(|e| e.into_inner());
+          handoff.note_scan(Some(game.clone()), &dead);
+        }
 
         // IPC-wins: a live SDK presence owns this slot — withdraw our
         // generic card if shown and stay out until that source clears.
@@ -730,11 +764,13 @@ async fn proc_pump(
           continue;
         }
 
-        track_process_publication(
-          &mut shared.last_process.lock().unwrap_or_else(|e| e.into_inner()),
-          game.id.clone(),
-          game.pid,
-        );
+        let probe = {
+          let last_process = shared.last_process.lock().unwrap_or_else(|e| e.into_inner());
+          publication_purge_probe(&last_process)
+        }; // lock released before the liveness probe
+        let dead: Vec<u64> = probe.into_iter().filter(|pid| !is_process_alive(*pid)).collect();
+        let mut last_process = shared.last_process.lock().unwrap_or_else(|e| e.into_inner());
+        track_process_publication(&mut last_process, game.id.clone(), game.pid, &dead);
         tracing::debug!("[bridge] Publishing generic presence for activity: {}", game.name);
         if let Some(payload) = generic_payload(&game) {
           shared.broadcast_activity(payload, SocketId::from(&game.id));

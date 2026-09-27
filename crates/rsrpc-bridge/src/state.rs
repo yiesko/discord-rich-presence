@@ -35,6 +35,11 @@ pub const STATE_FILE_PREFIX: &str = "rsrpc-state-";
 pub const MAX_STATE_SLOTS: u8 = 10;
 /// A slot older than this (by mtime) is stale and reusable.
 pub const STATE_STALE_SECS: u64 = 10;
+/// A parseable timestamp more than this far ahead of `now` (or a
+/// negative one) is not from a live writer: the slot is corrupt or
+/// tampered and reusable, instead of pinned "fresh" forever by an
+/// absurd stamp (e.g. `i64::MAX` millis computes `age_secs = 0`).
+const FUTURE_SANITY_THRESHOLD_MS: u64 = 365 * 24 * 3600 * 1000;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct StateServer {
@@ -104,9 +109,10 @@ impl StateSnapshot {
 
 /// Pick a snapshot slot in `dir`: the first missing, stale (`mtime` older
 /// than [`STATE_STALE_SECS`]), or corrupt (unparseable / missing fresh
-/// timestamp) slot. Returns `None` when every slot holds a fresh snapshot
-/// (another live daemon owns them all). Stale temp leftovers from crashed
-/// writers are swept first, under the same staleness rule.
+/// timestamp / absurd timestamp) slot. Returns `None` when every slot holds
+/// a fresh snapshot (another live daemon owns them all). Stale temp
+/// leftovers from crashed writers are swept first, under the same
+/// staleness rule.
 pub fn select_slot(dir: &Path, now_secs: u64) -> Option<PathBuf> {
   sweep_stale_tmps(dir, now_secs);
   for index in 0..MAX_STATE_SLOTS {
@@ -174,11 +180,20 @@ fn slot_reusable(path: &Path, now_secs: u64) -> bool {
   match timestamp_ms {
     // Fresh snapshot: owned by a live daemon.
     Some(timestamp_ms) => {
-      // Non-negative by construction (`.max(0)` above): the `try_from`
-      // documents the narrowing instead of a silent `as` cast.
-      let age_secs =
-        now_secs.saturating_sub(u64::try_from((timestamp_ms / 1000).max(0)).unwrap_or(0));
-      age_secs > STATE_STALE_SECS
+      let now_ms = now_secs.saturating_mul(1000);
+      // Absurd stamps (negative, or more than a year ahead of `now`)
+      // come from a corrupt or tampered writer: reusable, not pinned
+      // "fresh" forever.
+      if u64::try_from(timestamp_ms)
+        .is_ok_and(|stamp_ms| stamp_ms <= now_ms.saturating_add(FUTURE_SANITY_THRESHOLD_MS))
+      {
+        // Plausible stamp: non-negative by the check above, so the
+        // `try_from` documents the narrowing instead of a silent cast.
+        let age_secs = now_secs.saturating_sub(u64::try_from(timestamp_ms / 1000).unwrap_or(0));
+        age_secs > STATE_STALE_SECS
+      } else {
+        true
+      }
     }
     // No timestamp: not ours, reusable.
     None => true,
@@ -280,6 +295,30 @@ mod tests {
       "link must be gone or never created through"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// A parseable but absurd timestamp (negative, or more than a year in
+  /// the future) is corrupt: the slot is reusable instead of pinned
+  /// "fresh" forever by an `i64::MAX` stamp.
+  #[test]
+  fn absurd_timestamp_is_reusable() {
+    let dir = std::env::temp_dir().join(format!("rsrpc-state-test-absurd-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("rsrpc-state-0");
+    let now_ms = i64::try_from(now_secs()).expect("epoch millis fit i64");
+    for stamp_ms in [i64::MAX, -1, now_ms + 366 * 24 * 3600 * 1000] {
+      let snapshot = serde_json::json!({ "timestamp": stamp_ms, "appVersion": "v" });
+      std::fs::write(
+        &path,
+        serde_json::to_string(&snapshot).expect("snapshot serializes"),
+      )
+      .expect("write slot");
+      assert!(
+        slot_reusable(&path, now_secs()),
+        "stamp {stamp_ms} must be reusable"
+      );
+    }
     let _ = std::fs::remove_dir_all(&dir);
   }
 

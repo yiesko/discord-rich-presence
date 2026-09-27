@@ -17,6 +17,13 @@ pub const ALLOWED_ORIGINS: [&str; 3] = [
 /// clients), Discord's pages pass, anything else needs an explicit
 /// `RSRPC_BRIDGE_ALLOWED_ORIGINS` entry (normalized once at
 /// configuration, then exact match).
+///
+/// A malformed or non-UTF8 header (the caller maps it to `None`, the
+/// same as absent) cannot bypass the allowlist: browsers always send a
+/// well-formed origin (`scheme://host[:port]`, ASCII), so a garbage
+/// value only ever comes from a non-browser client — the same already-
+/// trusted case as a native client — while any valid origin that is not
+/// allowed is still refused below.
 pub(crate) fn origin_allowed(origin: Option<&str>, extra: &[String]) -> bool {
   match origin {
     None => true,

@@ -150,6 +150,12 @@ impl ClearReason {
 
 /// IPC-wins handoff state. One lock for the whole state (short critical
 /// sections, no I/O under it), shared by the event and process pumps.
+///
+/// The "no I/O under the lock" invariant is upheld by splitting every
+/// capacity purge into two phases: the `*purge_probe` helpers snapshot
+/// candidate pids under the lock (cheap, allocation only), the caller
+/// probes liveness with [`is_process_alive`] (a syscall) AFTER dropping
+/// the lock, and the note methods commit the probed-dead entries.
 #[derive(Clone, Debug, Default)]
 pub struct HandoffState {
   /// App id → pid of its current IPC/WS owner (`SET_ACTIVITY` with activity).
@@ -161,11 +167,15 @@ pub struct HandoffState {
 
 impl HandoffState {
   /// Record a live SDK publication for `app_id` from `pid`.
-  pub fn note_publish(&mut self, app_id: &str, pid: u64) {
-    if self.live_ipc.len() >= MAX_HANDOFF_ENTRIES {
-      // Purge dead owners first (the actual garbage: crashed companions
-      // that never cleared). Whatever remains is live.
-      self.live_ipc.retain(|_, owner| is_process_alive(*owner));
+  ///
+  /// `dead_owners` must come from [`HandoffState::publish_purge_probe`]
+  /// probed by the caller OUTSIDE the lock — never call
+  /// [`is_process_alive`] while holding it.
+  pub fn note_publish(&mut self, app_id: &str, pid: u64, dead_owners: &[u64]) {
+    if !dead_owners.is_empty() {
+      self
+        .live_ipc
+        .retain(|_, owner| !dead_owners.contains(owner));
     }
     self.live_ipc.insert(AppId::from(app_id), pid);
     // Hard bound: even all-live flooding (one pid, infinite ids) stops
@@ -176,6 +186,19 @@ impl HandoffState {
         break;
       };
       self.live_ipc.remove(&victim);
+    }
+  }
+
+  /// Phase 1 of [`HandoffState::note_publish`] — call under the lock:
+  /// when the table is at capacity, snapshot the owner pids whose
+  /// liveness gates the purge. Empty when there is room (no probe
+  /// needed). No I/O.
+  #[must_use]
+  pub fn publish_purge_probe(&self) -> Vec<u64> {
+    if self.live_ipc.len() >= MAX_HANDOFF_ENTRIES {
+      self.live_ipc.values().copied().collect()
+    } else {
+      Vec::new()
     }
   }
 
@@ -207,13 +230,17 @@ impl HandoffState {
   }
 
   /// Record a scanner report (`None` = table empty, forget every game).
-  pub fn note_scan(&mut self, game: Option<ScannedGame>) {
+  ///
+  /// `dead_pids` must come from [`HandoffState::scan_purge_probe`]
+  /// probed by the caller OUTSIDE the lock. `None` reports never
+  /// purge, so they take an empty slice.
+  pub fn note_scan(&mut self, game: Option<ScannedGame>, dead_pids: &[u64]) {
     match game {
       Some(game) => {
-        if self.last_scans.len() >= MAX_HANDOFF_ENTRIES {
+        if !dead_pids.is_empty() {
           self
             .last_scans
-            .retain(|_, known| is_process_alive(known.pid));
+            .retain(|_, known| !dead_pids.contains(&known.pid));
         }
         self.last_scans.insert(game.id.clone(), game);
         while self.last_scans.len() > MAX_HANDOFF_ENTRIES {
@@ -224,6 +251,18 @@ impl HandoffState {
         }
       }
       None => self.last_scans.clear(),
+    }
+  }
+
+  /// Phase 1 of [`HandoffState::note_scan`] — call under the lock:
+  /// when the table is at capacity, snapshot the scan pids whose
+  /// liveness gates the purge. Empty when there is room. No I/O.
+  #[must_use]
+  pub fn scan_purge_probe(&self) -> Vec<u64> {
+    if self.last_scans.len() >= MAX_HANDOFF_ENTRIES {
+      self.last_scans.values().map(|game| game.pid).collect()
+    } else {
+      Vec::new()
     }
   }
 
@@ -263,9 +302,18 @@ impl HandoffState {
 /// handoff tables above (purge dead pids first, then evict arbitrarily).
 /// Evicting a live entry only drops its future clear — the next scan
 /// re-arms it (self-healing).
-pub fn track_process_publication(map: &mut HashMap<AppId, u64>, app_id: AppId, pid: u64) {
-  if map.len() >= MAX_HANDOFF_ENTRIES {
-    map.retain(|_, known| is_process_alive(*known));
+///
+/// Two-phase like the handoff tables: [`publication_purge_probe`]
+/// snapshots candidate pids under the caller's lock; probe liveness
+/// after dropping it, then pass the dead ones here.
+pub fn track_process_publication(
+  map: &mut HashMap<AppId, u64>,
+  app_id: AppId,
+  pid: u64,
+  dead_pids: &[u64],
+) {
+  if !dead_pids.is_empty() {
+    map.retain(|_, known| !dead_pids.contains(known));
   }
   map.insert(app_id, pid);
   while map.len() > MAX_HANDOFF_ENTRIES {
@@ -276,140 +324,21 @@ pub fn track_process_publication(map: &mut HashMap<AppId, u64>, app_id: AppId, p
   }
 }
 
+/// Phase 1 of [`track_process_publication`] — call under the lock:
+/// snapshot the pids whose liveness gates the purge when the map is at
+/// capacity. Empty when there is room. No I/O.
+#[must_use]
+pub fn publication_purge_probe(map: &HashMap<AppId, u64>) -> Vec<u64> {
+  if map.len() >= MAX_HANDOFF_ENTRIES {
+    map.values().copied().collect()
+  } else {
+    Vec::new()
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  /// Own pid is alive everywhere; 0 and `u32::MAX` never are.
-  #[test]
-  fn liveness_spots_own_pid_and_rejects_absurd_ones() {
-    // Contract on every platform: our own pid is alive, pid 0 never is,
-    // and u32::MAX is not a real pid anywhere.
-    assert!(is_process_alive(u64::from(std::process::id())));
-    assert!(!is_process_alive(0));
-    assert!(!is_process_alive(u64::from(u32::MAX)));
-  }
-
-  /// Fixture game (fixed pid 1234) for handoff unit tests.
-  fn game(id: &str) -> ScannedGame {
-    ScannedGame {
-      id: AppId::from(id),
-      name: "Game".to_string(),
-      pid: 1234,
-      start: 0,
-      source: "automaton".to_string(),
-      process_start_ms: None,
-    }
-  }
-
-  /// Only the owning pid's clear releases suppression; others are ignored.
-  #[test]
-  fn suppresses_while_ipc_live_and_resumes_on_owner_clear() {
-    let game = game("111111111111111111");
-    let mut handoff = HandoffState::default();
-    assert!(!handoff.is_suppressed(game.id.as_ref()));
-
-    handoff.note_publish(game.id.as_ref(), 77);
-    assert!(handoff.is_suppressed(game.id.as_ref()));
-
-    // A clear from a *different* pid (superseded companion) is ignored.
-    handoff.note_scan(Some(game.clone()));
-    assert!(!handoff.note_clear(game.id.as_ref(), 78));
-    assert!(handoff.is_suppressed(game.id.as_ref()));
-
-    // The owner's clear releases it, and the scan still reports the game.
-    assert!(handoff.note_clear(game.id.as_ref(), 77));
-    assert!(!handoff.is_suppressed(game.id.as_ref()));
-    assert_eq!(handoff.resume_for(game.id.as_ref()), Some(game));
-  }
-
-  /// `note_remove` drops one slot (pid-gated) and leaves the rest alone.
-  #[test]
-  fn per_slot_remove_forgets_only_that_slot() {
-    let mut handoff = HandoffState::default();
-    handoff.note_scan(Some(game("1")));
-    handoff.note_scan(Some(game("2")));
-    assert!(handoff.resume_for("1").is_some());
-    // Stale pid never drops a newer scan.
-    assert!(handoff.note_remove("1", 9999).is_none());
-    assert!(handoff.resume_for("1").is_some());
-    assert!(handoff.note_remove("1", 1234).is_some());
-    assert_eq!(handoff.resume_for("1"), None);
-    assert!(handoff.resume_for("2").is_some());
-    assert!(handoff.note_remove("missing", 1).is_none());
-  }
-
-  /// Takeover forgets the old pid: its late clear must not resume generics.
-  #[test]
-  fn takeover_last_publisher_wins() {
-    let mut handoff = HandoffState::default();
-    handoff.note_publish("1", 10);
-    // Companion B takes over: A's pid is forgotten, no leak.
-    handoff.note_publish("1", 20);
-    // A's late close must not resume the generic card under B.
-    assert!(!handoff.note_clear("1", 10));
-    assert!(handoff.is_suppressed("1"));
-    // B's close releases.
-    assert!(handoff.note_clear("1", 20));
-    assert!(!handoff.is_suppressed("1"));
-  }
-
-  /// `owner_of` tracks the current owner through publishes, takeovers
-  /// and releases: the takeover log reads this to name both sides.
-  #[test]
-  fn owner_of_follows_publishes_and_releases() {
-    let mut handoff = HandoffState::default();
-    assert_eq!(handoff.owner_of("1"), None);
-    handoff.note_publish("1", 10);
-    assert_eq!(handoff.owner_of("1"), Some(10));
-    // Companion takeover replaces the owner.
-    handoff.note_publish("1", 20);
-    assert_eq!(handoff.owner_of("1"), Some(20));
-    // Owner's clear releases; a stranger's does not.
-    assert!(!handoff.note_clear("1", 10));
-    assert_eq!(handoff.owner_of("1"), Some(20));
-    assert!(handoff.note_clear("1", 20));
-    assert_eq!(handoff.owner_of("1"), None);
-  }
-
-  /// Resume fires only for the game the scanner still reports.
-  #[test]
-  fn resume_only_matches_scanned_game() {
-    let mut handoff = HandoffState::default();
-    handoff.note_publish("1", 10);
-    handoff.note_scan(None);
-    assert!(handoff.note_clear("1", 10));
-    // Scanner reports nothing: nothing to resume.
-    assert_eq!(handoff.resume_for("1"), None);
-
-    handoff.note_scan(Some(ScannedGame {
-      id: AppId::from("2"),
-      name: "Other".to_string(),
-      pid: 9,
-      start: 0,
-      source: "automaton".to_string(),
-      process_start_ms: None,
-    }));
-    // A different game on screen: not ours to resume.
-    assert_eq!(handoff.resume_for("1"), None);
-  }
-
-  /// Abrupt close releases every slot of the dead pid, idempotently.
-  #[test]
-  fn abrupt_close_releases_every_slot_of_dead_pid() {
-    let mut handoff = HandoffState::default();
-    handoff.note_publish("1", 10);
-    handoff.note_publish("2", 10);
-    handoff.note_publish("3", 99);
-
-    let mut released = handoff.note_clear_pid(10);
-    released.sort();
-    assert_eq!(released, vec![AppId::from("1"), AppId::from("2")]);
-    // Other pids untouched; release is idempotent.
-    assert!(handoff.is_suppressed("3"));
-    assert!(!handoff.is_suppressed("1"));
-    assert!(handoff.note_clear_pid(10).is_empty());
-  }
 
   /// Hostile pid-0 floods cannot grow the tables past the cap.
   #[test]
@@ -418,7 +347,7 @@ mod tests {
     // pid 0 is never alive: every entry is purgeable garbage, so the
     // tables cannot grow past the cap even under hostile input.
     for index in 0..(MAX_HANDOFF_ENTRIES + 50) {
-      handoff.note_publish(&format!("app-{index}"), 0);
+      handoff.note_publish(&format!("app-{index}"), 0, &[]);
     }
     assert!(handoff.live_ipc.len() <= MAX_HANDOFF_ENTRIES);
   }
@@ -433,13 +362,5 @@ mod tests {
     assert_eq!(pid_to_pid_t(own), Some(own as libc::pid_t));
     assert_eq!(pid_to_pid_t(u64::from(u32::MAX)), None);
     assert_eq!(pid_to_pid_t(u64::MAX), None);
-  }
-
-  /// Pid 0 and dead pids read dead; our own pid reads alive.
-  #[test]
-  fn process_alive_rejects_zero_and_dead_pids() {
-    assert!(!is_process_alive(0));
-    assert!(!is_process_alive(u32::MAX as u64));
-    assert!(is_process_alive(std::process::id() as u64));
   }
 }

@@ -714,3 +714,39 @@ async fn refused_origin_pipelined_set_user_changes_nothing() {
   }
   fx.bridge.shutdown().await;
 }
+
+/// Two byte-identical `SET_ACTIVITY` frames fan out once: the flood guard
+/// (`RecentActivities::should_drop`) collapses the duplicate before any
+/// broadcast, cache write or log line. A changed byte passes — only exact
+/// duplicates are dropped. (Unit-level `should_drop` coverage lives in
+/// `rsrpc-protocol`’s `dedup_*` tests; this exercises the guard in situ,
+/// on the bridge’s publish path.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn identical_republish_fans_out_once() {
+  let fx = fixture().await;
+  let mut json = connect(fx.json_port, "?format=json").await;
+  let _ = read_json(&mut json).await; // READY
+
+  fx.ipc_tx.send(set_activity(42, "Game")).await.unwrap();
+  let first = read_json(&mut json).await;
+  assert_eq!(first["activity"]["name"], "Game");
+  assert_eq!(first["pid"], 42);
+
+  // Byte-identical republish inside the 5s flood window: dropped, so the
+  // consumer must observe nothing further for it.
+  fx.ipc_tx.send(set_activity(42, "Game")).await.unwrap();
+  assert!(
+    tokio::time::timeout(Duration::from_millis(300), json.next())
+      .await
+      .is_err(),
+    "byte-identical republish must not fan out again"
+  );
+
+  // Any changed byte passes and becomes the new reference.
+  fx.ipc_tx.send(set_activity(42, "Game v2")).await.unwrap();
+  let second = read_json(&mut json).await;
+  assert_eq!(second["activity"]["name"], "Game v2");
+  assert_eq!(second["pid"], 42);
+
+  fx.bridge.shutdown().await;
+}
