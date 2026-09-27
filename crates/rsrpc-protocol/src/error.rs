@@ -48,12 +48,18 @@ pub enum RsrpcError {
   #[error("websocket bind failed on ports {start}-{end}: no candidate could be bound")]
   WsExhausted { start: u16, end: u16 },
 
-  /// Bridge listener bind failed on every candidate port.
+  /// Bridge listener bind failed on every candidate port. Keeps the
+  /// last server error — a scan can also end on a non-bind failure
+  /// (`Runtime` or `Config`), not only `AddrInUse` — so the real cause
+  /// stays reachable via the source chain instead of collapsing into
+  /// "all in use".
   #[error("bridge {name} launch failed on ports {start}-{end}: all in use")]
   BridgeBind {
     name: &'static str,
     start: u16,
     end: u16,
+    #[source]
+    source: Box<dyn std::error::Error + Send + Sync>,
   },
 
   /// I/O failures (procfs reads, file writes).
@@ -74,7 +80,7 @@ pub enum RsrpcError {
   /// arRPC or another rsRPC already holds them all).
   #[error("ipc bind failed after {attempts} attempts")]
   IpcBind {
-    attempts: u8,
+    attempts: u16,
     #[source]
     source: std::io::Error,
   },

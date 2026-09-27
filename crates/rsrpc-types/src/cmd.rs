@@ -68,7 +68,16 @@ impl ActivityCmd {
   }
 
   pub fn fix_buttons(&mut self) {
-    // If `buttons` are an array of objects, we need to map the labels to `buttons` (as a string array) and the urls to `metadata.button_urls` (as an array of strings)
+    // If `buttons` are an array of objects, we need to map the labels to `buttons` (as a string array) and the urls to `metadata.button_urls` (as an array of strings).
+    //
+    // Labels and urls are collected into independent vectors — a button
+    // array mixing label-only and url-only objects will misalign them (the
+    // url lands on a different button than intended). This mirrors arRPC's
+    // JS `buttons.map(x => x.url)` behavior, so it is intentional parity.
+    //
+    // A non-string `label` (e.g. a number) is pushed verbatim into the
+    // label array, mirroring JS `map(x => x.label)` which also preserves
+    // non-string values.
     if let Some(activity) = self.args.as_mut().and_then(|args| args.activity.as_mut())
       && let Some(buttons) = activity.buttons.as_mut()
     {
@@ -234,7 +243,7 @@ impl Activity {
 ///
 /// - nanoseconds (`>= 1e17`, ~1.8e18 now) are divided by 1e6,
 /// - microseconds (`>= 1e14`, ~1.8e15 now) are divided by 1e3,
-/// - milliseconds (above `now + 100y`, ~1.7e12 now) pass through,
+/// - milliseconds (above `now + 100y` in seconds, ~6.7e9 now) pass through,
 /// - anything smaller is seconds and is multiplied by 1e3.
 ///
 /// The µs/ns branches sit above the legacy s/ms heuristic so existing

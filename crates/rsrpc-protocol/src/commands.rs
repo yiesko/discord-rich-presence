@@ -4,14 +4,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::Value;
-use serde_with::skip_serializing_none;
 use tungstenite::Utf8Bytes;
 
 use rsrpc_types::cmd::{ActivityCmd, ActivityPayload};
 use rsrpc_types::user::RpcUser;
 use rsrpc_types::{AppId, SocketId};
 
-#[skip_serializing_none]
 #[derive(Serialize)]
 pub struct ProcessActivity {
   pub application_id: AppId,
@@ -160,8 +158,14 @@ pub fn cached_activity(
 }
 
 /// Build the acknowledgement for a `SUBSCRIBE`/`UNSUBSCRIBE` command:
-/// echoes `cmd`/`nonce`, reports the subscribed event name in `data.evt`
-/// (the official shape; arRPC blind-ACKs the same way).
+/// echoes `cmd`/`nonce`, reports the subscribed event name in `data.evt`.
+///
+/// Shape note: this intentionally emits an extra top-level `"evt": null`
+/// alongside `data.evt`. The official Discord response documents only
+/// `cmd`/`data`/`nonce`; the extra field is an rsRPC extension kept for
+/// client compatibility (tolerant parsers such as discord.js ignore
+/// unknown fields). This is NOT arRPC parity — current arRPC has no
+/// SUBSCRIBE handler at all and never ACKs.
 ///
 /// # Blind-ACK scope
 ///
@@ -423,9 +427,10 @@ impl RecentActivities {
     payload: Option<&[u8]>,
     now: std::time::Instant,
   ) -> bool {
-    // One allocation per call: build the key once, borrow it for probes,
-    // move it into the insert. (An `AppId` key would allocate identically
-    // here — callers hold `&str` — so the tuple stays `String`-keyed.)
+    // Two allocations per call: the key tuple and the fingerprint copy
+    // (`bytes.to_vec()` on insert). (An `AppId` key would allocate
+    // identically here — callers hold `&str` — so the tuple stays
+    // `String`-keyed.)
     let key = (app_id.to_string(), pid);
     let Some(bytes) = payload else {
       self.entries.remove(&key);

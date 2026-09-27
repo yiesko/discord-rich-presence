@@ -378,3 +378,38 @@ fn fingerprint_includes_outer_application_id() {
   let fb = activity_fingerprint(&mut b).expect("fingerprint");
   assert_ne!(fa, fb);
 }
+
+/// A missing fingerprint degrades to always-changed (never to a dropped
+/// broadcast): the payload still builds, storing an empty fingerprint.
+#[test]
+fn cached_activity_without_fingerprint_still_builds() {
+  let mut cmd = set_activity_cmd();
+  let cached = cached_activity(&mut cmd, None).expect("builds without fingerprint");
+  assert!(!cached.is_clear);
+  assert_eq!(cached.activity_json.as_ref(), b"");
+  let body: Value = serde_json::from_str(&cached.json).expect("valid json");
+  assert_eq!(body["activity"]["name"], "Game");
+  assert_eq!(body["pid"], 42);
+  assert_eq!(body["socketId"], "42");
+}
+
+/// The clear payload's MessagePack leg decodes to the same fixed shape
+/// as its JSON leg.
+#[test]
+fn empty_cached_msgpack_decodes_to_the_clear_shape() {
+  use rsrpc_protocol::commands::empty_cached;
+  use rsrpc_types::SocketId;
+  use rsrpc_types::cmd::ActivityPayload;
+
+  let payload = empty_cached(4242, SocketId::from("sock")).expect("fixed shapes build");
+  assert!(payload.is_clear);
+  let decoded: ActivityPayload = rmp_serde::from_slice(&payload.msgpack).expect("msgpack decodes");
+  assert!(decoded.activity.is_none());
+  assert_eq!(decoded.pid, Some(4242));
+  assert_eq!(decoded.socket_id.as_deref(), Some("sock"));
+  // The JSON leg agrees.
+  let json: Value = serde_json::from_str(&payload.json).expect("valid json");
+  assert!(json["activity"].is_null());
+  assert_eq!(json["pid"], 4242);
+  assert_eq!(json["socketId"], "sock");
+}

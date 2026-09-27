@@ -25,15 +25,18 @@ fn bind_exhaustion_names_range() {
     .to_string(),
     "websocket bind failed on ports 6463-6472: no candidate could be bound"
   );
+  let err = RsrpcError::BridgeBind {
+    name: "json",
+    start: 1337,
+    end: 1347,
+    source: Box::new(std::io::Error::other("simulated server failure")),
+  };
   assert_eq!(
-    RsrpcError::BridgeBind {
-      name: "json",
-      start: 1337,
-      end: 1347
-    }
-    .to_string(),
+    err.to_string(),
     "bridge json launch failed on ports 1337-1347: all in use"
   );
+  let source = std::error::Error::source(&err).expect("source chain preserved");
+  assert_eq!(source.to_string(), "simulated server failure");
 }
 
 /// Invalid-config errors carry the offending field description.

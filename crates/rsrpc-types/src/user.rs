@@ -102,7 +102,16 @@ impl RpcUser {
       self.discriminator = value.to_string();
     }
     match obj.get("avatar") {
-      Some(Value::String(value)) => self.avatar = Some(value.clone()),
+      // Avatar is an opaque hash, so trimming is harmless and consistent
+      // with the text-field handling above.
+      Some(Value::String(value)) => {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+          self.avatar = None;
+        } else {
+          self.avatar = Some(trimmed.to_string());
+        }
+      }
       Some(Value::Null) => self.avatar = None,
       _ => {}
     }
