@@ -316,6 +316,10 @@ fn build_daemon_config(args: &Args) -> RPCConfig {
     .state_file(args.state_file)
     .bridge_allowed_origins(parse_csv_list(args.bridge_allowed_origins.as_deref()))
     .build()
+    .unwrap_or_else(|err| {
+      eprintln!("[rsrpc] invalid configuration: {err}");
+      std::process::exit(1);
+    })
 }
 
 /// Load the game database from the selected source (flag, URL, or
@@ -541,5 +545,16 @@ mod tests {
     );
     let off = Args::try_parse_from(["rsrpc-cli"]).expect("defaults parse");
     assert!(off.bridge_allowed_origins.is_none());
+  }
+
+  /// `--ignore-ids` (env `RSRPC_IGNORE_IDS`) parses through the same
+  /// `parse_csv_list` path: trimmed, blanks dropped, unset stays `None`.
+  #[test]
+  fn ignore_ids_flag_parses() {
+    let on = Args::try_parse_from(["rsrpc-cli", "--ignore-ids", "123, 456,,"])
+      .expect("--ignore-ids parses");
+    assert_eq!(parse_csv_list(on.ignore_ids.as_deref()), vec!["123", "456"]);
+    let off = Args::try_parse_from(["rsrpc-cli"]).expect("defaults parse");
+    assert!(off.ignore_ids.is_none());
   }
 }

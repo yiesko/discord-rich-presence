@@ -327,6 +327,12 @@ struct OtaState {
   staged_version: Option<String>,
   #[serde(default)]
   staged_sha256: Option<String>,
+  /// Asset name (e.g. `rsrpc-cli-x86_64-unknown-linux-gnu`) the staged
+  /// binary was downloaded as — the key into the persisted checksum
+  /// manifest at boot. Absent in states written by older versions,
+  /// which then use the weaker ota.json hash fallback.
+  #[serde(default)]
+  staged_asset_name: Option<String>,
   #[serde(default)]
   latest_seen: Option<String>,
 }
@@ -539,6 +545,15 @@ pub fn stage(
     String::from_utf8(manifest_sig).map_err(|err| format!("bad SHA256SUMS.txt.minisig: {err}"))?;
   verify_signature(UPDATE_PUBKEY, &manifest, &manifest_sig)?;
   let manifest = String::from_utf8(manifest).map_err(|err| format!("bad SHA256SUMS.txt: {err}"))?;
+  // Persist the verified manifest (and its detached signature) so the
+  // boot path can re-verify the staged binary without having to trust
+  // the unsigned ota.json hash (see `apply_pending_on_boot`). Written
+  // before the binary download starts; `save_state` still happens last,
+  // so a failure here leaves any previous staged pair untouched.
+  std::fs::write(paths.dir.join(CHECKSUMS_ASSET), &manifest)
+    .map_err(|err| format!("cannot stage update: {err}"))?;
+  std::fs::write(paths.dir.join(CHECKSUMS_SIG_ASSET), &manifest_sig)
+    .map_err(|err| format!("cannot stage update: {err}"))?;
   let expected = parse_checksums(&manifest)
     .remove(asset_name.as_str())
     .ok_or_else(|| -> Box<dyn std::error::Error> {
@@ -571,6 +586,7 @@ pub fn stage(
     &OtaState {
       staged_version: Some(latest.to_string()),
       staged_sha256: Some(actual),
+      staged_asset_name: Some(asset_name.clone()),
       latest_seen: Some(latest.to_string()),
     },
   );
@@ -676,6 +692,16 @@ pub fn apply_pending_on_boot() {
   if std::env::var_os(APPLIED_ENV).is_some() {
     return;
   }
+  // Crash-safety: if swap_binary was killed between renaming exe→prev
+  // and new_image→exe, the exe path is missing but prev holds the last
+  // known-good binary. Restore before anything tries to exec.
+  if let Ok(exe) = std::env::current_exe()
+    && !exe.exists()
+    && prev_path(&exe).exists()
+  {
+    let _ = std::fs::rename(prev_path(&exe), &exe);
+    eprintln!("[rsrpc] restored binary from .prev after interrupted swap");
+  }
   let Ok(exe) = std::env::current_exe().and_then(|path| path.canonicalize()) else {
     return;
   };
@@ -688,6 +714,10 @@ pub fn apply_pending_on_boot() {
   let discard = |why: &str| {
     eprintln!("[rsrpc] discarding staged update: {why}");
     let _ = std::fs::remove_file(paths.staged_file());
+    // Keep the invariant "manifest files exist only while an update is
+    // staged": boot re-verify consults them whenever they exist.
+    let _ = std::fs::remove_file(paths.dir.join(CHECKSUMS_ASSET));
+    let _ = std::fs::remove_file(paths.dir.join(CHECKSUMS_SIG_ASSET));
     save_state(&paths, &OtaState::default());
   };
   let Ok(staged_version) = Version::parse(&staged_version) else {
@@ -709,7 +739,44 @@ pub fn apply_pending_on_boot() {
       return;
     }
   };
-  if sha256_hex(&bytes) != staged_sha256 {
+  // ota.json is unsigned and lives in a user-writable dir, so the hash
+  // recorded there alone proves nothing against a local attacker who can
+  // rewrite both it and the staged binary. When stage() persisted the
+  // signature-verified manifest, re-verify against THAT instead: the
+  // signature guarantee then covers the actually-executed payload.
+  // Legacy staged updates without a manifest (staged by older
+  // versions) fall back to the ota.json hash — weaker, but the only
+  // check possible there.
+  let manifest_path = paths.dir.join(CHECKSUMS_ASSET);
+  if manifest_path.is_file() {
+    let signature_ok = std::fs::read(&manifest_path)
+      .ok()
+      .zip(std::fs::read_to_string(paths.dir.join(CHECKSUMS_SIG_ASSET)).ok())
+      .is_some_and(|(manifest, sig)| verify_signature(UPDATE_PUBKEY, &manifest, &sig).is_ok());
+    if !signature_ok {
+      // Present but unverifiable (e.g. signature file deleted or the
+      // manifest swapped): fail closed rather than fall back to the
+      // unsigned state.
+      discard("staged manifest present but signature verification failed");
+      return;
+    }
+    let Some(asset_name) = state.staged_asset_name.as_deref() else {
+      discard("staged manifest present without recorded asset name");
+      return;
+    };
+    let Ok(manifest) = std::fs::read_to_string(&manifest_path) else {
+      discard("cannot read staged manifest");
+      return;
+    };
+    let Some(expected) = parse_checksums(&manifest).remove(asset_name) else {
+      discard("staged manifest has no entry for the staged asset");
+      return;
+    };
+    if sha256_hex(&bytes) != expected {
+      discard("staged checksum mismatch vs signed manifest");
+      return;
+    }
+  } else if sha256_hex(&bytes) != staged_sha256 {
     discard("staged checksum mismatch");
     return;
   }
@@ -755,6 +822,8 @@ pub fn cmd_rollback() -> Result<(), Box<dyn std::error::Error>> {
   // rollback: clear it first.
   let paths = OtaPaths::from_env();
   let _ = std::fs::remove_file(paths.staged_file());
+  let _ = std::fs::remove_file(paths.dir.join(CHECKSUMS_ASSET));
+  let _ = std::fs::remove_file(paths.dir.join(CHECKSUMS_SIG_ASSET));
   save_state(&paths, &OtaState::default());
   swap_back(&exe, &prev).map_err(|err| format!("rollback failed: {err}"))?;
   println!("[rsrpc] rolled back; restarting with the previous version");
@@ -823,6 +892,13 @@ pub fn spawn_watcher(auto: bool) {
   if std::thread::Builder::new()
     .name("rsrpc-ota".to_string())
     .spawn(move || {
+      // A previous process may have been killed mid-stage: a leftover
+      // .part is never resumed by anything — drop it before the first
+      // check so the OTA dir stays consistent for boot-time re-verify.
+      let paths = OtaPaths::from_env();
+      if paths.ensure_dir().is_ok() {
+        let _ = std::fs::remove_file(paths.staged_file().with_extension("part"));
+      }
       // Let boot settle (sockets, first scan) before any network.
       std::thread::sleep(WATCH_BOOT_DELAY);
       let mut notified: Option<Version> = None;
@@ -876,6 +952,11 @@ pub fn spawn_watcher(auto: bool) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Serializes tests that mutate process-global environment variables
+  /// (`OTA_DIR_ENV`, `APPLIED_ENV`): cargo runs tests in parallel threads,
+  /// so two of them must never interleave.
+  static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
   /// RAII temp dir (std-only): unique per test, removed on drop.
   struct TempDir {
@@ -1050,6 +1131,7 @@ mod tests {
     let state = OtaState {
       staged_version: Some("0.33.0".to_string()),
       staged_sha256: Some("abc".to_string()),
+      staged_asset_name: Some("rsrpc-cli-x86_64-unknown-linux-gnu".to_string()),
       latest_seen: Some("0.33.0".to_string()),
     };
     save_state(&paths, &state);
@@ -1063,11 +1145,12 @@ mod tests {
   fn env_override_points_verbatim_at_the_dir() {
     // Regression: RSRPC_OTA_DIR used to gain an extra rsrpc/ota suffix,
     // so staged state written there was never found on boot.
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = TempDir::new("envdir");
     let dir = tmp.path.join("custom");
     let previous = std::env::var_os(OTA_DIR_ENV);
-    // SAFETY: single-threaded test process section touching only this
-    // variable (no other test reads RSRPC_OTA_DIR); restored below.
+    // SAFETY: this test holds ENV_LOCK and touches only this variable;
+    // restored below.
     unsafe {
       std::env::set_var(OTA_DIR_ENV, &dir);
     }
@@ -1153,5 +1236,70 @@ mod tests {
     assert!(swap_back(&exe, &prev_path(&exe)).is_err());
     // The running image is untouched by the failed attempt.
     assert_eq!(std::fs::read(&exe).expect("read"), b"v1");
+  }
+
+  /// `apply_pending_on_boot` on a dev build — every `cargo test` binary
+  /// lives under `target/debug`, so `check_eligibility` refuses it: a
+  /// staged update must be discarded (staged file and state cleared,
+  /// manifests removed) without ever swapping or re-executing. The
+  /// success path ends in `reexec` (it would replace the test process),
+  /// so it is only reachable with dependency injection — out of scope for
+  /// a test-only change. The swap/restore primitives themselves are
+  /// covered by `swap_binary_rotates_staged_over_exe` and the
+  /// `rollback_*` tests above.
+  #[test]
+  fn apply_pending_on_boot_discards_staged_update_on_dev_build() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new("boot-apply");
+    let dir = tmp.path.join("ota");
+    let previous_dir = std::env::var_os(OTA_DIR_ENV);
+    let previous_guard = std::env::var_os(APPLIED_ENV);
+    // SAFETY: this test holds ENV_LOCK and touches only these variables;
+    // both are restored below.
+    unsafe {
+      std::env::set_var(OTA_DIR_ENV, &dir);
+      std::env::remove_var(APPLIED_ENV);
+    }
+
+    let paths = OtaPaths::with_dir(dir.clone());
+    paths.ensure_dir().expect("ota dir");
+    // Stage a binary far above the crate version, with the matching
+    // ota.json state (no manifest files: the unsigned-hash fallback).
+    let staged = paths.staged_file();
+    std::fs::write(&staged, b"v2").expect("write staged");
+    let state = OtaState {
+      staged_version: Some("999.0.0".to_string()),
+      staged_sha256: Some(sha256_hex(b"v2")),
+      staged_asset_name: Some("rsrpc-cli-x86_64-unknown-linux-gnu".to_string()),
+      latest_seen: Some("999.0.0".to_string()),
+    };
+    save_state(&paths, &state);
+
+    apply_pending_on_boot();
+
+    // Discarded: the staged file is gone, state reset — and the running
+    // test binary was never swapped or re-executed.
+    assert!(
+      !staged.exists(),
+      "a dev build must never swap in the staged binary"
+    );
+    assert_eq!(load_state(&paths), OtaState::default());
+
+    match previous_dir {
+      Some(value) => unsafe {
+        std::env::set_var(OTA_DIR_ENV, value);
+      },
+      None => unsafe {
+        std::env::remove_var(OTA_DIR_ENV);
+      },
+    }
+    match previous_guard {
+      Some(value) => unsafe {
+        std::env::set_var(APPLIED_ENV, value);
+      },
+      None => unsafe {
+        std::env::remove_var(APPLIED_ENV);
+      },
+    }
   }
 }
