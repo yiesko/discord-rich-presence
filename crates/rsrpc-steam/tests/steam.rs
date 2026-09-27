@@ -87,6 +87,17 @@ fn vdf_rejects_nesting_attacks_and_truncation() {
   assert!(!doc.contains_key("b"));
 }
 
+/// Oversized input parses to nothing instead of a truncated prefix:
+// 100k key/value pairs exceed the token cap.
+#[test]
+fn oversized_vdf_parses_to_nothing() {
+  let mut hostile = String::new();
+  for _ in 0..100_001 {
+    hostile.push_str("\"k\" \"v\"\n");
+  }
+  assert!(parse_vdf_str(&hostile).is_empty());
+}
+
 /// New + legacy libraryfolders shapes and manifest id/dir extraction.
 #[test]
 fn vdf_parses_libraryfolders_and_manifest() {

@@ -1145,6 +1145,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "widestring",
 ]
 
 [[package]]

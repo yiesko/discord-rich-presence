@@ -177,3 +177,80 @@ fn forward_counts_only_delivered_events() {
   assert_eq!(forwarded, 0, "rejected event must not count as forwarded");
   assert_eq!(calls, 1, "a rejected event stops the walk");
 }
+
+/// NLMSG_OVERRUN (type 4) is skipped without visiting: the walk continues
+/// to later messages in the datagram.
+#[test]
+fn overrun_messages_are_skipped_without_visiting() {
+  use rsrpc_proc_events::walk_proc_messages;
+
+  let mut overrun = proc_buf(0x2, 9);
+  overrun[4..6].copy_from_slice(&4u16.to_le_bytes());
+  let mut seen = Vec::new();
+  walk_proc_messages(&overrun, &mut |cpu, seq, event| {
+    seen.push((cpu, seq, event.is_some()));
+    true
+  });
+  assert!(seen.is_empty(), "an overrun message must not be visited");
+
+  // ...and a real event after it is still walked to.
+  let mut exec = proc_buf(0x2, 4242);
+  exec[24..28].copy_from_slice(&7u32.to_le_bytes());
+  exec[40..44].copy_from_slice(&3u32.to_le_bytes());
+  let mut both = overrun;
+  both.extend_from_slice(&exec);
+  walk_proc_messages(&both, &mut |cpu, seq, event| {
+    seen.push((cpu, seq, event.is_some()));
+    true
+  });
+  assert_eq!(seen, vec![(3, 7, true)]);
+}
+
+/// A nonzero NLMSG_ERROR code aborts the datagram: nothing after it is
+/// visited (a zero code is the subscription acknowledgement, skipped).
+#[test]
+fn nonzero_error_code_stops_the_walk() {
+  use rsrpc_proc_events::walk_proc_messages;
+
+  let mut error = proc_buf(0x2, 9);
+  error[4..6].copy_from_slice(&2u16.to_le_bytes());
+  error[16..20].copy_from_slice(&5i32.to_le_bytes());
+  let mut exec = proc_buf(0x2, 4242);
+  exec[24..28].copy_from_slice(&7u32.to_le_bytes());
+  exec[40..44].copy_from_slice(&3u32.to_le_bytes());
+  let mut both = error;
+  both.extend_from_slice(&exec);
+
+  let mut seen = Vec::new();
+  walk_proc_messages(&both, &mut |cpu, seq, event| {
+    seen.push((cpu, seq, event.is_some()));
+    true
+  });
+  assert!(
+    seen.is_empty(),
+    "a nonzero error code must stop the walk, got {seen:?}"
+  );
+}
+
+/// A lying `nlmsg_len` — below the `nlmsghdr` size, or past the buffer
+/// end — ends the walk without visiting anything.
+#[test]
+fn lying_nlmsg_len_ends_the_walk() {
+  use rsrpc_proc_events::walk_proc_messages;
+
+  // len < SIZE_NLMSGHDR (16): too small to hold a header.
+  let mut short = proc_buf(0x2, 111);
+  short[0..4].copy_from_slice(&8u32.to_le_bytes());
+  // len > remaining buffer: the datagram claims more than it carries.
+  let mut long = proc_buf(0x2, 222);
+  long[0..4].copy_from_slice(&1000u32.to_le_bytes());
+
+  for buf in [short, long] {
+    let mut seen = Vec::new();
+    walk_proc_messages(&buf, &mut |cpu, seq, event| {
+      seen.push((cpu, seq, event.is_some()));
+      true
+    });
+    assert!(seen.is_empty(), "a lying length must not visit: {seen:?}");
+  }
+}

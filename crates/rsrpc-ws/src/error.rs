@@ -15,9 +15,6 @@ pub enum Error {
   /// Runtime or socket-option setup failed after a successful bind.
   #[error("failed to start websocket runtime: {0}")]
   Runtime(#[source] io::Error),
-  /// HTTP upgrade was not a valid WebSocket handshake.
-  #[error("invalid websocket handshake")]
-  Handshake,
   /// A [`crate::ServerConfig`] value was rejected.
   #[error("invalid server config: {0}")]
   Config(&'static str),

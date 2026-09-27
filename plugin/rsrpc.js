@@ -30,13 +30,17 @@ class RsRpcClient {
      * @param {object} options - Additional options
      * @param {number} options.jsonPort - JSON bridge port (default: 1337)
      * @param {number} options.msgpackPort - MessagePack bridge port (default: 1338)
-     * @param {number} options.reconnectInterval - Reconnect interval in ms (default: 5000)
+     * @param {number} options.reconnectInterval - Base reconnect interval in ms
+     *        (default: 5000, minimum: 1000). Doubles on each failure, capped
+     *        at 30000.
      */
     constructor(useMsgPack = false, options = {}) {
         this.useMsgPack = useMsgPack && typeof MessagePack !== 'undefined';
         this.jsonPort = options.jsonPort || 1337;
         this.msgpackPort = options.msgpackPort || 1338;
-        this.reconnectInterval = options.reconnectInterval || 5000;
+        this.reconnectInterval = Math.max(1000, options.reconnectInterval ?? 5000);
+        this.maxReconnectInterval = 30000;
+        this.reconnectAttempts = 0;
 
         this.ws = null;
         this.connected = false;
@@ -67,8 +71,8 @@ class RsRpcClient {
      * Connect to rsrpc server
      */
     connect() {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            console.log('[rsrpc] Already connected');
+        if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+            console.log('[rsrpc] Already connected or connecting');
             return;
         }
 
@@ -82,10 +86,12 @@ class RsRpcClient {
             this.ws.onopen = () => {
                 console.log('[rsrpc] Connected');
                 this.connected = true;
+                this.reconnectAttempts = 0;
                 if (this.onConnect) this.onConnect();
             };
 
             this.ws.onclose = (event) => {
+                if (!this.ws) return; // explicit disconnect() — don't reschedule
                 console.log('[rsrpc] Disconnected:', event.code, event.reason);
                 this.connected = false;
                 if (this.onDisconnect) this.onDisconnect();
@@ -151,11 +157,16 @@ class RsRpcClient {
     scheduleReconnect() {
         if (this.reconnectTimer) return;
 
-        console.log(`[rsrpc] Reconnecting in ${this.reconnectInterval}ms`);
+        const delay = Math.min(
+            this.reconnectInterval * 2 ** this.reconnectAttempts,
+            this.maxReconnectInterval
+        );
+        this.reconnectAttempts++;
+        console.log(`[rsrpc] Reconnecting in ${delay}ms`);
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
             this.connect();
-        }, this.reconnectInterval);
+        }, delay);
     }
 }
 
@@ -175,11 +186,22 @@ if (typeof Vencord !== 'undefined') {
         },
 
         start() {
-            this.client = new RsRpcClient(this.settings.useMsgPack);
+            let useMsgPack = false;
+            try {
+                useMsgPack = !!this.settings.useMsgPack;
+            } catch (e) {
+                console.warn('[rsrpc] settings.useMsgPack unreadable; using JSON:', e);
+            }
+            this.client = new RsRpcClient(useMsgPack);
             this.client.onActivity = (data) => {
                 // Forward to Discord's presence system
                 if (data.activity) {
-                    Vencord.Webpack.findByProps('getLocalPresence')?.setLocalPresence?.(data);
+                    const setLocal = Vencord.Webpack.findByProps('getLocalPresence')?.setLocalPresence;
+                    if (setLocal) {
+                        setLocal(data);
+                    } else {
+                        console.warn('[rsrpc] setLocalPresence not found');
+                    }
                 }
             };
             this.client.connect();
