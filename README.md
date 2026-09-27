@@ -51,9 +51,9 @@ YouTube Music buttons:
   websocket protocol, so game SDKs connect as if the real client were there.
 * **Web bridge** — streams presence to browser clients over JSON (port
   `1337`) and MessagePack (port `1338`).
-* **Works offline** — ships with a bundled game database (24299 entries,
-  11229 executables); optional hourly refresh from Discord's official
-  endpoint.
+* **Works offline** — ships with a bundled game database (entry and
+  executable counts grow with each release); optional hourly refresh
+  from Discord's official endpoint.
 * **Custom entries** — add your own games through `overrides.json` /
   `overrides.d/`, without touching the built-in database.
 * **One card at a time** — a game's own presence takes over from process
@@ -191,7 +191,7 @@ Add the dependency (git tag; `rsrpc-core` is not on crates.io):
 
 ```toml
 [dependencies]
-rsrpc-core = { git = "https://github.com/yiesko/discord-rich-presence", tag = "v0.36.0" }
+rsrpc-core = { git = "https://github.com/yiesko/discord-rich-presence", tag = "v0.37.0" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
 ```
 
