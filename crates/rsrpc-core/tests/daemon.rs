@@ -202,6 +202,7 @@ async fn bind_failure_still_tears_down_scanner() {
 /// above. Indices already held by a foreign live socket (a running
 /// daemon’s fan-out link) count as held; a free or stale index would let
 /// the bind succeed, so the test skips unless all ten are occupied.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ipc_bind_failure_still_tears_down_scanner() {
   let _serial = SERIAL_TEARDOWN.lock().await;
