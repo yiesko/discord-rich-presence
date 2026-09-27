@@ -133,10 +133,24 @@ impl RPCConfigBuilder {
     (bridge_allowed_origins, Vec<String>)
   );
 
-  /// Finish building.
-  #[must_use]
-  pub fn build(self) -> RPCConfig {
-    self.inner
+  /// Finish building. Validates port ranges are well-formed
+  /// (`start <= end`) so a misconfiguration produces a clear error at
+  /// construction time rather than a confusing `WsExhausted` bind error
+  /// at runtime.
+  pub fn build(self) -> Result<RPCConfig, String> {
+    if self.inner.port > self.inner.bridge_port_end {
+      return Err(format!(
+        "bridge port range is inverted: start={} > end={}",
+        self.inner.port, self.inner.bridge_port_end
+      ));
+    }
+    if self.inner.ws_port_start > self.inner.ws_port_end {
+      return Err(format!(
+        "websocket port range is inverted: start={} > end={}",
+        self.inner.ws_port_start, self.inner.ws_port_end
+      ));
+    }
+    Ok(self.inner)
   }
 }
 
@@ -187,7 +201,8 @@ mod tests {
       .exclusions_url(Some("https://example.invalid/ex".to_string()))
       .app_version("test".to_string())
       .state_file(true)
-      .build();
+      .build()
+      .expect("valid config");
     assert!(!config.enable_process_scanner);
     assert_eq!(config.port, 1);
     assert_eq!(config.msgpack_port, 3);

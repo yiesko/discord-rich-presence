@@ -216,6 +216,9 @@ impl Daemon {
       cancel_guard.arm(server);
     }
     let result = self.serve(proc_rx, proc_tx, user, shutdown).await;
+    // serve drops the bridge before returning, so proc_rx is dead by this
+    // point and the pump's blocking_send cannot stall. teardown_scanner
+    // joins the pump after drop(scanner) — this ordering is load-bearing.
     Self::teardown_scanner(scanner, pump).await;
     cancel_guard.disarm();
     result
@@ -480,11 +483,19 @@ fn bridge_config_for(
   ws_port: Option<u16>,
   ipc_path: Option<String>,
 ) -> BridgeConfig {
+  // Port 0 is the explicit "ephemeral" choice (hermetic test binds):
+  // the end must stay 0 so the range is a single ephemeral request,
+  // not the privileged port 10 that `0 + 10` would otherwise bind.
+  let msgpack_port_end = if config.msgpack_port == 0 {
+    0
+  } else {
+    config.msgpack_port.saturating_add(10)
+  };
   let bridge_config = BridgeConfig::new(
     config.port,
     config.bridge_port_end,
     config.msgpack_port,
-    config.msgpack_port.saturating_add(10),
+    msgpack_port_end,
   )
   .app_version(config.app_version.clone())
   .ws_port(ws_port)

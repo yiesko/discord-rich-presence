@@ -37,6 +37,7 @@ fn ephemeral_config() -> RPCConfig {
     .ws_port_start(0)
     .ws_port_end(0)
     .build()
+    .expect("valid zero-port config")
 }
 
 /// Shutdown-test config: scanner, proc-events and IPC off (nothing to
@@ -52,6 +53,7 @@ fn shutdown_config() -> RPCConfig {
     .enable_proc_events(false)
     .enable_ipc_connector(false)
     .build()
+    .expect("valid zero-port config")
 }
 
 /// Empty databases detect nothing but stay fully operational.
@@ -185,6 +187,123 @@ async fn bind_failure_still_tears_down_scanner() {
     result.is_err(),
     "bridge bind into an occupied range must fail"
   );
+  #[cfg(target_os = "linux")]
+  assert!(
+    rsrpc_worker_tasks().is_empty(),
+    "no rsrpc worker may outlive a failed run_until: {:?}",
+    rsrpc_worker_tasks()
+  );
+}
+
+/// Every `discord-ipc-{0..9}` index held by a live listener (in `/tmp`,
+/// the always-last candidate dir) plus higher-preference candidate dirs
+/// pointed at a nonexistent path forces `IpcTransport::bind` to fail:
+/// teardown must still join every scanner thread, like the bridge leg
+/// above. Indices already held by a foreign live socket (a running
+/// daemon’s fan-out link) count as held; a free or stale index would let
+/// the bind succeed, so the test skips unless all ten are occupied.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ipc_bind_failure_still_tears_down_scanner() {
+  let _serial = SERIAL_TEARDOWN.lock().await;
+  // Hold every IPC socket index best-effort: a bound listener answers
+  // liveness probes, so the bind must skip it. Foreign-held indices
+  // (live daemon, fan-out symlink) are probed instead of stolen.
+  let mut holders = Vec::new();
+  let mut all_held = true;
+  for index in 0..10_u32 {
+    let path = format!("/tmp/discord-ipc-{index}");
+    match std::os::unix::net::UnixListener::bind(&path) {
+      Ok(listener) => holders.push(listener),
+      // Not ours to take: count it only when a live socket answers
+      // (a stale file or dangling symlink would be reclaimed by the bind
+      // itself, making the failure impossible to force hermetically).
+      Err(_) if std::os::unix::net::UnixStream::connect(&path).is_ok() => {}
+      Err(_) => all_held = false,
+    }
+  }
+  if !all_held {
+    eprintln!("skipping: a free/stale /tmp/discord-ipc-* index lets the bind succeed");
+    return;
+  }
+  // Point the higher-preference candidate dirs at a nonexistent path so
+  // `/tmp` is the only real candidate regardless of the host
+  // environment. Env is process-global; restored below under the serial
+  // guard (no other daemon test binds IPC or reads these vars).
+  let saved = [
+    std::env::var_os("XDG_RUNTIME_DIR"),
+    std::env::var_os("TMPDIR"),
+    std::env::var_os("TMP"),
+    std::env::var_os("TEMP"),
+  ];
+  // SAFETY: this test holds SERIAL_TEARDOWN and touches only these
+  // variables; every value is restored below.
+  for name in ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"] {
+    unsafe {
+      std::env::set_var(name, "/nonexistent-rsrpc-ipc-test-dir");
+    }
+  }
+
+  let mut config = shutdown_config();
+  config.enable_process_scanner = true;
+  config.scan_interval_secs = 1;
+  config.enable_ipc_connector = true;
+  let daemon = Daemon::from_json_str("[]", config).expect("empty db parses");
+  let result = tokio::time::timeout(Duration::from_secs(30), daemon.run_until(async {}))
+    .await
+    .expect("run returns after bind failure");
+  assert!(result.is_err(), "ipc bind with every index held must fail");
+  #[cfg(target_os = "linux")]
+  assert!(
+    rsrpc_worker_tasks().is_empty(),
+    "no rsrpc worker may outlive a failed run_until: {:?}",
+    rsrpc_worker_tasks()
+  );
+
+  for (name, value) in [
+    ("XDG_RUNTIME_DIR", &saved[0]),
+    ("TMPDIR", &saved[1]),
+    ("TMP", &saved[2]),
+    ("TEMP", &saved[3]),
+  ] {
+    match value {
+      Some(value) => unsafe {
+        std::env::set_var(name, value);
+      },
+      None => unsafe {
+        std::env::remove_var(name);
+      },
+    }
+  }
+  drop(holders);
+}
+
+/// Every WS port in range occupied forces `WsTransport::bind` to fail:
+/// teardown must still join every scanner thread (named threads make the
+/// leak observable — without error-path teardown this fails with live
+/// `rsrpc-*` tasks).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ws_bind_failure_still_tears_down_scanner() {
+  let _serial = SERIAL_TEARDOWN.lock().await;
+  // Block wider than the WS range below (11 ports): every port the
+  // transport tries is taken.
+  let (_held, base) = occupy_contiguous_block(12);
+  let mut config = shutdown_config();
+  config.enable_process_scanner = true;
+  config.scan_interval_secs = 1;
+  // Keep the IPC leg off: only the WS bind is under test.
+  config.enable_ipc_connector = false;
+  config.enable_websocket_connector = true;
+  config.enable_secondary_events = false;
+  // Fixed WS range (not ephemeral): with the block above occupied, the
+  // bind must fail. (`shutdown_config` uses port 0 = ephemeral, which
+  // always succeeds.)
+  config.ws_port_start = base;
+  config.ws_port_end = base + 10;
+  let daemon = Daemon::from_json_str("[]", config).expect("empty db parses");
+  let result = tokio::time::timeout(Duration::from_secs(30), daemon.run_until(async {}))
+    .await
+    .expect("run returns after bind failure");
+  assert!(result.is_err(), "ws bind into an occupied range must fail");
   #[cfg(target_os = "linux")]
   assert!(
     rsrpc_worker_tasks().is_empty(),
