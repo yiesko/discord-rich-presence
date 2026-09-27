@@ -422,6 +422,7 @@ fn build_ac_patterns_with_os_filter(
 fn build_ac_automaton(exe_patterns: &[String]) -> Result<AhoCorasick, aho_corasick::BuildError> {
   AhoCorasick::builder()
     .ascii_case_insensitive(true)
+    .match_kind(aho_corasick::MatchKind::LeftmostLongest)
     .build(exe_patterns)
 }
 

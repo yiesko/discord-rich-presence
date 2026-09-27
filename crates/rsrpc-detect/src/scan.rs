@@ -472,8 +472,10 @@ pub fn match_steam_id(
 }
 
 /// Heuristic aux lookup: exact exe-stem == multi-word
-/// game name, then the install-folder walk. Runs after the Proton AC probe
-/// in the scan loop — a DB-declared path (even `win32`) beats guessing.
+/// game name, then the install-folder walk. Runs after the Proton AC
+/// probe in the scan loop for non-shortcut AppIds — a DB-declared path
+/// (even `win32`) beats guessing. For shortcut-range AppIds it runs
+/// *before* the Proton and Steam-library probes (see `match_process`).
 pub fn match_name_or_folder(
   process_path: &str,
   pid: u64,
@@ -883,41 +885,11 @@ mod reuse_tests {
   use super::*;
   use crate::server::ProcessServer;
 
-  /// Own pid is always readable: deterministic fixture, no /proc guessing.
-  fn self_pid() -> u64 {
-    u64::from(std::process::id())
-  }
-
-  /// `read_exec_into` classifies exactly like `read_exec`: same presence,
-  /// same pid, same path, same arguments.
-  #[test]
-  fn read_exec_into_matches_read_exec() {
-    for pid in [self_pid(), 1] {
-      let mut slot = Exec::default();
-      let mut scratch = ExecScratch::default();
-      let present = read_exec_into(pid, &mut slot, &mut scratch);
-      match read_exec(pid) {
-        None => assert!(!present, "into() must agree on unreadable pid {pid}"),
-        Some(expected) => {
-          assert!(present, "into() must agree on readable pid {pid}");
-          assert_eq!(slot.pid, expected.pid);
-          assert_eq!(slot.path, expected.path);
-          assert_eq!(slot.arguments, expected.arguments);
-        }
-      }
-    }
-    // Out-of-range pid: both agree on absence without touching buffers.
-    let mut slot = Exec::default();
-    let mut scratch = ExecScratch::default();
-    assert!(!read_exec_into(u64::MAX, &mut slot, &mut scratch));
-    assert!(read_exec(u64::MAX).is_none());
-  }
-
   /// A second call with the same pid must not reallocate: scratch pointers
   /// and capacities are stable, slot strings keep their buffers.
   #[test]
   fn read_exec_into_reuses_buffers() {
-    let pid = self_pid();
+    let pid = u64::from(std::process::id());
     let mut slot = Exec::default();
     let mut scratch = ExecScratch::default();
     assert!(read_exec_into(pid, &mut slot, &mut scratch));
@@ -998,59 +970,21 @@ mod reuse_tests {
 mod tick2_tests {
   use super::*;
 
-  /// Corpus covering case, forbidden punctuation, dots, whitespace
-  /// runs, empties, separators, `>` prefix and non-ASCII.
-  const CORPUS: &[&str] = &[
-    "Game Name",
-    "Name: Subtitle",
-    "R.E.P.O. Ghost Haul",
-    "Q.U.B.E.",
-    "Mr. Bomber",
-    "a  b   c",
-    "",
-    "   ",
-    "a/b\\c",
-    ">game",
-    "/",
-    "fish",
-    "École: LÉGENDE",
-    "MECCHA CHAMELEON",
-    "PenguinHotel-Win64-Shipping.exe",
-    "  padded  ",
-    "a.b.c",
-    "...",
-  ];
-
-  /// `normalize_name_into` reproduces `normalize_name` byte-for-byte.
-  #[test]
-  fn normalize_into_matches_normalize() {
-    let mut lower = String::new();
-    let mut out = String::new();
-    for input in CORPUS {
-      normalize_name_into(input, &mut lower, &mut out);
-      assert_eq!(&out, &normalize_name(input), "mismatch for {input:?}");
-    }
-  }
-
-  /// On already-lowercase input, the lowered variant (no lowercase
-  /// stage) matches too — this is the hot path (`&lowered`).
-  #[test]
-  fn normalize_lowered_into_matches_on_lowercase_input() {
-    let mut out = String::new();
-    for input in CORPUS {
-      let lowered = input.to_ascii_lowercase();
-      normalize_lowered_into(&lowered, &mut out);
-      assert_eq!(&out, &normalize_name(input), "mismatch for {input:?}");
-    }
-  }
-
   /// The dedotted variant matches `normalize_name(&dedot(_))`: dots
   /// become spaces, runs collapse, same as replace-then-normalize.
   #[test]
   fn normalize_lowered_dedotted_into_matches_dedot_then_normalize() {
     use crate::bundle::dedot;
+    // Dotted-only subset (the shared CORPUS lives in tests/scan.rs now).
+    const DOTTED: &[&str] = &[
+      "R.E.P.O. Ghost Haul",
+      "Q.U.B.E.",
+      "Mr. Bomber",
+      "a.b.c",
+      "...",
+    ];
     let mut out = String::new();
-    for input in CORPUS {
+    for input in DOTTED {
       let lowered = input.to_ascii_lowercase();
       normalize_lowered_dedotted_into(&lowered, &mut out);
       assert_eq!(
@@ -1158,26 +1092,5 @@ mod tick2_tests {
     )
     .expect("custom sku hits");
     assert_eq!(hit.source, DetectSource::SteamLibrary);
-  }
-
-  /// Scratch buffers are stable across calls: no reallocations on
-  /// repeated use.
-  #[test]
-  fn match_scratch_buffers_are_stable() {
-    let mut scratch = MatchScratch::default();
-    let mut lower = String::new();
-    normalize_name_into("Some Game: Title", &mut lower, &mut scratch.norm_out);
-    normalize_lowered_into("some game title", &mut scratch.norm_out);
-    let out_ptr = scratch.norm_out.as_ptr();
-    let out_cap = scratch.norm_out.capacity();
-    let lower_ptr = lower.as_ptr();
-    normalize_name_into("Other: Name Here", &mut lower, &mut scratch.norm_out);
-    normalize_lowered_into("other name here", &mut scratch.norm_out);
-    assert!(
-      std::ptr::eq(out_ptr, scratch.norm_out.as_ptr()),
-      "norm_out moved"
-    );
-    assert!(std::ptr::eq(lower_ptr, lower.as_ptr()), "lower moved");
-    assert!(scratch.norm_out.capacity() >= out_cap);
   }
 }

@@ -18,10 +18,11 @@ use crate::types::Exec;
 /// biggest per-process I/O cost.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppIdMemo {
-  /// Verified: this pid has no SteamAppId. Valid until invalidated.
-  Absent(u64),
+  /// Verified: this pid has no SteamAppId. Valid until invalidated or the
+  /// pid is recycled (start time mismatch).
+  Absent(u64, u64),
   /// Verified SteamAppId, valid under the same rules.
-  Present(u64, String),
+  Present(u64, String, u64),
   /// Never read, or invalidated by EXEC: read environ, then store the
   /// outcome — unless the sequence moved under us (racing EXEC), in
   /// which case the stale read is discarded, never stored.
@@ -42,6 +43,9 @@ impl ProcessServer {
     // Fast paths: verified memos, cloned once straight into the return.
     // `Absent` is the common case (non-Steam processes) and performs no
     // I/O at all; only `Stale` falls through to the environ read below.
+    // A stored memo is only served when the pid's start time still
+    // matches — a recycled pid (same number, new process) must not
+    // inherit the dead process's AppId.
     let memo = self
       .appid_cache
       .lock()
@@ -49,8 +53,18 @@ impl ProcessServer {
       .get(&pid)
       .cloned();
     let seq0 = match memo {
-      Some(AppIdMemo::Present(_, id)) => return Some(id),
-      Some(AppIdMemo::Absent(_)) => return None,
+      Some(AppIdMemo::Present(seq, id, start_time)) => {
+        if crate::proc_start::process_start_ms(pid) == Some(start_time) {
+          return Some(id);
+        }
+        seq
+      }
+      Some(AppIdMemo::Absent(seq, start_time)) => {
+        if crate::proc_start::process_start_ms(pid) == Some(start_time) {
+          return None;
+        }
+        seq
+      }
       Some(AppIdMemo::Stale(seq)) => seq,
       None => 0,
     };
@@ -65,9 +79,10 @@ impl ProcessServer {
       _ => false,
     };
     if fresh {
+      let start_time = crate::proc_start::process_start_ms(pid).unwrap_or(0);
       let memo = match id.clone() {
-        Some(id) => AppIdMemo::Present(seq0, id),
-        None => AppIdMemo::Absent(seq0),
+        Some(id) => AppIdMemo::Present(seq0, id, start_time),
+        None => AppIdMemo::Absent(seq0, start_time),
       };
       cache.insert(pid, memo);
     }
@@ -101,7 +116,7 @@ impl ProcessServer {
       .entry(pid)
       .and_modify(|entry| {
         let seq = match entry {
-          AppIdMemo::Absent(seq) | AppIdMemo::Present(seq, _) | AppIdMemo::Stale(seq) => *seq,
+          AppIdMemo::Absent(seq, _) | AppIdMemo::Present(seq, _, _) | AppIdMemo::Stale(seq) => *seq,
         };
         *entry = AppIdMemo::Stale(seq.wrapping_add(1));
       })
