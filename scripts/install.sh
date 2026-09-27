@@ -28,6 +28,8 @@ APP="rsrpc-cli"
 # Release-signing pubkey (same key the binary itself embeds for OTA).
 PUBKEY="RWT97nYjybg6X/Q35LBD/thrjkAmYmEHbRm8TQjvpJeLO2kNONgb4ibw"
 
+[ -n "$HOME" ] || die "HOME is not set"
+
 BIN_DIR="${HOME}/.local/bin"
 UNIT_DIR="${HOME}/.config/systemd/user"
 UNIT_NAME="rsrpc.service"
@@ -54,6 +56,12 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+# Keep only the 3 newest backups matching the pattern; older ones accumulate
+# without bound otherwise.
+prune_backups() {
+  ls -t "$1".bak-* 2>/dev/null | tail -n +4 | xargs -r rm -f
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) YES=1 ;;
@@ -68,6 +76,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ -n "$TAG" ]; then
+  [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid tag format: $TAG"
+fi
 
 # confirm works under `curl | bash` (stdin is the script): read from tty.
 confirm() {
@@ -95,7 +107,7 @@ esac
 if [ -z "$TAG" ]; then
   log "resolving newest release..."
   TAG="$(curl -fsSL --max-time 30 "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4)"
+    | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4 || true)"
   [ -n "$TAG" ] || die "could not resolve the newest tag (network/API?)"
 fi
 log "release: $TAG ($TRIPLE)"
@@ -177,14 +189,20 @@ if [ -n "$INSTALLED_VERSION" ]; then
 fi
 
 mkdir -p "$BIN_DIR"
-STAMP="$(date +%Y%m%d-%H%M%S)"
+# PID suffix: two runs within the same second would otherwise stamp
+# identically and the second cp -a would destroy the first run's backup.
+STAMP="$(date +%Y%m%d-%H%M%S)-$$"
 [ -f "${BIN_DIR}/${APP}" ] && cp -a "${BIN_DIR}/${APP}" "${BIN_DIR}/${APP}.bak-${STAMP}" && log "backed up binary"
-cp -a "$WORK/$APP" "${BIN_DIR}/${APP}"
+# mv (rename) replaces atomically — cp onto a running ELF fails with
+# ETXTBSY on Linux, breaking the documented re-run-to-update flow.
+mv -f "$WORK/$APP" "${BIN_DIR}/${APP}"
 if [ "$NO_SYSTEMD" -eq 0 ]; then
   mkdir -p "$UNIT_DIR"
   [ -f "${UNIT_DIR}/${UNIT_NAME}" ] && cp -a "${UNIT_DIR}/${UNIT_NAME}" "${UNIT_DIR}/${UNIT_NAME}.bak-${STAMP}" && log "backed up unit"
   cp -a "$UNIT" "${UNIT_DIR}/${UNIT_NAME}"
 fi
+prune_backups "${BIN_DIR}/${APP}"
+prune_backups "${UNIT_DIR}/${UNIT_NAME}"
 log "installed ${BIN_DIR}/${APP} (${TAG})"
 
 # Opt-in stays opt-in: --yes keeps the default (off); only an explicit
