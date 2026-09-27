@@ -20,7 +20,8 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::frame::{IpcFacilitator, handle_stream};
+use crate::dispatch::handle_stream;
+use crate::frame::IpcFacilitator;
 use crate::sink::{DEFAULT_IPC_QUEUE, EventSink};
 
 /// Upper bound for graceful connection drain in [`IpcTransport::shutdown`].
@@ -256,13 +257,24 @@ impl Drop for IpcTransport {
   }
 }
 
+/// Security descriptor for the named pipe: owner-only full access via
+/// SDDL `D:(A;;GA;;;OW)`. The default (`SecurityDescriptor::default()`)
+/// produces a NULL DACL — every local user and process can open the pipe
+/// and spoof presence. Owner-only restricts `connect()` to the pipe
+/// creator under a normal DACL.
+fn owner_only_security_descriptor() -> SecurityDescriptor {
+  use widestring::u16cstr;
+  SecurityDescriptor::deserialize(u16cstr!("D:(A;;GA;;;OW)"))
+    .expect("SDDL parses to a security descriptor")
+}
+
 /// Bind the first free pipe name.
 fn create_pipe() -> Result<(Listener, String)> {
   for tries in 0..=9_u8 {
     let pipe_path = format!("{PIPE_BASE}-{tries}");
     let listener = ListenerOptions::new()
       .name(pipe_path.clone().to_fs_name::<NamedPipe>()?)
-      .security_descriptor(SecurityDescriptor::default());
+      .security_descriptor(owner_only_security_descriptor());
     match listener.create_sync() {
       Ok(socket) => {
         tracing::info!("[ipc] Created IPC socket: {pipe_path}");
@@ -314,8 +326,15 @@ fn accept_loop(
         std::thread::sleep(Duration::from_millis(50));
       }
       Err(err) => {
-        tracing::error!("[ipc] Accept loop dying, no new game connections: {err}");
-        break;
+        tracing::warn!("[ipc] Accept failed: {err}");
+        match err.kind() {
+          // Transient per-connection failures: retry at once, like the
+          // Unix accept loop.
+          std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::Interrupted => {}
+          // Persistent readiness errors (fd exhaustion): back off briefly
+          // instead of hot-spinning — never kill the loop over one error.
+          _ => std::thread::sleep(Duration::from_millis(50)),
+        }
       }
     }
   }
@@ -323,9 +342,11 @@ fn accept_loop(
 
 /// Cap on concurrent Windows IPC pumps: each parks a `spawn_blocking`
 /// thread in a blocking pump, and the CLI runtime allows 32 blocking
-/// threads — past this, peers are dropped at once instead of starving
-/// the pool (or the process) under connection floods.
-const MAX_PUMPS: usize = 32;
+/// threads total — the accept loop and the bind task also park one each,
+/// so the cap stays at 31 to leave headroom. Past this, peers are dropped
+/// at once instead of starving the pool (or the process) under connection
+/// floods.
+const MAX_PUMPS: usize = 31;
 
 struct DispatchCtx {
   stream_rx: mpsc::Receiver<interprocess::local_socket::Stream>,

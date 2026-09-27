@@ -973,3 +973,290 @@ async fn disallowed_origin_is_refused_before_ready() {
 
   transport.shutdown().await;
 }
+
+/// M1: a disabled `set_activity` must still earn the lock-step reply (an
+/// echo) — never forward to the sink.
+#[tokio::test]
+async fn disabled_set_activity_replies_without_forwarding() {
+  let (transport, mut rx) = WsTransport::bind(config().set_activity(false), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+
+  ws.send(tungstenite::Message::Text(SET_ACTIVITY.into()))
+    .await
+    .unwrap();
+
+  let reply = read_text(&mut ws).await;
+  assert_eq!(reply["cmd"], "SET_ACTIVITY");
+  assert_eq!(reply["nonce"], "1");
+  assert_eq!(reply["evt"], serde_json::Value::Null);
+  // Nothing reaches the sink while the command is disabled.
+  assert!(rx.try_recv().is_err());
+
+  transport.shutdown().await;
+}
+
+/// M1: disabled secondary events still earn the lock-step ACK (same shape
+/// the IPC transport answers) — never forward to the sink.
+#[tokio::test]
+async fn disabled_secondary_events_reply_without_forwarding() {
+  let (transport, mut rx) = WsTransport::bind(config().secondary_events(false), user())
+    .await
+    .unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+
+  let invite = r#"{"cmd":"INVITE_BROWSER","args":{"code":"abc"},"nonce":"7"}"#;
+  ws.send(tungstenite::Message::Text(invite.into()))
+    .await
+    .unwrap();
+
+  let reply = read_text(&mut ws).await;
+  assert_eq!(reply["cmd"], "INVITE_BROWSER");
+  assert_eq!(reply["nonce"], "7");
+  assert_eq!(reply["data"], serde_json::Value::Null);
+  assert_eq!(reply["evt"], serde_json::Value::Null);
+  // Nothing reaches the sink while secondary events are disabled.
+  assert!(rx.try_recv().is_err());
+
+  transport.shutdown().await;
+}
+
+/// M2: `SET_ACTIVITY` without `args` is malformed — the client gets the
+/// official 4005 error (IPC parity) and nothing is forwarded as a clear.
+#[tokio::test]
+async fn set_activity_without_args_is_an_error_not_a_clear() {
+  let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+
+  let malformed = r#"{"cmd":"SET_ACTIVITY","nonce":"9"}"#;
+  ws.send(tungstenite::Message::Text(malformed.into()))
+    .await
+    .unwrap();
+
+  let reply = read_text(&mut ws).await;
+  assert_eq!(reply["cmd"], "SET_ACTIVITY");
+  assert_eq!(reply["nonce"], "9");
+  assert_eq!(reply["evt"], "ERROR");
+  assert_eq!(reply["data"]["code"], 4005);
+  assert_eq!(reply["data"]["message"], "Missing activity args");
+  // Malformed input must never become a clear downstream.
+  assert!(rx.try_recv().is_err());
+
+  transport.shutdown().await;
+}
+
+/// A message over the 1 MiB `max_message_size` cap is rejected: the
+/// connection drops without a reply and nothing reaches the sink.
+#[tokio::test]
+async fn oversize_message_is_rejected_without_sink_traffic() {
+  let (transport, mut rx) = WsTransport::bind(config(), user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut ws = connect(port, "?v=1&encoding=json&client_id=test-app").await;
+  let _ready = read_text(&mut ws).await;
+
+  // One ASCII char over the default 1 MiB cap. The send itself may fail
+  // once the server resets the connection mid-write — either outcome is
+  // a rejection, so the result is ignored.
+  let big = format!(
+    r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":42,"activity":{{"name":"{}","type":0}}}},"nonce":"1"}}"#,
+    "x".repeat(1024 * 1024)
+  );
+  let _ = ws.send(tungstenite::Message::Text(big.into())).await;
+
+  // The server refuses the oversized frame: close, reset or EOF —
+  // never a lock-step reply.
+  match tokio::time::timeout(TIMEOUT, ws.next()).await.unwrap() {
+    Some(Ok(tungstenite::Message::Close(_))) | None | Some(Err(_)) => {}
+    other => panic!("oversize message must be rejected, got {other:?}"),
+  }
+  assert!(
+    rx.try_recv().is_err(),
+    "an oversize message must never reach the sink"
+  );
+
+  transport.shutdown().await;
+}
+
+/// Raw TCP websocket client: completes the HTTP upgrade, then reads
+/// server frames. `tokio-tungstenite` auto-answers pings internally, so
+/// observing the server's keepalive requires reading raw frames.
+struct RawTcpClient {
+  stream: tokio::net::TcpStream,
+  buffer: Vec<u8>,
+}
+
+impl RawTcpClient {
+  /// Connect and complete the HTTP upgrade; assert the 101 response.
+  async fn connect(port: u16, query: &str) -> Self {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+      .await
+      .expect("connect");
+    let request = format!(
+      "GET /{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    );
+    stream
+      .write_all(request.as_bytes())
+      .await
+      .expect("write request");
+    let mut response = Vec::new();
+    loop {
+      let mut chunk = [0u8; 1024];
+      let n = stream.read(&mut chunk).await.expect("read response");
+      assert!(n > 0, "server closed handshake prematurely");
+      response.extend_from_slice(&chunk[..n]);
+      if response.windows(4).any(|w| w == b"\r\n\r\n") {
+        break;
+      }
+    }
+    assert!(
+      response.starts_with(b"HTTP/1.1 101"),
+      "expected 101, got {}",
+      String::from_utf8_lossy(&response)
+    );
+    Self {
+      stream,
+      buffer: Vec::new(),
+    }
+  }
+
+  /// Next frame's opcode (1 = text, 9 = ping). Server frames unmasked.
+  async fn next_opcode(&mut self) -> u8 {
+    use tokio::io::AsyncReadExt;
+    loop {
+      if self.buffer.len() >= 2 {
+        let opcode = self.buffer[0] & 0x0F;
+        let len = self.buffer[1] & 0x7F;
+        let (header, payload_len) = if len < 126 {
+          (2, len as usize)
+        } else if len == 126 {
+          if self.buffer.len() < 4 {
+            continue;
+          }
+          (
+            4,
+            u16::from_be_bytes([self.buffer[2], self.buffer[3]]) as usize,
+          )
+        } else {
+          if self.buffer.len() < 10 {
+            continue;
+          }
+          let mut bytes = [0u8; 8];
+          bytes.copy_from_slice(&self.buffer[2..10]);
+          (10, u64::from_be_bytes(bytes) as usize)
+        };
+        if self.buffer.len() >= header + payload_len {
+          self.buffer.drain(..header + payload_len);
+          return opcode;
+        }
+      }
+      let mut chunk = [0u8; 4096];
+      let n = self.stream.read(&mut chunk).await.expect("read frame");
+      assert!(n > 0, "server closed the connection");
+      self.buffer.extend_from_slice(&chunk[..n]);
+    }
+  }
+}
+
+/// The server pings idle clients on its keepalive interval: several
+/// Ping frames must arrive within the budget, keeping the connection
+/// alive.
+#[tokio::test]
+async fn keepalive_pings_keep_idle_connection_alive() {
+  let config = WsTransportConfig::new(0, 0).keepalive_interval(Duration::from_millis(50));
+  let (transport, _rx) = WsTransport::bind(config, user()).await.unwrap();
+  let port = transport.bound_port();
+
+  let mut raw = RawTcpClient::connect(port, "?v=1&encoding=json&client_id=ka").await;
+  // READY arrives first as a text frame.
+  assert_eq!(raw.next_opcode().await, 1);
+  // Within the 5s budget, several 50ms-interval pings must arrive.
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  let mut pings = 0;
+  while pings < 3 {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let opcode = tokio::time::timeout(remaining, raw.next_opcode())
+      .await
+      .expect("keepalive ping deadline");
+    if opcode == 9 {
+      pings += 1;
+    }
+  }
+
+  transport.shutdown().await;
+}
+
+/// A stalled reader is pruned by the reply send-timeout (250ms); once
+/// pruned, the pump's capacity is back: a fresh connection is fully
+/// served. (The send result is ignored — a reset mid-flood is also a
+/// rejection.)
+#[tokio::test]
+async fn send_timeout_prune_recovers_pump_capacity() {
+  let config = WsTransportConfig::new(0, 0).per_client_queue(1);
+  let (transport, mut rx) = WsTransport::bind(config, user()).await.unwrap();
+  let port = transport.bound_port();
+
+  // Flood without ever reading — not even READY. The outbox backs up,
+  // every reply times out after 250ms, and the pump prunes the client.
+  let mut stalled = connect(port, "?v=1&encoding=json&client_id=stalled").await;
+  let big = format!(
+    r#"{{"cmd":"SET_ACTIVITY","args":{{"pid":42,"activity":{{"name":"{}","type":0}}}},"nonce":"1"}}"#,
+    "x".repeat(16 * 1024)
+  );
+  for _ in 0..5000 {
+    let sent = tokio::time::timeout(
+      Duration::from_millis(50),
+      stalled.send(tungstenite::Message::Text(big.clone().into())),
+    )
+    .await;
+    if !matches!(sent, Ok(Ok(()))) {
+      break;
+    }
+  }
+
+  // The prune clears the stalled client's published pid at the sink.
+  let deadline = std::time::Instant::now() + TIMEOUT;
+  loop {
+    let cmd = next_cmd(&mut rx).await;
+    if cmd.cmd == "SET_ACTIVITY"
+      && cmd.args.as_ref().and_then(|a| a.pid) == Some(42)
+      && cmd
+        .args
+        .as_ref()
+        .and_then(|a| a.activity.as_ref())
+        .is_none()
+    {
+      break;
+    }
+    assert!(
+      std::time::Instant::now() < deadline,
+      "send-timeout prune must clear the stalled client's pid"
+    );
+  }
+
+  // Capacity recovered: a fresh client connects and is fully served.
+  let mut fresh = connect(port, "?v=1&encoding=json&client_id=fresh").await;
+  let ready = read_text(&mut fresh).await;
+  assert_eq!(ready["evt"], "READY");
+  fresh
+    .send(tungstenite::Message::Text(
+      r#"{"cmd":"GET_USER","nonce":"u1"}"#.into(),
+    ))
+    .await
+    .unwrap();
+  let reply = read_text(&mut fresh).await;
+  assert_eq!(reply["cmd"], "GET_USER");
+
+  transport.shutdown().await;
+}

@@ -12,6 +12,9 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 /// Default bound per game-client outbox (mirrors `rsrpc-ws` default).
 pub const DEFAULT_PER_CLIENT_QUEUE: usize = 64;
 
+/// Default server-side ping interval (matches `rsrpc-ws`'s default).
+pub const DEFAULT_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Game WebSocket transport configuration.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -30,6 +33,8 @@ pub struct WsTransportConfig {
   pub max_connections: usize,
   /// Bound per game-client outbox.
   pub per_client_queue: usize,
+  /// Interval between server-side keepalive pings.
+  pub keepalive_interval: std::time::Duration,
 }
 
 impl WsTransportConfig {
@@ -45,6 +50,7 @@ impl WsTransportConfig {
       event_queue: DEFAULT_EVENT_QUEUE,
       max_connections: DEFAULT_MAX_CONNECTIONS,
       per_client_queue: DEFAULT_PER_CLIENT_QUEUE,
+      keepalive_interval: DEFAULT_KEEPALIVE_INTERVAL,
     }
   }
 
@@ -82,6 +88,13 @@ impl WsTransportConfig {
     self.per_client_queue = n;
     self
   }
+
+  /// Interval between server-side keepalive pings. Must be non-zero.
+  #[must_use]
+  pub fn keepalive_interval(mut self, d: std::time::Duration) -> Self {
+    self.keepalive_interval = d;
+    self
+  }
 }
 
 #[cfg(test)]
@@ -97,5 +110,9 @@ mod tests {
     assert_eq!(config.event_queue, DEFAULT_EVENT_QUEUE);
     assert_eq!(config.max_connections, DEFAULT_MAX_CONNECTIONS);
     assert_eq!(config.per_client_queue, DEFAULT_PER_CLIENT_QUEUE);
+    assert_eq!(
+      config.keepalive_interval, DEFAULT_KEEPALIVE_INTERVAL,
+      "keepalive default must match rsrpc-ws's"
+    );
   }
 }

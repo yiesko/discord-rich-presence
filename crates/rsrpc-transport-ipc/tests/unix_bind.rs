@@ -229,6 +229,52 @@ async fn full_client_flow_over_real_socket() {
   transport.shutdown().await;
 }
 
+/// The Close-frame clear carries the published nonce verbatim — the
+/// facilitator stores it unquoted (`on_close` wraps it in `Value::String`),
+/// so a double-encoding regression shows up as `"\"nonce\""` here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_clear_carries_the_published_nonce_unencoded() {
+  let scratch = Scratch::new("nonce");
+  let dir = scratch.sub("a");
+
+  let (transport, mut rx) = IpcTransport::bind_with_dirs(user(), vec![dir])
+    .await
+    .unwrap();
+  let mut client = UnixStream::connect(transport.socket_path()).expect("connect");
+  client
+    .set_read_timeout(Some(Duration::from_secs(5)))
+    .expect("timeout");
+  write_frame(
+    &mut client,
+    PacketType::Handshake,
+    r#"{"v":1,"client_id":"game-1"}"#,
+  );
+  let (packet_type, body) = read_frame(&mut client);
+  assert_eq!(packet_type, 1);
+  assert!(body.contains("READY"), "expected READY, got: {body}");
+
+  write_frame(
+    &mut client,
+    PacketType::Frame,
+    r#"{"cmd":"SET_ACTIVITY","args":{"pid":9,"activity":{"name":"G","type":0}},"nonce":"nonce-close-1"}"#,
+  );
+  let (_, echo) = read_frame(&mut client);
+  assert!(echo.contains("SET_ACTIVITY"));
+  let published = recv_cmd(&mut rx);
+  assert_eq!(published.nonce, serde_json::json!("nonce-close-1"));
+
+  write_frame(&mut client, PacketType::Close, "{}");
+  let clear = recv_cmd(&mut rx);
+  assert_eq!(clear.cmd, "SET_ACTIVITY");
+  assert_eq!(
+    clear.nonce,
+    serde_json::json!("nonce-close-1"),
+    "close clear must carry the published nonce, not double-encode it"
+  );
+
+  transport.shutdown().await;
+}
+
 /// A connected-but-silent peer parks its pump in a blocking read: shutdown
 /// must still return promptly (closing the socket unblocks the read)
 /// instead of stalling out the full drain deadline.

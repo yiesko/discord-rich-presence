@@ -21,7 +21,8 @@ use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::frame::{IpcFacilitator, handle_stream};
+use crate::dispatch::handle_stream;
+use crate::frame::IpcFacilitator;
 use crate::paths::{
   fanout_socket_link, remove_socket_links, socket_dir_candidates, socket_file_name,
 };
@@ -278,6 +279,7 @@ impl IpcTransport {
   pub async fn shutdown(mut self) {
     self.token.cancel();
     if let Some(task) = self.accept_task.take() {
+      task.abort();
       let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     }
     // Close every live socket first: pumps parked in blocking reads exit
@@ -464,11 +466,19 @@ async fn accept_loop(
         // the pump's read); the pump unregisters itself on exit, bounding
         // the list during normal operation.
         let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
-        if let Ok(probe) = std_stream.try_clone() {
-          live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((conn_id, probe));
+        match std_stream.try_clone() {
+          Ok(probe) => {
+            live
+              .lock()
+              .unwrap_or_else(|e| e.into_inner())
+              .push((conn_id, probe));
+          }
+          Err(err) => {
+            tracing::warn!(
+              "[ipc] Failed to clone socket for connection {conn_id}: {err} — \
+               pump will run but shutdown cannot force-close its socket"
+            );
+          }
         }
         let live_exit = Arc::clone(&live);
         // Short critical section: spawn_blocking is synchronous. Exited

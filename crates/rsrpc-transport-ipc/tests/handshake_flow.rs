@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use common::{read_frame, recv_cmd, write_frame};
 use rsrpc_transport_ipc::EventSink;
-use rsrpc_transport_ipc::frame::{IpcFacilitator, PacketType, handle_stream};
+use rsrpc_transport_ipc::dispatch::handle_stream;
+use rsrpc_transport_ipc::frame::{IpcFacilitator, PacketType};
 use rsrpc_types::cmd::ActivityCmd;
 use rsrpc_types::user::RpcUser;
 

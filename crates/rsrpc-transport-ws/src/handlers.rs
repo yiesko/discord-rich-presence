@@ -6,7 +6,7 @@
 //! bounded wait: the shared pump must never park behind one reader that
 //! stopped draining.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -138,6 +138,33 @@ pub(crate) async fn handle_connections_callback(
   reply(responder, Message::Text(response.into())).await
 }
 
+/// ACK a known secondary command without forwarding it (transport configured
+/// with `secondary_events: false`): lock-step clients must receive *some*
+/// reply or hang. Same `generic_ack` shape the IPC transport answers.
+pub(crate) async fn ack_without_forward(event: &ActivityCmd, responder: &Responder) -> bool {
+  reply(
+    responder,
+    Message::Text(commands::generic_ack(event).into()),
+  )
+  .await
+}
+
+/// Reject a malformed `SET_ACTIVITY` (no `args`) with the official-shaped
+/// error, matching the IPC transport's 4005: lock-step clients must receive
+/// *some* reply or hang, and a missing `args` is never a clear.
+pub(crate) async fn handle_malformed_set_activity(
+  event: &ActivityCmd,
+  responder: &Responder,
+) -> bool {
+  reply(
+    responder,
+    Message::Text(
+      commands::rpc_error(&event.cmd, &event.nonce, 4005, "Missing activity args").into(),
+    ),
+  )
+  .await
+}
+
 /// Blind-ACK a subscription (no voice/guild backend exists; clients wait
 /// for the lock-step reply).
 pub(crate) async fn handle_subscribe(event: &ActivityCmd, responder: &Responder) -> bool {
@@ -205,7 +232,7 @@ pub(crate) async fn handle_set_activity(
   query_client_id: Option<&str>,
   responder: &Responder,
   sink: &Sink,
-  pending_clears: &Mutex<Vec<PendingClear>>,
+  pending_clears: &Mutex<VecDeque<PendingClear>>,
   forward: Forward,
 ) -> (bool, bool) {
   // Fall back to the client_id provided on connect (query param) when the
@@ -220,13 +247,13 @@ pub(crate) async fn handle_set_activity(
   event.fix();
   let delivered = match forward {
     Forward::Direct => sink.emit(event.clone()).await,
-    // Staged publishes stay tracked: the disconnect path flushes them
-    // before its own clears, so a never-delivered publish degrades to a
-    // harmless clear of an unshown card (ignored downstream).
+    // Staged clears are only queued, not delivered — report false so the
+    // pump keeps the pid tracked; the disconnect path flushes remaining
+    // staged clears before its own, so nothing ghosts.
     Forward::Staged => {
       sink.stage_clear(pending_clears, event.clone());
       sink.flush_pending(pending_clears);
-      true
+      false
     }
     Forward::Refused => false,
   };
@@ -257,6 +284,9 @@ pub(crate) struct PublishedSlot {
 /// new pids are refused before forwarding (see `note_published`), so every
 /// forwarded card stays tracked and disconnect cleanup stays complete —
 /// nothing ghosts, nothing is ever cleared while live.
+///
+/// INTENTIONAL DUPLICATION: mirrors `rsrpc-transport-ipc`'s `frame` module.
+/// Keep both values in sync (see note there for why they are not shared).
 pub(crate) const MAX_TRACKED_PIDS: usize = 16;
 
 /// Build the clear command emitted when a published pid dies.

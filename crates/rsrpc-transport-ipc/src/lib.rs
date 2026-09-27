@@ -13,6 +13,7 @@
 //!   the boot-time snapshot path.
 //! - Bounded queues shed counted instead of parking connection threads.
 
+pub mod dispatch;
 pub mod frame;
 pub mod sink;
 
@@ -33,5 +34,5 @@ pub use unix::IpcTransport;
 #[cfg(windows)]
 pub use windows::IpcTransport;
 
-pub use frame::send_empty;
+pub use dispatch::send_empty;
 pub use sink::{DEFAULT_IPC_QUEUE, EventSink};
