@@ -1,0 +1,79 @@
+# libFuzzer dictionary for the JSON-structure targets (activity_full,
+# db_parse). One token per line; inner quotes are escaped. These tokens let
+# the fuzzer discover valid JSON framing and the activity-command field
+# names instead of guessing them byte-by-byte.
+
+# JSON punctuation
+"{\""
+"\","
+"\":"
+"\"["
+"\"]"
+"\"{"
+"\"}"
+
+# ActivityCmd fields (snake_case)
+"\"application_id\":"
+"\"cmd\":"
+"\"args\":"
+"\"data\":"
+"\"evt\":"
+"\"nonce\":"
+
+# ActivityCmdArgs fields
+"\"pid\":"
+"\"activity\":"
+"\"code\":"
+"\"user_id\":"
+
+# Activity fields
+"\"id\":"
+"\"name\":"
+"\"buttons\":"
+"\"type\":"
+"\"url\":"
+"\"created_at\":"
+"\"session_id\":"
+"\"platform\":"
+"\"supported_platforms\":"
+"\"timestamps\":"
+"\"details\":"
+"\"details_url\":"
+"\"state\":"
+"\"state_url\":"
+"\"sync_id\":"
+"\"instance\":"
+"\"status_display_type\":"
+"\"flags\":"
+"\"emoji\":"
+"\"party\":"
+"\"assets\":"
+"\"secrets\":"
+"\"metadata\":"
+
+# Nested objects
+"\"start\":"
+"\"end\":"
+"\"large_image\":"
+"\"large_text\":"
+"\"small_image\":"
+"\"small_text\":"
+"\"large_url\":"
+"\"small_url\":"
+"\"join\":"
+"\"spectate\":"
+"\"match\":"
+"\"size\":"
+"\"privacy\":"
+"\"button_urls\":"
+"\"artist_ids\":"
+"\"album_id\":"
+"\"context_uri\":"
+"\"animated\":"
+
+# Common command values
+"\"SET_ACTIVITY\""
+"\"GET_USER\""
+"\"INVITE_BROWSER\""
+"\"GUILD_TEMPLATE_BROWSER\""
+"\"GIFT_CODE_BROWSER\""

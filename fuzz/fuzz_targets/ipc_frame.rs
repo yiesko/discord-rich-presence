@@ -4,7 +4,8 @@ use std::io::{Cursor, Read, Write};
 
 use libfuzzer_sys::fuzz_target;
 use rsrpc_transport_ipc::EventSink;
-use rsrpc_transport_ipc::frame::{IpcFacilitator, MAX_IPC_PAYLOAD, PacketType, handle_stream};
+use rsrpc_transport_ipc::dispatch::handle_stream;
+use rsrpc_transport_ipc::frame::{IpcFacilitator, MAX_IPC_PAYLOAD, PacketType};
 use rsrpc_types::user::RpcUser;
 
 // Per-connection state with a drain-free sink: the queue is oversized so

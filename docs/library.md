@@ -10,7 +10,7 @@ your own future completes.
 
 ```toml
 [dependencies]
-rsrpc-core = { git = "https://github.com/yiesko/discord-rich-presence", tag = "v0.36.0" }
+rsrpc-core = { git = "https://github.com/yiesko/discord-rich-presence", tag = "v0.37.0" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
 ```
 
@@ -18,7 +18,7 @@ Add `rsrpc-detect` from the same repository if you need to name
 `DetectableActivity` yourself (to build entries by hand, for example):
 
 ```toml
-rsrpc-detect = { git = "https://github.com/yiesko/discord-rich-presence", tag = "v0.36.0" }
+rsrpc-detect = { git = "https://github.com/yiesko/discord-rich-presence", tag = "v0.37.0" }
 ```
 
 ## Minimal example

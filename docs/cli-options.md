@@ -97,17 +97,17 @@ detected under Proton/Wine. Details:
 
 ```bash
 ./rsrpc-cli --list-detected
-# [rsrpc] Database: bundled (24299 entries)
+# [rsrpc] Database: bundled (entry count grows with each release)
 # How to Fish (id 1542021058834468927) pid 1234
 ```
 
 ```bash
 ./rsrpc-cli --list-database
-# [rsrpc] Database: bundled (24299 entries)
-# 24299 database entries, 11229 executables
+# [rsrpc] Database: bundled (entry count grows with each release)
+# <N> database entries, <M> executables
 # Overwatch (356875221078245376)
 # ...
-# ... and 24289 more
+# ... and <N-10> more
 ```
 
 When nothing matches, `--list-detected` prints
@@ -134,7 +134,7 @@ These have no command-line flag:
 | `RSRPC_USER_ID`, `RSRPC_USER_USERNAME`, `RSRPC_USER_GLOBAL_NAME`, `RSRPC_USER_DISCRIMINATOR`, `RSRPC_USER_AVATAR` | Change the identity rsRPC reports to clients. Blank values are ignored. |
 | `RSRPC_OTA_DIR` | Where updates are staged (default `~/.cache/rsrpc/ota/`). |
 | `RSRPC_STEAM_ROOT` | Point at a specific Steam install directory. |
-| `RSRPC_STEAM_LIBRARIES` | Point at specific Steam library folders (`:`-separated). |
+| `RSRPC_STEAM_LIBRARIES` | Point at specific Steam library folders (platform path list: `:`-separated on Unix, `;`-separated on Windows). |
 | `RUST_LOG` | Full `tracing` filter; overrides the `--debug`/`RSRPC_DEBUG` choice (see below). |
 
 ## Logging
