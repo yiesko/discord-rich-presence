@@ -55,7 +55,13 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: Generate detectable snapshot
-        run: cargo run --manifest-path tools/updater/Cargo.toml
+        run: |
+          # Best-effort: a transient Discord endpoint failure must not
+          # fail every matrix leg. On failure the build embeds the
+          # committed snapshot instead — warn and carry on.
+          if ! cargo run --manifest-path tools/updater/Cargo.toml; then
+            echo "::warning::detectable snapshot fetch failed; building with the committed snapshot"
+          fi
 
       - name: (Linux) ARM sources.list
         if: matrix.config.target == 'aarch64-unknown-linux-gnu' || matrix.config.target == 'armv7-unknown-linux-gnueabihf'
@@ -133,7 +139,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
@@ -217,7 +223,6 @@ jobs:
 
       - name: Create release using all artifacts
         uses: softprops/action-gh-release@5113cdc90fd4d541c801c55356214017bf5ae34b # v3
-        if: github.event_name != 'schedule'
         with:
           files: |
             rsrpc*.zip

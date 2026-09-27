@@ -40,6 +40,12 @@ jobs:
       - name: Shell syntax check
         run: bash -n scripts/install.sh && bash -n scripts/uninstall.sh
 
+      - name: ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/install.sh scripts/uninstall.sh
+
   rustfmt:
     runs-on: ubuntu-22.04
 
@@ -54,6 +60,10 @@ jobs:
 
       - name: Rustfmt check
         run: cargo fmt --manifest-path ./Cargo.toml --all -- --check
+
+      # tools/updater declares its own [workspace], so --all above skips it.
+      - name: Rustfmt check (tools/updater)
+        run: cargo fmt --manifest-path tools/updater/Cargo.toml -- --check
 
   clippy:
     runs-on: ${{ matrix.platform }}
@@ -77,6 +87,10 @@ jobs:
 
       - name: Clippy check
         run: cargo clippy --manifest-path ./Cargo.toml --workspace --all-targets --locked -- -D warnings
+
+      # tools/updater declares its own [workspace], so --workspace above skips it.
+      - name: Clippy check (tools/updater)
+        run: cargo clippy --manifest-path tools/updater/Cargo.toml --all-targets --locked -- -D warnings
 
   test:
     runs-on: ${{ matrix.platform }}
@@ -128,10 +142,16 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       # audit-check@v2 targets Node 20 (deprecated runner treadmill);
-      # cargo-audit directly has no Node dependency. Installed version
-      # is cached above, so only the first run pays the build.
+      # cargo-audit directly has no Node dependency. The binary lives in
+      # ~/.cargo/bin, which Swatinem/rust-cache restores — skip the install
+      # entirely on a cache hit instead of paying the rebuild every run.
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: |
+          if command -v cargo-audit >/dev/null 2>&1; then
+            echo "cargo-audit already installed, skipping"
+          else
+            cargo install cargo-audit --locked
+          fi
 
       - name: Security audit (all workspaces)
         run: |

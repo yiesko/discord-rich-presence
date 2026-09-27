@@ -47,6 +47,13 @@ jobs:
       # make week-to-week runs incomparable.
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
 
+      # Cache the compiled cargo-fuzz binary (~/.cargo/bin) and the registry
+      # so nightly runs don't rebuild the toolchain from source every time.
+      - name: Cache cargo-fuzz
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: fuzz -> fuzz
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
@@ -58,11 +65,11 @@ jobs:
           restore-keys: fuzz-corpus-
 
       - name: Fuzz ipc_frame
-        run: cargo fuzz run ipc_frame -- -max_total_time=600
+        run: cargo fuzz run ipc_frame -- -max_total_time=600 -max_len=4096
         timeout-minutes: 15
 
       - name: Fuzz activity_full
-        run: cargo fuzz run activity_full -- -max_total_time=600
+        run: cargo fuzz run activity_full -- -max_total_time=600 -dict=fuzz/dict/activity.dict
         timeout-minutes: 15
 
       - name: Fuzz trim_db
@@ -70,5 +77,15 @@ jobs:
         timeout-minutes: 15
 
       - name: Fuzz db_parse
-        run: cargo fuzz run db_parse -- -max_total_time=600
+        run: cargo fuzz run db_parse -- -max_total_time=600 -dict=fuzz/dict/activity.dict
         timeout-minutes: 15
+
+      # save-always: a target crash (the point of the job) fails the job,
+      # and actions/cache otherwise skips the save — losing the corpus
+      # accumulated during the run, including the new paths it covered.
+      - name: Save corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+        save-always: true
